@@ -296,7 +296,7 @@ def run_pulse_sim(
     
     # Make the Hamiltonian list
     
-    num_sim_levels = psi0.shape[0]
+    num_sim_levels = psi0.dims[0][0]
     
     h_int, h_drive = make_rwa_hamiltonian(qubits,
                                           params,
