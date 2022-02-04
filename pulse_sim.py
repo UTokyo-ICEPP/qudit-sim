@@ -520,6 +520,12 @@ def find_heff(
     save_result_to: Optional[str] = None
 ) -> np.ndarray:
     """Run a pulse simulation with constant drives and extract the Pauli components of the effective Hamiltonian.
+    
+    QuTiP `sesolve` applied to the identity matrix will give the time evolution operator :math:`U_H(t)` according
+    to the rotating-wave Hamiltonian :math:`H` at each time point. If an effective Hamiltonian 
+    :math:`H_{\mathrm{eff}}` is to be found, the evolution should be approximatable with
+    :math:`\exp(-i H_{\mathrm{eff}} t)`. This function takes the matrix-log of calculated :math:`U_H(t)`, extracts
+    the Pauli coefficients at each time point, and performs a linear fit to each coefficient as a function of time.
 
     Args:
         qubits: List of qudits to include in the Hamiltonian.
@@ -528,11 +534,13 @@ def find_heff(
             each channel must be a constant expression (float or string).
         num_sim_levels: Number of oscillator levels in the simulation.
         comp_dim: Dimensionality of the computational space.
+        fit_tol: Tolerance factor for the linear fit. The function tries to iteratively find a time interval
+            where the best fit line `f(t)` satisfies `abs(sum(U(t) - f(t)) / sum(U(t))) < fit_tol`.
         save_result_to: File name (without the extension) to save the simulation and extraction results to.
         
     Returns:
         An array with the value at index `[i, j, ..]` corresponding to the coefficient of
-        :math:`\lambda_i \otimes \lambda_j \otimes \dots` of the effective Hamiltonian.
+            :math:`\lambda_i \otimes \lambda_j \otimes \dots` of the effective Hamiltonian.
     """
     
     ## Validate and format the input
@@ -591,9 +599,7 @@ def find_heff(
         
     tmax = min(tmax_min, tmax_max)
     
-    # Will only consider t up to this discontinuity from now on
-    
-    heff_t = (eigcols[:tmax] * np.tile(np.expand_dims(omega_t[:tmax], axis=1), (1, omega_t.shape[1], 1))) @ eigrows[:tmax]
+    heff_t = (eigcols * np.tile(np.expand_dims(omega_t, axis=1), (1, omega_t.shape[1], 1))) @ eigrows
     
     ## Extract the (generalized) Pauli components
     
@@ -603,26 +609,38 @@ def find_heff(
     # Compute the inner product (trace of matrix product) with the prod_basis at each time point
     # Implicitly using the 17-qubit limit in assuming that the indices of the basis won't reach x
     qubit_indices = string.ascii_letters[:num_qubits]
-    pauli_coeffs_t = np.einsum(f'txy,{qubit_indices}yx->t{qubit_indices}', heff_t[:tmax], prod_basis).real
+    pauli_coeffs_t = np.einsum(f'txy,{qubit_indices}yx->t{qubit_indices}', heff_t, prod_basis).real
 
     if save_result_to:
         with h5py.File(f'{save_result_to}.h5', 'w') as out:
-            out.create_dataset('pauli_coeffs_t', data=pauli_coeffs_t)
+            out.create_dataset('omega', data=omega_t)
+            out.create_dataset('eigcols', data=eigcols)
+            out.create_dataset('pauli_coeffs', data=pauli_coeffs_t)
+            out.create_dataset('tlist', data=result.times)
+            out.create_dataset('tmax', data=np.array([tmax]))
     
     ## Do a linear fit to each component
     
     num_paulis = paulis.shape[0]
     
-    pauli_coeffs = np.zeros(num_paulis ** num_qubits)
+    pauli_coeffs = np.zeros(pauli_coeffs_t.shape[1:])
+    
+    time_series_list = pauli_coeffs_t.reshape(-1, num_paulis ** num_qubits).T
 
     line = lambda a, x: a * x
-    for ic, coeffs_t in enumerate(pauli_coeffs_t.reshape(num_paulis ** num_qubits, tmax)):
+    for ic, coeffs_t in enumerate(time_series_list):
         # Iteratively determine the interval that yields a fit within tolerance
         xdata = result.times[:tmax]
-        ydata = coeffs_t
+        ydata = coeffs_t[:tmax]
+        min_residual = None
         while True:
             popt, _ = sciopt.curve_fit(line, xdata, ydata)
-            if abs(np.sum(ydata - popt[0] * xdata) / np.sum(ydata)) < fit_tol:
+            
+            residual = abs(np.sum(ydata - popt[0] * xdata) / np.sum(ydata))
+            if min_residual is None or residual < min_residual:
+                min_residual = residual
+                
+            if residual < fit_tol:
                 break
                 
             start = int(xdata.shape[0] * 0.1)
@@ -630,14 +648,15 @@ def find_heff(
             xdata = xdata[start:end]
             ydata = ydata[start:end]
             if xdata.shape[0] <= 10:
-                sys.stderr.write(f'Linear fit for {ic}th pauli coefficient did not yield a reliable result.'
-                                'Run the function again with the save_result_to option and check the raw output.\n')
+                sys.stderr.write(f'Linear fit for {ic}th pauli coefficient did not yield a reliable result'
+                                 f' (minimum residual = {min_residual}). Run the function with the'
+                                 ' save_result_to option and check the raw output.\n')
                 popt = np.array([0.])
                 break
                 
-        pauli_coeffs[ic] = popt[0]
+        pauli_coeffs.reshape(-1)[ic] = popt[0]
 
-    return pauli_coeffs.reshape(*([num_paulis] * num_qubits))
+    return pauli_coeffs
 
 
 def find_gate(
