@@ -1,4 +1,5 @@
-from typing import Any, Dict, Tuple, Sequence
+from typing import Any, Dict, List, Tuple, Sequence, Optional, Union
+import sys
 import copy
 import string
 import numpy as np
@@ -15,15 +16,25 @@ class DriveExprGen:
         self.base_amplitude = np.zeros(num_channels)
         self.base_phase = np.zeros(num_channels)
         
+    def __str__(self):
+        return (f'DriveExprGen: num_channels = {self.num_channels}, base_frequency = {self.base_frequency},\n'
+            f'base_amplitude = {self.base_amplitude},\nbase_phase = {self.base_phase}')
+    
+    def __repr__(self):
+        return self.__str__()
+        
     def generate(
         self,
-        drive_def: Dict[int, Dict[str, Any]]) -> Tuple[str, str]:
+        drive_def: Dict[int, Dict[str, Any]]
+    ) -> Tuple[str, str]:
         """Generate the time-dependent coefficient expression for H_cos and H_sin
         
         Args:
-            drive_def: Drive definition. Outer dict has the channel id as key and a dict of form
-                {'frequency': freq_value, 'phase': phase_value, 'envelope': envelope_func_str}. Arguments
-                phase and envelope are optional; if ommitted they default to 0 and '1'.
+            drive_def: Drive definition. Outer dict maps a channel id to a dict of form
+                {'frequency': freq_value, 'phase': phase_value, 'amplitude': amplitude}. Argument
+                `'amplitude'` can be a float or a string defining a C++ function of t and will be
+                multiplied to `self.base_amplitude[channel]`. Arguments `'phase'` and `'amplitude'`
+                are optional; if ommitted they default to 0 and 1.
                 
         Returns:
             coeff_cos (str): Expression for H_cos
@@ -40,14 +51,17 @@ class DriveExprGen:
             frequency = self.base_frequency - def_dict['frequency']
             
             try:
-                envelope = def_dict["envelope"]
+                amp_factor = def_dict["amplitude"]
             except KeyError:
                 amplitude = f'{self.base_amplitude[ich]}'
             else:
-                if type(envelope) is str and 't' in envelope:
-                    amplitude = f'{self.base_amplitude[ich]} * ({envelope})'
+                if isinstance(amp_factor, str):
+                    if 't' in amplitude:
+                        amplitude = f'{self.base_amplitude[ich]} * ({amp_factor})'
+                    else:
+                        amplitude = f'({self.base_amplitude[ich] * eval(amp_factor)})'
                 else:
-                    amplitude = f'({self.base_amplitude[ich] * envelope})'
+                    amplitude = f'({self.base_amplitude[ich] * amp_factor})'
 
             try:
                 phase = self.base_phase[ich] - def_dict['phase']
@@ -93,13 +107,29 @@ class DriveExprGen:
                     sin_terms.append(f'{amplitude} * sin({frequency} * t + {phase})')
             
         return ' + '.join(cos_terms), ' + '.join(sin_terms)
+    
+    def max_frequency(
+        self,
+        drive_def: Dict[int, Dict[str, Any]]
+    ) -> float:
+        """Return the maximum frequency for the drive def."""
+        
+        frequency = 0.
+        
+        for ich, def_dict in drive_def.items():
+            if self.base_amplitude[ich] == 0.:
+                continue
             
+            frequency = max(frequency, abs(self.base_frequency - def_dict['frequency']))
+            
+        return frequency
 
-def make_rwa_hamiltonian(
+
+def make_hamiltonian_components(
     qubits: Sequence[int],
     params: Dict[str, Any],
-    crosstalk_matrix: np.ndarray,
-    num_levels: int = 2) -> Tuple[list, list]:
+    num_levels: int = 2
+) -> Tuple[list, list]:
     r"""Construct the rotating-wave approximation Hamiltonian in the qudit frame.
 
     **Full Hamiltonian:**
@@ -159,21 +189,21 @@ def make_rwa_hamiltonian(
     .. math::
     
         \tilde{H}_{\mathrm{int}} = \sum_{jk} J_{jk} \left( e^{i \delta_{jk} t} e^{i [\Delta_j (N_j - 1) - \Delta_k N_k] t} b_j^{\dagger} b_k \right. \\
-        \left. e^{-i \delta_{jk} t} e^{-i [\Delta_j N_j - \Delta_k (N_k - 1)] t} b_j b_k^{\dagger} \right).
+        \left. + e^{-i \delta_{jk} t} e^{-i [\Delta_j N_j - \Delta_k (N_k - 1)] t} b_j b_k^{\dagger} \right).
 
     The drive Hamiltonian is
     
     .. math::
     
         \tilde{H}_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \Omega_j s_j (t) \cos (\nu_j t + \psi_j) \left( e^{i (\omega_k t + \phi_{jk})} e^{i \Delta_k (N_k - 1) t} b_k^{\dagger} \right. \\
-        \left. e^{-i (\omega_k t + \phi_{jk})} e^{-i \Delta_k N_k t} b_k \right),
+        \left. + e^{-i (\omega_k t + \phi_{jk})} e^{-i \Delta_k N_k t} b_k \right),
     
     and with rotating wave approximation
     
     .. math::
     
         \bar{H}_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} s_j (t) \left( e^{i (\epsilon_{kj} t + \phi_{jk} - \psi_j)} e^{i \Delta_k (N_k - 1) t} b_k^{\dagger} \right. \\
-        \left. e^{-i (\epsilon_{kj} t + \phi_{jk} - \psi_j)} e^{-i \Delta_k N_k t} b_k \right),
+        \left. + e^{-i (\epsilon_{kj} t + \phi_{jk} - \psi_j)} e^{-i \Delta_k N_k t} b_k \right),
         
     where :math:`\epsilon_{kj} = \omega_k - \nu_j`.
     
@@ -194,27 +224,34 @@ def make_rwa_hamiltonian(
     and exploit such cases in the future.
     
     Args:
-        qubits: List of qudits to include in the Hamiltonian.
-        params: Hamiltonian parameters given by IBMQ `backend.configuration().hamiltonian['vars']`.
-        crosstalk_matrix: Crosstalk factor matrix. Element `[i, j]` corresponds to :math:`\alpha_{jk} e^{i\phi_{jk}}`.
+        qubits: List of :math:`n` qudits to include in the Hamiltonian.
+        params: Hamiltonian parameters given by IBMQ `backend.configuration().hamiltonian['vars']`, optionally augmented with
+            `'crosstalk'` whose value is an `ndarray` with shape (:math:`n`, :math:`n`) and dtype `complex128`.
+            Element `[i, j]` of the matrix corresponds to :math:`\alpha_{jk} e^{i\phi_{jk}}`.
         num_levels: Number of oscillator levels to consider.
 
     Returns:
-        h_int (list): Interaction term Hamiltonians. List of n_coupling elements. Each element is a list of three-tuples
-            (freq, H_cos, H_sin), where freq is the frequency for the given term. The inner list runs over
-            different combinations of creations and annihilations for various qudit levels. H_cos and H_sin
+        h_int (list): Interaction term components. List of n_coupling elements. Each element is a three-tuple
+            (freq, H_cos, H_sin), where freq is the frequency for the given term. H_cos and H_sin
             are the coupling Hamiltonians proportional to the "cosine" and "sine" parts of the oscillating coefficients.
-        h_drive (list): Drive term Hamiltonians. List of n_qubits elements. Each element is a list of three-tuples
+        h_drive (list): Drive term components. List of n_qubits elements. Each element is a three-tuple
             (expr_gen, H_cos, H_sin), where expr_gen is an instance of DriveExprGen.
     """
+    ## Validate and format the input
     
-    if type(qubits) is int:
+    if isinstance(qubits, int):
         qubits = (qubits,)
         
     num_qubits = len(qubits)
     
-    assert crosstalk_matrix.shape == (num_qubits, num_qubits)
-    assert np.all(np.diagonal(crosstalk_matrix) == 1.+0.j)
+    if 'crosstalk' in params:
+        assert params['crosstalk'].shape == (num_qubits, num_qubits), 'Invalid shape of crosstalk matrix'
+        assert np.all(np.diagonal(params['crosstalk']) == 1.+0.j), 'Diagonal of crosstalk matrix must be unity'
+    else:
+        params = copy.deepcopy(params)
+        params['crosstalk'] = np.eye(num_qubits, dtype=np.complex128)
+
+    ## Compute the interaction term components
 
     h_int = []
     
@@ -245,6 +282,8 @@ def make_rwa_hamiltonian(
 
                     h_int.append((freq, h_cos, h_sin))
 
+    ## Compute the drive term components
+                    
     h_drive = []
     
     omega_over_two = np.array(list(params[f'omegad{ch}'] for ch in qubits)) / 2.
@@ -258,52 +297,31 @@ def make_rwa_hamiltonian(
 
             expr_gen = DriveExprGen(num_qubits)
             expr_gen.base_frequency = (params[f'wq{qubit}'] + params[f'delta{qubit}'] * level)
-            expr_gen.base_amplitude[:] = np.abs(crosstalk_matrix[:, iq]) * omega_over_two
-            expr_gen.base_phase[:] = np.angle(crosstalk_matrix[:, iq])
+            expr_gen.base_amplitude[:] = np.abs(params['crosstalk'][:, iq]) * omega_over_two
+            expr_gen.base_phase[:] = np.angle(params['crosstalk'][:, iq])
                 
             h_drive.append((expr_gen, h_cos, h_sin))
 
     return h_int, h_drive
 
 
-def run_pulse_sim(
-    qubits: Sequence[int],
-    params: Dict[str, Any],
-    crosstalk_matrix: np.ndarray,
-    drive_def: Dict[int, Dict[str, Any]],
-    psi0: qtp.Qobj = qtp.basis(2, 0),
-    tlist: Optional[np.ndarray] = None,
-    save_result_to: Optional[str] = None) -> qtp.solver.Result:
-    """Run a pulse simulation and return the final state Qobj.
-
+def build_pulse_hamiltonian(
+    h_int: Sequence[Tuple[float, qtp.Qobj, qtp.Qobj]],
+    h_drive: Sequence[Tuple[DriveExprGen, qtp.Qobj, qtp.Qobj]],
+    drive_def: Dict[int, Dict[str, Any]]
+) -> List[Union[qtp.Qobj, Tuple[qtp.Qobj, str]]]:
+    """Build the list of Hamiltonian terms to be passed to the QuTiP solver from a drive pulse definition.
+    
     Args:
-        qubits: List of qudits to include in the Hamiltonian.
-        params: Hamiltonian parameters given by IBMQ `backend.configuration().hamiltonian['vars']`.
-        crosstalk_matrix: Crosstalk factor matrix. Element `[i, j]` corresponds to :math:`\alpha_{jk} e^{i\phi_{jk}}`.
-        drive_def: Drive definition. Outer dict has the channel id as key and a dict of form
-                `{'frequency': freq_value, 'phase': phase_value, 'envelope': envelope_func_str}`. Arguments `phase` and
-                `envelope` are optional; if ommitted they default to 0 and '1'.
-        psi0: Initial state Qobj.
-        tlist: Time points to use in the simulation.
-        save_result_to: File name (without the extension) to save the simulation result to.
-
+        h_int: List of interaction term components returned by `make_hamiltonian_components`.
+        h_drive: List of drive term components returned by `make_hamiltonian_components`.
+        drive_def: Drive definition. See the docstring of DriveExprGen for details.
+    
     Returns:
-        Result of running `qutip.sesolve`.
+        List of Hamiltonian terms.
     """
-
-    if type(qubits) is int:
-        qubits = (qubits,)
-    
-    # Make the Hamiltonian list
-    
-    num_sim_levels = psi0.dims[0][0]
-    
-    h_int, h_drive = make_rwa_hamiltonian(qubits,
-                                          params,
-                                          crosstalk_matrix,
-                                          num_sim_levels)
-    
     hamiltonian = []
+    static_term = qtp.Qobj()
     
     for freq, h_cos, h_sin in h_int:
         hamiltonian.append((h_cos, f'cos({freq} * t)'))
@@ -316,45 +334,198 @@ def run_pulse_sim(
             if 't' in coeff_cos:
                 hamiltonian.append((h_cos, coeff_cos))
             else:
-                hamiltonian.append(eval(coeff_cos) * h_cos)
+                static_term += (eval(coeff_cos) * h_cos)
                 
         if coeff_sin:
             if 't' in coeff_sin:
                 hamiltonian.append((h_sin, coeff_sin))
             else:
-                hamiltonian.append(eval(coeff_sin) * h_sin)
-            
-    if tlist is None:
-        # List of time slices not given; default to 100 cycles under the first frequency in h_int
-        # and 10 time slices per cycle
-        tlist = np.linspace(0., 2. * np.pi / h_int[0][0] * 100, 1000)
+                static_term += (eval(coeff_sin) * h_sin)
+                
+    if static_term.shape != (1, 1):
+        # Static term doesn't really have to be at position 0 but QuTiP recommends doing so
+        hamiltonian.insert(0, static_term)
+
+    return hamiltonian
+
+
+def make_tlist(
+    h_int: Sequence[Tuple[float, qtp.Qobj, qtp.Qobj]],
+    h_drive: Sequence[Tuple[DriveExprGen, qtp.Qobj, qtp.Qobj]],
+    drive_def: Dict[int, Dict[str, Any]],
+    points_per_cycle: int,
+    num_cycles: int
+) -> np.ndarray:
+    """Generate a list of time points using the maximum frequency in the Hamiltonian.
+    
+    Args:
+        h_int: List of interaction term components returned by `make_hamiltonian_components`.
+        h_drive: List of drive term components returned by `make_hamiltonian_components`.
+        drive_def: Drive definition. See the docstring of DriveExprGen for details.
+        points_per_cycle: Number of points per cycle at the highest frequency.
+        num_cycles: Number of overall cycles.
         
-    result = qtp.sesolve(hamiltonian, psi0, tlist)
+    Returns:
+        Array of time points.
+    """
+    frequency_list = list(abs(freq) for freq, _, _ in h_int)
+    frequency_list.extend(expr_gen.max_frequency(drive_def) for expr_gen, _, _ in h_drive)
+    max_frequency = max(frequency_list)
+
+    if max_frequency == 0.:
+        # Single qubit resonant drive -> static Hamiltonian
+        coeff_cos, coeff_sin = h_drive[0][0].generate(drive_def)
+        amp2 = eval(coeff_cos) ** 2. if coeff_cos else 0.
+        amp2 += eval(coeff_sin) ** 2. if coeff_sin else 0.
+        tlist = np.linspace(0., 2. * np.pi / np.sqrt(amp2), points_per_cycle * num_cycles)
+    else:
+        tlist = np.linspace(0., 2. * np.pi / max_frequency * num_cycles, points_per_cycle * num_cycles)
+        
+    return tlist
+
+
+def run_pulse_sim(
+    qubits: Sequence[int],
+    params: Dict[str, Any],
+    drive_def: Dict[int, Dict[str, Any]],
+    psi0: qtp.Qobj = qtp.basis(2, 0),
+    tlist: Union[np.ndarray, Tuple[int, int]] = (10, 100),
+    e_ops: Optional[Sequence[Any]] = None,
+    options: Optional[qtp.solver.Options] = None,
+    save_result_to: Optional[str] = None
+) -> qtp.solver.Result:
+    """Run a pulse simulation.
+
+    Args:
+        qubits: List of qudits to include in the Hamiltonian.
+        params: Hamiltonian parameters. See the docstring of make_hamiltonian_components for details.
+        drive_def: Drive definition. See the docstring of DriveExprGen for details.
+        psi0: Initial state Qobj.
+        tlist: Time points to use in the simulation or a pair `(points_per_cycle, num_cycles)` where in the latter
+            case the cycle of the fastest oscillating term in the Hamiltonian will be used.
+        e_ops: List of observables passed to the QuTiP solver.
+        options: QuTiP solver options.
+        save_result_to: File name (without the extension) to save the simulation result to.
+
+    Returns:
+        Result of running `qutip.sesolve`.
+    """
+
+    if isinstance(qubits, int):
+        qubits = (qubits,)
+    
+    # Make the Hamiltonian list
+    
+    num_sim_levels = psi0.dims[0][0]
+    
+    h_int, h_drive = make_hamiltonian_components(
+        qubits, params,
+        num_levels=num_sim_levels)
+    
+    hamiltonian = build_pulse_hamiltonian(h_int, h_drive, drive_def)
+    
+    if isinstance(tlist, tuple):
+        # List of time slices not given; define using the highest frequency in the Hamiltonian.
+        tlist = make_tlist(h_int, h_drive, drive_def, *tlist)
+    
+    result = qtp.sesolve(hamiltonian, psi0, tlist, e_ops=e_ops, options=options)
     
     if save_result_to:
         qtp.fileio.qsave(result, save_result_to)
         
     return result
+
+
+def make_generalized_paulis(
+    comp_dim: int = 2,
+    matrix_dim: Optional[int] = None
+) -> np.ndarray:
+    """Return a list of normalized generalized Pauli matrices of given dimension as a numpy array.
     
+    Args:
+        comp_dim: Dimension of the Pauli matrices.
+        matrix_dim: Dimension of the containing matrix, which may be greater than `comp_dim`.
+        
+    Returns:
+        The full list of Pauli matrices as an array of dtype `complex128` and shape
+            `(comp_dim ** 2, matrix_dim, matrix_dim)`.
+    """
     
+    if matrix_dim is None:
+        matrix_dim = comp_dim
+        
+    assert matrix_dim >= comp_dim, 'Matrix dimension cannot be smaller than Pauli dimension'
+    
+    num_paulis = comp_dim ** 2
+    
+    paulis = np.zeros((num_paulis, matrix_dim, matrix_dim), dtype=np.complex128)
+    paulis[0, :comp_dim, :comp_dim] = np.diagflat(np.ones(comp_dim)) / np.sqrt(comp_dim)
+    ip = 1
+    for idim in range(1, comp_dim):
+        for irow in range(idim):
+            paulis[ip, irow, idim] = 1. / np.sqrt(2.)
+            paulis[ip, idim, irow] = 1. / np.sqrt(2.)
+            ip += 1
+            paulis[ip, irow, idim] = -1.j / np.sqrt(2.)
+            paulis[ip, idim, irow] = 1.j / np.sqrt(2.)
+            ip += 1
+
+        paulis[ip, :idim + 1, :idim + 1] = np.diagflat(np.array([1.] * idim + [-idim]))
+        paulis[ip] /= np.sqrt(np.trace(paulis[ip] * paulis[ip]))
+        ip += 1
+        
+    return paulis
+
+
+def make_prod_basis(
+    basis: np.ndarray,
+    num_qubits: int
+) -> np.ndarray:
+    """Return a list of basis matrices of multi-qubit operators.
+    
+    Args:
+        basis: Basis of single-qubit operators. Array with shape
+            `(num_basis, matrix_dim, matrix_dim)`.
+        num_qubits: Number of qubits.
+        
+    Returns:
+        The full list of basis matrices as a single `num_qubits + 2`-dimensional array.
+            The first `num_qubits` dimensions are size `num_basis`, and the last two are
+            size `matrix_dim ** num_qubits`.
+    """
+    # Use of einsum implies that we can deal with at most 52 // 3 = 17 qubits
+    al = string.ascii_letters
+    indices_in = []
+    indices_out = [''] * 3
+    for il in range(0, num_qubits * 3, 3):
+        indices_in.append(al[il:il + 3])
+        indices_out[0] += al[il]
+        indices_out[1] += al[il + 1]
+        indices_out[2] += al[il + 2]
+
+    indices = f'{",".join(indices_in)}->{"".join(indices_out)}'
+    
+    shape = [basis.shape[0]] * num_qubits + [basis.shape[1] ** num_qubits] * 2
+    
+    return np.einsum(indices, *([basis] * num_qubits)).reshape(*shape)
+
+
 def find_heff(
     qubits: Sequence[int],
     params: Dict[str, Any],
-    crosstalk_matrix: np.ndarray,
     drive_def: Dict[int, Dict[str, float]],
     num_sim_levels: int = 2,
     comp_dim: int = 2,
-    save_result_to: Optional[str] = None) -> np.ndarray:
-    """Run a pulse simulation with constant envelopes and extract the Pauli components of the effective Hamiltonian.
+    fit_tol: float = 0.001,
+    save_result_to: Optional[str] = None
+) -> np.ndarray:
+    """Run a pulse simulation with constant drives and extract the Pauli components of the effective Hamiltonian.
 
     Args:
         qubits: List of qudits to include in the Hamiltonian.
-        params: Hamiltonian parameters given by IBMQ `backend.configuration().hamiltonian['vars']`.
-        crosstalk_matrix: Crosstalk factor matrix. Element `[i, j]` corresponds to :math:`\alpha_{jk} e^{i\phi_{jk}}`.
-        drive_def: Drive definition. Outer dict has the channel id as key and a dict of form
-                `{'frequency': freq_value, 'amplitude': amplitude_factor, 'phase': phase_value}`. Note the definition
-                must contain an argument `amplitude` instead of `envelope`. Argument `phase` is optional and defaults
-                to 0 if ommitted.
+        params: Hamiltonian parameters. See the docstring of make_hamiltonian_components for details.
+        drive_def: Drive definition. See the docstring of DriveExprGen for details. Argument `'amplitude'` for
+            each channel must be a constant expression (float or string).
         num_sim_levels: Number of oscillator levels in the simulation.
         comp_dim: Dimensionality of the computational space.
         save_result_to: File name (without the extension) to save the simulation and extraction results to.
@@ -364,45 +535,33 @@ def find_heff(
         :math:`\lambda_i \otimes \lambda_j \otimes \dots` of the effective Hamiltonian.
     """
     
-    assert comp_dim <= num_sim_levels
+    ## Validate and format the input
     
-    if type(qubits) is int:
+    if isinstance(qubits, int):
         qubits = (qubits,)
         
     num_qubits = len(qubits)
-
-    sim_drive_def = copy.deepcopy(drive_def)
+    
+    assert comp_dim <= num_sim_levels, 'Number of levels in simulation cannot be less than computational dimension'
+    
     for key, value in drive_def.items():
-        sim_drive_def[key]['envelope'] = f'{value["amplitude"]}'
+        try:
+            amp_factor = value['amplitude']
+        except KeyError:
+            raise RuntimeError(f'Missing amplitude specification for drive on channel {key}')
 
+        if isinstance(amp_factor, str) and 't' in amp_factor:
+            raise RuntimeError(f'Cannot use time-dependent amplitude (found in channel {key})')
+            
     ## Evolve the identity operator to obtain the time evolution operators
     
     psi0 = qtp.tensor([qtp.qeye(num_sim_levels)] * num_qubits)
-    
-    frequencies = []
-    iq = 0
-    while True:
-        try:
-            freq = params[f'wq{iq}']
-        except KeyError:
-            break
-            
-        frequencies.append(freq)
-        iq += 1
-        
-    frequencies = np.array(frequencies)
-    max_delta = np.amax(np.abs(np.add.outer(frequencies, -frequencies)))
-            
-    # 400 cycles with the maximum frequency difference; 10 points per cycle
-    tlist = np.linspace(0., 2. * np.pi / max_delta * 400, 4000)
 
-    result = run_pulse_sim(qubits,
-                           params,
-                           crosstalk_matrix,
-                           sim_drive_def,
-                           psi0,
-                           tlist,
-                           save_result_to)
+    result = run_pulse_sim(
+        qubits, params, drive_def,
+        psi0=psi0,
+        tlist=(10, 400),
+        save_result_to=save_result_to)
     
     ## Take the log of the time evolution operator
 
@@ -416,7 +575,7 @@ def find_heff(
     omega_min = np.amin(omega_t, axis=1)
     omega_max = np.amax(omega_t, axis=1)
 
-    margin = 0.01
+    margin = 0.1
 
     min_hits_minus_pi = np.asarray(omega_min < -np.pi + margin).nonzero()[0]
     if len(min_hits_minus_pi) == 0:
@@ -432,60 +591,133 @@ def find_heff(
         
     tmax = min(tmax_min, tmax_max)
     
-    # Will only consider t upto this discontinuity from now on
+    # Will only consider t up to this discontinuity from now on
     
     heff_t = (eigcols[:tmax] * np.tile(np.expand_dims(omega_t[:tmax], axis=1), (1, omega_t.shape[1], 1))) @ eigrows[:tmax]
     
     ## Extract the (generalized) Pauli components
     
-    num_paulis = comp_dim ** 2
-    
-    paulis = np.zeros((num_paulis, num_sim_levels, num_sim_levels), dtype=np.complex128)
-    paulis[0, :comp_dim, :comp_dim] = np.diagflat(np.ones(comp_dim)) / np.sqrt(comp_dim)
-    
-    ip = 1
-    unit = 1. / np.sqrt(2.)
-    for idim in range(1, comp_dim):
-        for irow in range(idim):
-            paulis[ip, irow, idim] = unit
-            paulis[ip, idim, irow] = unit
-            ip += 1
-            paulis[ip, irow, idim] = -unit * 1.j
-            paulis[ip, idim, irow] = unit * 1.j
-            ip += 1
+    paulis = make_generalized_paulis(comp_dim, matrix_dim=num_sim_levels)
+    prod_basis = make_prod_basis(paulis, num_qubits)
 
-        paulis[ip, :idim + 1, :idim + 1] = np.diagflat(np.array([1.] * idim + [-idim]))
-        paulis[ip] /= np.sqrt(np.trace(paulis[ip] * paulis[ip]))
-        ip += 1
-
-    # Use of einsum implies that we can deal with at most 52 // 3 = 17 qubits
-    al = string.ascii_letters
-    indices_in = []
-    indices_out = [''] * 3
-    for il in range(0, num_qubits * 3, 3):
-        indices_in.append(al[il:il + 3])
-        indices_out[0] += al[il]
-        indices_out[1] += al[il + 1]
-        indices_out[2] += al[il + 2]
-
-    indices = f'{",".join(indices_in)}->{"".join(indices_out)}'
-    shape = [num_paulis] * num_qubits + [num_sim_levels ** num_qubits] * 2
-    pauli_basis = np.einsum(indices, *([paulis] * num_qubits)).reshape(*shape)
-
+    # Compute the inner product (trace of matrix product) with the prod_basis at each time point
     # Implicitly using the 17-qubit limit in assuming that the indices of the basis won't reach x
-    pauli_coeffs_t = np.einsum(f'txy,{al[:num_qubits]}yx->{al[:num_qubits]}t', heff_t[:tmax], pauli_basis)
-    
+    qubit_indices = string.ascii_letters[:num_qubits]
+    pauli_coeffs_t = np.einsum(f'txy,{qubit_indices}yx->t{qubit_indices}', heff_t[:tmax], prod_basis).real
+
     if save_result_to:
         with h5py.File(f'{save_result_to}.h5', 'w') as out:
             out.create_dataset('pauli_coeffs_t', data=pauli_coeffs_t)
     
-    ## Do a linear fit for each component
+    ## Do a linear fit to each component
+    
+    num_paulis = paulis.shape[0]
     
     pauli_coeffs = np.zeros(num_paulis ** num_qubits)
 
     line = lambda a, x: a * x
     for ic, coeffs_t in enumerate(pauli_coeffs_t.reshape(num_paulis ** num_qubits, tmax)):
-        popt, _ = sciopt.curve_fit(line, tlist[:tmax], coeffs_t)
+        # Iteratively determine the interval that yields a fit within tolerance
+        xdata = result.times[:tmax]
+        ydata = coeffs_t
+        while True:
+            popt, _ = sciopt.curve_fit(line, xdata, ydata)
+            if abs(np.sum(ydata - popt[0] * xdata) / np.sum(ydata)) < fit_tol:
+                break
+                
+            start = int(xdata.shape[0] * 0.1)
+            end = int(xdata.shape[0] * 0.9)
+            xdata = xdata[start:end]
+            ydata = ydata[start:end]
+            if xdata.shape[0] <= 10:
+                sys.stderr.write(f'Linear fit for {ic}th pauli coefficient did not yield a reliable result.'
+                                'Run the function again with the save_result_to option and check the raw output.\n')
+                popt = np.array([0.])
+                break
+                
         pauli_coeffs[ic] = popt[0]
 
     return pauli_coeffs.reshape(*([num_paulis] * num_qubits))
+
+
+def find_gate(
+    qubits: Sequence[int],
+    params: Dict[str, Any],
+    drive_def: Dict[int, Dict[str, float]],
+    tlist: Union[np.ndarray, Tuple[int, int]],
+    num_sim_levels: int = 2,
+    comp_dim: int = 2,
+    save_result_to: Optional[str] = None
+) -> np.ndarray:
+    """Run a pulse simulation and return the log of the resulting unitary.
+    
+    This function computes the time evolution operator :math:`U_{\mathrm{pulse}}` effected by the drive pulse
+    and returns :math:`i \log U_{\mathrm{pulse}}`, projected onto the computational space if the simulation is
+    performed with more levels than computational dimension. The returned value is given as an array of Pauli
+    coefficients.
+
+    Args:
+        qubits: List of qudits to include in the Hamiltonian.
+        params: Hamiltonian parameters. See the docstring of make_hamiltonian_components for details.
+        drive_def: Drive definition. See the docstring of DriveExprGen for details.
+        tlist: Time points to use in the simulation. See the docstring of run_pulse_sim for details.
+        num_sim_levels: Number of oscillator levels in the simulation.
+        comp_dim: Dimensionality of the computational space.
+        save_result_to: File name (without the extension) to save the simulation and extraction results to.
+        
+    Returns:
+        An array with the value at index `[i, j, ..]` corresponding to the coefficient of
+        :math:`\lambda_i \otimes \lambda_j \otimes \dots` in :math:`i log U_{\mathrm{pulse}}`.
+    """
+    
+    ## Validate and format the input
+    
+    if isinstance(qubits, int):
+        qubits = (qubits,)
+        
+    num_qubits = len(qubits)
+    
+    assert comp_dim <= num_sim_levels, 'Number of levels in simulation cannot be less than computational dimension'
+    
+    for key, value in drive_def.items():
+        try:
+            amp_factor = value['amplitude']
+        except KeyError:
+            raise RuntimeError(f'Missing amplitude specification for drive on channel {key}')
+
+        if isinstance(amp_factor, str) and 't' in amp_factor:
+            raise RuntimeError(f'Cannot use time-dependent amplitude (found in channel {key})')
+            
+    ## Evolve the identity operator to obtain the evolution operator corresponding to the pulse
+    
+    psi0 = qtp.tensor([qtp.qeye(num_sim_levels)] * num_qubits)
+
+    result = run_pulse_sim(
+        qubits, params, drive_def,
+        psi0=psi0,
+        tlist=(10, 400),
+        save_result_to=save_result_to)
+    
+    ## Take the log of the evolution operator
+
+    # Apparently sesolve always store the states for all time points regardless of the options..
+    unitary = result.states[-1]
+    
+    eigvals, eigcols = np.linalg.eig(unitary)
+    eigrows = np.conjugate(np.transpose(eigcols))
+    
+    ilog_diagonal = np.diag(-np.angle(eigvals))
+
+    ilog_u = eigcols @ ilog_diagonal @ eigrows
+    
+    ## Extract the (generalized) Pauli components
+    
+    paulis = make_generalized_paulis(comp_dim, matrix_dim=num_sim_levels)
+    prod_basis = make_prod_basis(paulis, num_qubits)
+    
+    # Compute the inner product (trace of matrix product) with the prod_basis at each time point
+    # Implicitly using the 17-qubit limit in assuming that the indices of the basis won't reach x
+    qubit_indices = string.ascii_letters[:num_qubits]
+    pauli_coeffs = np.einsum(f'xy,{qubit_indices}yx->{qubit_indices}', ilog_u, prod_basis).real
+    
+    return pauli_coeffs
