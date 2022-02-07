@@ -6,7 +6,23 @@ def make_generalized_paulis(
     comp_dim: int = 2,
     matrix_dim: Optional[int] = None
 ) -> np.ndarray:
-    """Return a list of normalized generalized Pauli matrices of given dimension as a numpy array.
+    """Return a list of generalized Pauli matrices of given dimension as a numpy array.
+
+    **Note on normalization**
+    
+    Matrices are normalized so that :math:`\mathrm{Tr}(\lambda_i \lambda_j) = 2\delta_{ij}`.
+    Therefore, to extract the coefficient :math:`\nu_{i_1 \dots i_n}` from a linear combination
+    :math:`H = \sum_{\{j_1 \dots j_n\}} \nu_{j_1 \dots j_n} (\lambda_{i_1} \dots \lambda_{i_n})/2^{n-1}`,
+    one needs to compute
+    
+    .. math::
+    
+    \nu_{i_1 \dots i_n} = \mathrm{Tr}\left( H \frac{\lambda_{i_1} \dots \lambda_{i_n}}{2} \right).
+    
+    Also, this normalization implies that for n-dimensions
+    
+    .. math::
+    \lambda^{(n)}_0 = \sqrt{\frac{2}{n}} I_n.
     
     Args:
         comp_dim: Dimension of the Pauli matrices.
@@ -25,20 +41,23 @@ def make_generalized_paulis(
     num_paulis = comp_dim ** 2
     
     paulis = np.zeros((num_paulis, matrix_dim, matrix_dim), dtype=np.complex128)
-    paulis[0, :comp_dim, :comp_dim] = np.diagflat(np.ones(comp_dim)) / np.sqrt(comp_dim)
+    paulis[0, :comp_dim, :comp_dim] = np.diagflat(np.ones(comp_dim))
     ip = 1
     for idim in range(1, comp_dim):
         for irow in range(idim):
-            paulis[ip, irow, idim] = 1. / np.sqrt(2.)
-            paulis[ip, idim, irow] = 1. / np.sqrt(2.)
+            paulis[ip, irow, idim] = 1.
+            paulis[ip, idim, irow] = 1.
             ip += 1
-            paulis[ip, irow, idim] = -1.j / np.sqrt(2.)
-            paulis[ip, idim, irow] = 1.j / np.sqrt(2.)
+            paulis[ip, irow, idim] = -1.j
+            paulis[ip, idim, irow] = 1.j
             ip += 1
 
         paulis[ip, :idim + 1, :idim + 1] = np.diagflat(np.array([1.] * idim + [-idim]))
-        paulis[ip] /= np.sqrt(np.trace(paulis[ip] * paulis[ip]))
         ip += 1
+
+    # Normalization
+    norm = np.trace(paulis @ paulis, axis1=1, axis2=2)
+    paulis *= np.sqrt(2. / norm)[:, np.newaxis, np.newaxis]
         
     return paulis
 
@@ -74,3 +93,66 @@ def make_prod_basis(
     shape = [basis.shape[0]] * num_qubits + [basis.shape[1] ** num_qubits] * 2
     
     return np.einsum(indices, *([basis] * num_qubits)).reshape(*shape)
+
+
+def heff_expr(heff: np.ndarray, symbol: Optional[str] = None) -> str:
+    """Generate a LaTeX expression of the effective Hamiltonian from the Pauli coefficients.
+    
+    The dymamic range of the numerical values of the coefficients is set by the maximum absolute
+    value. For example, if the maximum absolute value is between 1.e+6 and 1.e+9, the coefficients
+    are expressed in MHz, with the minimum of 0.001 MHz. Pauli terms whose coefficients have
+    absolute values below the threshold are ommitted.
+    
+    Args:
+        heff: Array of Pauli coefficients returned by find_heff
+        symbol: Symbol to use instead of :math:`\lambda` for the matrices.
+        
+    Returns:
+        A LaTeX expression string for the effective Hamiltonian.
+    """
+    
+    if symbol is None:
+        if heff.shape[0] == 4:
+            labels = ['I', 'X', 'Y', 'Z']
+        else:
+            labels = list((r'\lambda_{%d}' % i) for i in range(heff.shape[0]))
+    else:
+        labels = list((r'%s_{%d}' % (symbol, i)) for i in range(heff.shape[0]))
+        
+    maxval = np.amax(np.abs(heff))
+    if maxval > 1.e+9:
+        unit = 'GHz'
+        threshold = 2. * np.pi * 1.e+6
+    elif maxval > 1.e+6:
+        unit = 'MHz'
+        threshold = 2. * np.pi * 1.e+3
+    elif maxval > 1.e+3:
+        unit = 'kHz'
+        threshold = 2. * np.pi * 1.
+        
+    norm = threshold * 1.e+3
+    
+    expr = ''
+    
+    for index in np.ndindex(heff.shape):
+        coeff = heff[index]
+        if abs(coeff) < threshold:
+            continue
+            
+        if coeff < 0.:
+            expr += ' - '
+        elif expr:
+            expr += ' + '
+            
+        if len(heff.shape) == 1:
+            expr += f'{abs(coeff) / norm:.3f}{labels[index[0]]}'
+        else:
+            oper = ''.join(labels[i] for i in index)
+            if len(heff.shape) == 2:
+                denom = '2'
+            else:
+                denom = '2^{%d}' % (len(heff.shape) - 1)
+                
+            expr += f'{abs(coeff) / norm:.3f}' + (r'\frac{%s}{%s}' % (oper, denom))
+        
+    return (r'\frac{H_{\mathrm{eff}}}{2 \pi \mathrm{%s}} = ' % unit) + expr

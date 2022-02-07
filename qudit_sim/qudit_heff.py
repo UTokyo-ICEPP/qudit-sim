@@ -39,7 +39,7 @@ def find_heff(
         
     Returns:
         An array with the value at index `[i, j, ..]` corresponding to the coefficient of
-            :math:`\lambda_i \otimes \lambda_j \otimes \dots` of the effective Hamiltonian.
+            :math:`(\lambda_i \otimes \lambda_j \otimes \dots)/2^{n-1}` of the effective Hamiltonian.
     """
     
     ## Validate and format the input
@@ -98,7 +98,7 @@ def find_heff(
         
     tmax = min(tmax_min, tmax_max)
     
-    heff_t = (eigcols * np.tile(np.expand_dims(omega_t, axis=1), (1, omega_t.shape[1], 1))) @ eigrows
+    heff_t = (eigcols * np.tile(omega_t[:, np.newaxis], (1, omega_t.shape[1], 1))) @ eigrows
     
     ## Extract the (generalized) Pauli components
     
@@ -109,6 +109,8 @@ def find_heff(
     # Implicitly using the 17-qubit limit in assuming that the indices of the basis won't reach x
     qubit_indices = string.ascii_letters[:num_qubits]
     pauli_coeffs_t = np.einsum(f'txy,{qubit_indices}yx->t{qubit_indices}', heff_t, prod_basis).real
+    # Divide the trace by two to account for the normalization of the generalized Paulis
+    pauli_coeffs_t /= 2.
 
     if save_result_to:
         with h5py.File(f'{save_result_to}.h5', 'w') as out:
@@ -117,6 +119,8 @@ def find_heff(
             out.create_dataset('pauli_coeffs', data=pauli_coeffs_t)
             out.create_dataset('tlist', data=result.times)
             out.create_dataset('tmax', data=np.array([tmax]))
+            out.create_dataset('fit_range', shape=(pauli_coeffs_t.shape[1:] + (2,)), dtype='i')
+            out.create_dataset('fit_residual', shape=pauli_coeffs_t.shape[1:], dtype='f8')
     
     ## Do a linear fit to each component
     
@@ -124,15 +128,28 @@ def find_heff(
     
     pauli_coeffs = np.zeros(pauli_coeffs_t.shape[1:])
     
-    time_series_list = pauli_coeffs_t.reshape(-1, num_paulis ** num_qubits).T
+    # This is probably not the most numpythonic way of indexing the array..
+    time_series_list = pauli_coeffs_t.reshape(pauli_coeffs_t.shape[0], np.prod(pauli_coeffs.shape)).T
 
     line = lambda a, x: a * x
     for ic, coeffs_t in enumerate(time_series_list):
+        icm = np.unravel_index(ic, pauli_coeffs.shape)
+        
         # Iteratively determine the interval that yields a fit within tolerance
-        xdata = result.times[:tmax]
-        ydata = coeffs_t[:tmax]
+        start = 0
+        end = tmax
         min_residual = None
         while True:
+            xdata = result.times[start:end]
+            ydata = coeffs_t[start:end]
+            
+            if xdata.shape[0] <= 10:
+                sys.stderr.write(f'Linear fit for {ic}th pauli coefficient did not yield a reliable result'
+                                 f' (minimum residual = {min_residual}). Run the function with the'
+                                 ' save_result_to option and check the raw output.\n')
+                popt = np.array([0.])
+                break
+            
             popt, _ = sciopt.curve_fit(line, xdata, ydata)
             
             residual = abs(np.sum(ydata - popt[0] * xdata) / np.sum(ydata))
@@ -140,20 +157,17 @@ def find_heff(
                 min_residual = residual
                 
             if residual < fit_tol:
+                if save_result_to:
+                    with h5py.File(f'{save_result_to}.h5', 'a') as out:
+                        out['fit_range'][icm] = [start, end]
+                        out['fit_residual'][icm] = residual
+                    
                 break
                 
             start = int(xdata.shape[0] * 0.1)
             end = int(xdata.shape[0] * 0.9)
-            xdata = xdata[start:end]
-            ydata = ydata[start:end]
-            if xdata.shape[0] <= 10:
-                sys.stderr.write(f'Linear fit for {ic}th pauli coefficient did not yield a reliable result'
-                                 f' (minimum residual = {min_residual}). Run the function with the'
-                                 ' save_result_to option and check the raw output.\n')
-                popt = np.array([0.])
-                break
                 
-        pauli_coeffs.reshape(-1)[ic] = popt[0]
+        pauli_coeffs[icm] = popt[0]
 
     return pauli_coeffs
 
@@ -237,5 +251,7 @@ def find_gate(
     # Implicitly using the 17-qubit limit in assuming that the indices of the basis won't reach x
     qubit_indices = string.ascii_letters[:num_qubits]
     pauli_coeffs = np.einsum(f'xy,{qubit_indices}yx->{qubit_indices}', ilog_u, prod_basis).real
+    # Divide the trace by two to account for the normalization of the generalized Paulis
+    pauli_coeffs_t /= 2.
     
     return pauli_coeffs
