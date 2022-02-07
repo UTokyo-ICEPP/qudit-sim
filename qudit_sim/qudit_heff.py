@@ -15,8 +15,9 @@ def find_heff(
     drive_def: Dict[int, Dict[str, float]],
     num_sim_levels: int = 2,
     comp_dim: int = 2,
-    fit_tol: float = 0.001,
-    save_result_to: Optional[str] = None
+    fit_tol: float = 0.01,
+    save_result_to: Optional[str] = None,
+    warn_fit_failure: bool = True
 ) -> np.ndarray:
     """Run a pulse simulation with constant drives and extract the Pauli components of the effective Hamiltonian.
     
@@ -119,6 +120,7 @@ def find_heff(
             out.create_dataset('pauli_coeffs', data=pauli_coeffs_t)
             out.create_dataset('tlist', data=result.times)
             out.create_dataset('tmax', data=np.array([tmax]))
+            out.create_dataset('fit_success', shape=pauli_coeffs_t.shape[1:], dtype='i')
             out.create_dataset('fit_range', shape=(pauli_coeffs_t.shape[1:] + (2,)), dtype='i')
             out.create_dataset('fit_residual', shape=pauli_coeffs_t.shape[1:], dtype='f8')
     
@@ -144,9 +146,18 @@ def find_heff(
             ydata = coeffs_t[start:end]
             
             if xdata.shape[0] <= 10:
-                sys.stderr.write(f'Linear fit for {ic}th pauli coefficient did not yield a reliable result'
-                                 f' (minimum residual = {min_residual}). Run the function with the'
-                                 ' save_result_to option and check the raw output.\n')
+                if warn_fit_failure:
+                    sys.stderr.write(f'Linear fit for coefficient of {icm} did not yield a'
+                                     f' reliable result (minimum residual = {min_residual}).\n')
+                
+                if save_result_to:
+                    with h5py.File(f'{save_result_to}.h5', 'a') as out:
+                        out['fit_success'][icm] = 0
+                        out['fit_range'][icm] = [start, end]
+                        out['fit_residual'][icm] = residual
+                elif warn_fit_failure:
+                    sys.stderr.write(' Run the function with the save_result_to option and'
+                                     ' check the raw output.\n')
                 popt = np.array([0.])
                 break
             
@@ -159,13 +170,14 @@ def find_heff(
             if residual < fit_tol:
                 if save_result_to:
                     with h5py.File(f'{save_result_to}.h5', 'a') as out:
+                        out['fit_success'][icm] = 1
                         out['fit_range'][icm] = [start, end]
                         out['fit_residual'][icm] = residual
                     
                 break
                 
-            start = int(xdata.shape[0] * 0.1)
-            end = int(xdata.shape[0] * 0.9)
+            start += int(xdata.shape[0] * 0.1)
+            end -= int(xdata.shape[0] * 0.1)
                 
         pauli_coeffs[icm] = popt[0]
 
