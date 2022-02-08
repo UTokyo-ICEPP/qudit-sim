@@ -188,7 +188,7 @@ def find_gate(
     qubits: Sequence[int],
     params: Dict[str, Any],
     drive_def: Dict[int, Dict[str, float]],
-    tlist: Union[np.ndarray, Tuple[int, int]],
+    tlist: np.ndarray,
     num_sim_levels: int = 2,
     comp_dim: int = 2,
     save_result_to: Optional[str] = None
@@ -204,7 +204,7 @@ def find_gate(
         qubits: List of qudits to include in the Hamiltonian.
         params: Hamiltonian parameters. See the docstring of `pulse_sim.make_hamiltonian_components` for details.
         drive_def: Drive definition. See the docstring of `pulse_sim.DriveExprGen` for details.
-        tlist: Time points to use in the simulation. See the docstring of run_pulse_sim for details.
+        tlist: Time points to use in the simulation.
         num_sim_levels: Number of oscillator levels in the simulation.
         comp_dim: Dimensionality of the computational space.
         save_result_to: File name (without the extension) to save the simulation and extraction results to.
@@ -229,9 +229,6 @@ def find_gate(
         except KeyError:
             raise RuntimeError(f'Missing amplitude specification for drive on channel {key}')
 
-        if isinstance(amp_factor, str) and 't' in amp_factor:
-            raise RuntimeError(f'Cannot use time-dependent amplitude (found in channel {key})')
-            
     ## Evolve the identity operator to obtain the evolution operator corresponding to the pulse
     
     psi0 = qtp.tensor([qtp.qeye(num_sim_levels)] * num_qubits)
@@ -239,7 +236,7 @@ def find_gate(
     result = run_pulse_sim(
         qubits, params, drive_def,
         psi0=psi0,
-        tlist=(10, 400),
+        tlist=tlist,
         save_result_to=save_result_to)
     
     ## Take the log of the evolution operator
@@ -264,6 +261,6 @@ def find_gate(
     qubit_indices = string.ascii_letters[:num_qubits]
     pauli_coeffs = np.einsum(f'xy,{qubit_indices}yx->{qubit_indices}', ilog_u, prod_basis).real
     # Divide the trace by two to account for the normalization of the generalized Paulis
-    pauli_coeffs_t /= 2.
+    pauli_coeffs /= 2.
     
     return pauli_coeffs

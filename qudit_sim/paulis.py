@@ -95,7 +95,11 @@ def make_prod_basis(
     return np.einsum(indices, *([basis] * num_qubits)).reshape(*shape)
 
 
-def heff_expr(heff: np.ndarray, symbol: Optional[str] = None) -> str:
+def heff_expr(
+    heff: np.ndarray,
+    symbol: Optional[str] = None,
+    threshold: Optional[float] = None
+) -> str:
     """Generate a LaTeX expression of the effective Hamiltonian from the Pauli coefficients.
     
     The dymamic range of the numerical values of the coefficients is set by the maximum absolute
@@ -106,6 +110,7 @@ def heff_expr(heff: np.ndarray, symbol: Optional[str] = None) -> str:
     Args:
         heff: Array of Pauli coefficients returned by find_heff
         symbol: Symbol to use instead of :math:`\lambda` for the matrices.
+        threshold: Ignore terms with absolute coefficients below this value.
         
     Returns:
         A LaTeX expression string for the effective Hamiltonian.
@@ -120,18 +125,13 @@ def heff_expr(heff: np.ndarray, symbol: Optional[str] = None) -> str:
         labels = list((r'%s_{%d}' % (symbol, i)) for i in range(heff.shape[0]))
         
     maxval = np.amax(np.abs(heff))
-    if maxval > 1.e+9:
-        unit = 'GHz'
-        threshold = 2. * np.pi * 1.e+6
-    elif maxval > 1.e+6:
-        unit = 'MHz'
-        threshold = 2. * np.pi * 1.e+3
-    elif maxval > 1.e+3:
-        unit = 'kHz'
-        threshold = 2. * np.pi * 1.
+    for base, unit in [(1.e+9, 'GHz'), (1.e+6, 'MHz'), (1.e+3, 'kHz')]:
+        norm = 2. * np.pi * base
+        if maxval > norm:
+            if threshold is None:
+                threshold = norm * 1.e-3
+            break
         
-    norm = threshold * 1.e+3
-    
     expr = ''
     
     for index in np.ndindex(heff.shape):

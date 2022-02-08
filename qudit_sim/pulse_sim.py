@@ -11,11 +11,11 @@ class DriveExprGen:
         self.num_channels = num_channels
         self.base_frequency = 0.
         self.base_amplitude = np.zeros(num_channels)
-        self.base_phase = np.zeros(num_channels)
+        self.phase_shift = np.zeros(num_channels)
         
     def __str__(self):
         return (f'DriveExprGen: num_channels = {self.num_channels}, base_frequency = {self.base_frequency},\n'
-            f'base_amplitude = {self.base_amplitude},\nbase_phase = {self.base_phase}')
+            f'base_amplitude = {self.base_amplitude},\nphase_shift = {self.phase_shift}')
     
     def __repr__(self):
         return self.__str__()
@@ -24,22 +24,24 @@ class DriveExprGen:
         self,
         drive_def: Dict[int, Dict[str, Any]]
     ) -> Tuple[str, str]:
-        """Generate the time-dependent coefficient expression for H_cos and H_sin
+        """Generate the time-dependent coefficient expression for H_x and H_y
         
         Args:
             drive_def: Drive definition. Outer dict maps a channel id to a dict of form
-                {'frequency': freq_value, 'phase': phase_value, 'amplitude': amplitude}. Argument
-                `'amplitude'` can be a float or a string defining a C++ function of t and will be
-                multiplied to `self.base_amplitude[channel]`. Arguments `'phase'` and `'amplitude'`
-                are optional; if ommitted they default to 0 and 1.
+                {'frequency': freq_value, 'amplitude': amplitude}. Argument `'amplitude'` is optional
+                (defaults to 1) and can be a float, a string, or a 2-tuple thereof. String arguments
+                define C++ functions of t and will be multiplied to `self.base_amplitude[channel]`.
+                If a singleton argument is given, it is used for the amplitude of the in-phase (cosine)
+                drive with the quadratic (sine) component set to zero. If a 2-tuple is given, the
+                elements correspond to the in-phase and quadratic amplitudes, respectively.
                 
         Returns:
-            coeff_cos (str): Expression for H_cos
-            coeff_sin (str): Expression for H_sin
+            coeff_x (str): Expression for H_x
+            coeff_y (str): Expression for H_y
         """
 
-        cos_terms = []
-        sin_terms = []
+        x_terms = []
+        y_terms = []
 
         for ich, def_dict in drive_def.items():
             if self.base_amplitude[ich] == 0.:
@@ -47,63 +49,76 @@ class DriveExprGen:
             
             frequency = self.base_frequency - def_dict['frequency']
             
+            amplitude = ['0.', '0.']
+            
             try:
                 amp_factor = def_dict["amplitude"]
             except KeyError:
-                amplitude = f'{self.base_amplitude[ich]}'
+                amplitude[0] = f'{self.base_amplitude[ich]}'
             else:
-                if isinstance(amp_factor, str):
-                    if 't' in amplitude:
-                        amplitude = f'{self.base_amplitude[ich]} * ({amp_factor})'
+                if not isinstance(amp_factor, tuple):
+                    amp_factor = (amp_factor, 0.)
+                    
+                for iq, factor in enumerate(amp_factor):
+                    if isinstance(factor, str):
+                        if 't' in factor:
+                            amplitude[iq] = f'{self.base_amplitude[ich]} * ({factor})'
+                        else:
+                            amplitude[iq] = f'({self.base_amplitude[ich] * eval(factor)})'
                     else:
-                        amplitude = f'({self.base_amplitude[ich] * eval(amp_factor)})'
-                else:
-                    amplitude = f'({self.base_amplitude[ich] * amp_factor})'
+                        amplitude[iq] = f'({self.base_amplitude[ich] * factor})'
 
-            try:
-                phase = self.base_phase[ich] - def_dict['phase']
-            except KeyError:
-                phase = self.base_phase[ich]
-                
-            while phase > 2. * np.pi:
-                phase -= 2. * np.pi
-            while phase < 0.:
-                phase += 2. * np.pi
-                
+            xsub = []
+            ysub = []
+            
             if frequency == 0.:
-                if np.abs(phase) < phase_epsilon:
-                    cos_terms.append(f'{amplitude}')
-                elif np.abs(phase - np.pi / 2.) < phase_epsilon:
-                    sin_terms.append(f'{amplitude}')
-                elif np.abs(phase - np.pi) < phase_epsilon:
-                    cos_terms.append(f'(-{amplitude})')
-                elif np.abs(phase - 3. * np.pi / 2.) < phase_epsilon:
-                    sin_terms.append(f'(-{amplitude})')
-                elif 't' in amplitude:
-                    cos_terms.append(f'({np.cos(phase)}) * {amplitude}')
-                    sin_terms.append(f'({np.sin(phase)}) * {amplitude}')
-                else:
-                    cos_terms.append(f'({np.cos(phase) * eval(amplitude)})')
-                    sin_terms.append(f'({np.sin(phase) * eval(amplitude)})')
+                cos = np.cos(self.phase_shift[ich])
+                sin = np.sin(self.phase_shift[ich])
+
+                if 't' in amplitude[0]:
+                    if cos != 0.:
+                        xsub.append(f'({cos}) * {amplitude[0]}')
+                    if sin != 0.:
+                        ysub.append(f'({sin}) * {amplitude[0]}')
+                elif eval(amplitude[0]) != 0.:
+                    if cos != 0.:
+                        xsub.append(f'({cos * eval(amplitude[0])})')
+                    if sin != 0.:
+                        ysub.append(f'({sin * eval(amplitude[0])})')
+
+                if 't' in amplitude[1]:
+                    if sin != 0.:
+                        xsub.append(f'({-sin}) * {amplitude[1]}')
+                    if cos != 0.:
+                        ysub.append(f'({cos}) * {amplitude[1]}')
+                elif eval(amplitude[1]) != 0.:
+                    if sin != 0.:
+                        xsub.append(f'({-sin * eval(amplitude[1])})')
+                    if cos != 0.:                
+                        ysub.append(f'({cos * eval(amplitude[1])})')
                 
             else:
-                if np.abs(phase) < phase_epsilon:
-                    cos_terms.append(f'{amplitude} * cos({frequency} * t)')
-                    sin_terms.append(f'{amplitude} * sin({frequency} * t)')
-                elif np.abs(phase - np.pi / 2.) < phase_epsilon:
-                    cos_terms.append(f'(-{amplitude}) * sin({frequency} * t)')
-                    sin_terms.append(f'{amplitude} * cos({frequency} * t)')
-                elif np.abs(phase - np.pi) < phase_epsilon:
-                    cos_terms.append(f'(-{amplitude}) * cos({frequency} * t)')
-                    sin_terms.append(f'(-{amplitude}) * sin({frequency} * t)')
-                elif np.abs(phase - 3. * np.pi / 2.) < phase_epsilon:
-                    cos_terms.append(f'{amplitude} * sin({frequency} * t)')
-                    sin_terms.append(f'(-{amplitude}) * cos({frequency} * t)')
+                if self.phase_shift[ich] == 0.:
+                    phase_shift = ''
+                elif self.phase_shift[ich] > 0.:
+                    phase_shift = f' + {self.phase_shift[ich]}'
                 else:
-                    cos_terms.append(f'{amplitude} * cos({frequency} * t + {phase})')
-                    sin_terms.append(f'{amplitude} * sin({frequency} * t + {phase})')
+                    phase_shift = f' - {abs(self.phase_shift[ich])}'
+                
+                if 't' in amplitude[0] or eval(amplitude[0]) != 0.:
+                    xsub.append(f'{amplitude[0]} * cos({frequency} * t{phase_shift})')
+                    ysub.append(f'{amplitude[0]} * sin({frequency} * t{phase_shift})')
+
+                if 't' in amplitude[1] or eval(amplitude[1]) != 0.:
+                    xsub.append(f'(-{amplitude[1]}) * sin({frequency} * t{phase_shift})')
+                    ysub.append(f'{amplitude[1]} * cos({frequency} * t{phase_shift})')
+                    
+            if xsub:
+                x_terms.append(f'({" + ".join(xsub)})')
+            if ysub:
+                y_terms.append(f'({" + ".join(ysub)})')
             
-        return ' + '.join(cos_terms), ' + '.join(sin_terms)
+        return ' + '.join(x_terms), ' + '.join(y_terms)
     
     def max_frequency(
         self,
@@ -146,7 +161,7 @@ def make_hamiltonian_components(
         
         H_{\mathrm{int}} = \sum_{jk} J_{jk} \left( b_j^{\dagger} b_k + b_j b_k^{\dagger} \right),
         
-        H_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \Omega_j s_j (t) \cos (\nu_j t + \psi_j) \left( e^{i\phi_{jk}} b_k^{\dagger} + e^{-i\phi_{jk}} b_k \right),
+        H_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \Omega_j \left( p_j(t) \cos (\nu_j t) + q_j(t) \sin (\nu_j t) \right) \left( e^{i\phi_{jk}} b_k^{\dagger} + e^{-i\phi_{jk}} b_k \right),
         
     with
     
@@ -156,9 +171,8 @@ def make_hamiltonian_components(
     - :math:`\alpha_{jk}`: Crosstalk attenuation factor of drive in channel :math:`j` sensed by qudit :math:`k`
     - :math:`\phi_{jk}`: Crosstalk phase shift of drive in channel :math:`j` sensed by qudit :math:`k`
     - :math:`\Omega_j`: Base amplitude of drive in channel :math:`j`
-    - :math:`\s_j (t)`: Pulse envelope of drive in channel :math:`j`
+    - :math:`p_j (t), q_j (t)`: I and Q components of the pulse envelope of drive in channel :math:`j`
     - :math:`\nu_j`: Local oscillator frequency of drive in channel :math:`j`
-    - :math:`\psi_j`: Local oscillator phase offset in channel :math:`j`
     
     **Qudit-frame Hamiltonian with Rotating-wave approximation:**
     
@@ -192,26 +206,26 @@ def make_hamiltonian_components(
     
     .. math::
     
-        \tilde{H}_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \Omega_j s_j (t) \cos (\nu_j t + \psi_j) \left( e^{i (\omega_k t + \phi_{jk})} e^{i \Delta_k (N_k - 1) t} b_k^{\dagger} \right. \\
+        \tilde{H}_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \Omega_j \left( p_j(t) \cos (\nu_j t) + q_j(t) \sin (\nu_j t) \right) \left( e^{i (\omega_k t + \phi_{jk})} e^{i \Delta_k (N_k - 1) t} b_k^{\dagger} \right. \\
         \left. + e^{-i (\omega_k t + \phi_{jk})} e^{-i \Delta_k N_k t} b_k \right),
     
-    and with rotating wave approximation
+    and with the rotating wave approximation
     
     .. math::
     
-        \bar{H}_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} s_j (t) \left( e^{i (\epsilon_{kj} t + \phi_{jk} - \psi_j)} e^{i \Delta_k (N_k - 1) t} b_k^{\dagger} \right. \\
-        \left. + e^{-i (\epsilon_{kj} t + \phi_{jk} - \psi_j)} e^{-i \Delta_k N_k t} b_k \right),
+        \bar{H}_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left[ (p_j(t) + i q_j(t)) e^{i (\epsilon_{kj} t + \phi_{jk})} e^{i \Delta_k (N_k - 1) t} b_k^{\dagger} \right. \\
+        \left. + (p_j(t) - i q_j(t)) e^{-i (\epsilon_{kj} t + \phi_{jk})} e^{-i \Delta_k N_k t} b_k \right],
         
     where :math:`\epsilon_{kj} = \omega_k - \nu_j`.
     
     **QuTiP implementation:**
     
     Time-dependent Hamiltonian in QuTiP is represented by a two-tuple `(H, c(t))` where `H` is a static Qobj and `c(t)`
-    is the time-dependent coefficient of `H`. This function returns two lists of tuples, corresponding to the interaction
-    and drive Hamiltonians, with the total list length corresponding to the number of distinct frequencies in the RWA
-    Hamiltonian :math:`\tilde{H}_{\mathrm{int}} + \bar{H}_{\mathrm{d}}`. Because `c(t)` must be a real function, each
-    returned tuple contains two Qobjs corresponding to the "cosine" and "sine" parts of the Hamiltonian oscillating at
-    the given frequency.
+    is the time-dependent coefficient of `H`. This function returns two lists of tuples, corresponding to the 
+    interaction and drive Hamiltonians, with the total list length corresponding to the number of distinct
+    time dependencies in the RWA Hamiltonian :math:`\tilde{H}_{\mathrm{int}} + \bar{H}_{\mathrm{d}}`. Because
+    `c(t)` must be a real function, each returned tuple contains two Qobjs corresponding to the "X"
+    (:math:`\propto b^{\dagger} + b`) and "Y" (:math:`\propto i(b^{\dagger} - b)`) parts of the Hamiltonian.
         
     **TODO: Qubit optimization:**
     
@@ -229,10 +243,10 @@ def make_hamiltonian_components(
 
     Returns:
         h_int (list): Interaction term components. List of n_coupling elements. Each element is a three-tuple
-            (freq, H_cos, H_sin), where freq is the frequency for the given term. H_cos and H_sin
-            are the coupling Hamiltonians proportional to the "cosine" and "sine" parts of the oscillating coefficients.
+            (freq, H_x, H_y), where freq is the frequency for the given term. H_x and H_y are the coupling
+            Hamiltonians proportional to the "X" and "Y" parts of the oscillating coefficients.
         h_drive (list): Drive term components. List of n_qubits elements. Each element is a three-tuple
-            (expr_gen, H_cos, H_sin), where expr_gen is an instance of DriveExprGen.
+            (expr_gen, H_x, H_y), where expr_gen is an instance of DriveExprGen.
     """
     ## Validate and format the input
     
@@ -268,16 +282,16 @@ def make_hamiltonian_components(
 
             for l1 in range(num_levels - 1):
                 for l2 in range(num_levels - 1):
-                    c1 = np.sqrt(l1 + 1) * qtp.basis(num_levels, l1 + 1) * qtp.basis(num_levels, l1).dag()
-                    c2 = np.sqrt(l2 + 1) * qtp.basis(num_levels, l2 + 1) * qtp.basis(num_levels, l2).dag()
+                    c1 = np.sqrt(l1 + 1) * qtp.basis(num_levels, l1) * qtp.basis(num_levels, l1 + 1).dag()
+                    c2 = np.sqrt(l2 + 1) * qtp.basis(num_levels, l2) * qtp.basis(num_levels, l2 + 1).dag()
                     op = [qtp.qeye(num_levels)] * num_qubits
                     op[iq1] = c1
                     op[iq2] = c2.dag()
-                    h_cos = J * (qtp.tensor(op) + qtp.tensor(op).dag())
-                    h_sin = J * 1.j * (qtp.tensor(op) - qtp.tensor(op).dag())
+                    h_x = J * (qtp.tensor(op).dag() + qtp.tensor(op))
+                    h_y = J * 1.j * (qtp.tensor(op).dag() - qtp.tensor(op))
                     freq = delta + D1 * l1 - D2 * l2
 
-                    h_int.append((freq, h_cos, h_sin))
+                    h_int.append((freq, h_x, h_y))
 
     ## Compute the drive term components
                     
@@ -288,16 +302,16 @@ def make_hamiltonian_components(
     for iq, qubit in enumerate(qubits):
         for level in range(num_levels - 1):
             op = [qtp.qeye(num_levels)] * num_qubits
-            op[iq] = np.sqrt(level + 1) * qtp.basis(num_levels, level + 1) * qtp.basis(num_levels, level).dag()
-            h_cos = qtp.tensor(op) + qtp.tensor(op).dag()
-            h_sin = 1.j * (qtp.tensor(op) - qtp.tensor(op).dag())
+            op[iq] = np.sqrt(level + 1) * qtp.basis(num_levels, level) * qtp.basis(num_levels, level + 1).dag()
+            h_x = qtp.tensor(op).dag() + qtp.tensor(op)
+            h_y = 1.j * (qtp.tensor(op).dag() - qtp.tensor(op))
 
             expr_gen = DriveExprGen(num_qubits)
             expr_gen.base_frequency = (params[f'wq{qubit}'] + params[f'delta{qubit}'] * level)
             expr_gen.base_amplitude[:] = np.abs(params['crosstalk'][:, iq]) * omega_over_two
-            expr_gen.base_phase[:] = np.angle(params['crosstalk'][:, iq])
+            expr_gen.phase_shift[:] = np.angle(params['crosstalk'][:, iq])
                 
-            h_drive.append((expr_gen, h_cos, h_sin))
+            h_drive.append((expr_gen, h_x, h_y))
 
     return h_int, h_drive
 
@@ -320,24 +334,24 @@ def build_pulse_hamiltonian(
     hamiltonian = []
     static_term = qtp.Qobj()
     
-    for freq, h_cos, h_sin in h_int:
-        hamiltonian.append((h_cos, f'cos({freq} * t)'))
-        hamiltonian.append((h_sin, f'sin({freq} * t)'))
+    for freq, h_x, h_y in h_int:
+        hamiltonian.append((h_x, f'cos({freq} * t)'))
+        hamiltonian.append((h_y, f'sin({freq} * t)'))
         
-    for expr_gen, h_cos, h_sin in h_drive:
-        coeff_cos, coeff_sin = expr_gen.generate(drive_def)
+    for expr_gen, h_x, h_y in h_drive:
+        coeff_x, coeff_y = expr_gen.generate(drive_def)
         
-        if coeff_cos:
-            if 't' in coeff_cos:
-                hamiltonian.append((h_cos, coeff_cos))
+        if coeff_x:
+            if 't' in coeff_x:
+                hamiltonian.append((h_x, coeff_x))
             else:
-                static_term += (eval(coeff_cos) * h_cos)
+                static_term += (eval(coeff_x) * h_x)
                 
-        if coeff_sin:
-            if 't' in coeff_sin:
-                hamiltonian.append((h_sin, coeff_sin))
+        if coeff_y:
+            if 't' in coeff_y:
+                hamiltonian.append((h_y, coeff_y))
             else:
-                static_term += (eval(coeff_sin) * h_sin)
+                static_term += (eval(coeff_y) * h_y)
                 
     if static_term.shape != (1, 1):
         # Static term doesn't really have to be at position 0 but QuTiP recommends doing so
@@ -371,9 +385,9 @@ def make_tlist(
 
     if max_frequency == 0.:
         # Single qubit resonant drive -> static Hamiltonian
-        coeff_cos, coeff_sin = h_drive[0][0].generate(drive_def)
-        amp2 = eval(coeff_cos) ** 2. if coeff_cos else 0.
-        amp2 += eval(coeff_sin) ** 2. if coeff_sin else 0.
+        coeff_x, coeff_y = h_drive[0][0].generate(drive_def)
+        amp2 = eval(coeff_x) ** 2. if coeff_x else 0.
+        amp2 += eval(coeff_y) ** 2. if coeff_y else 0.
         tlist = np.linspace(0., 2. * np.pi / np.sqrt(amp2), points_per_cycle * num_cycles)
     else:
         tlist = np.linspace(0., 2. * np.pi / max_frequency * num_cycles, points_per_cycle * num_cycles)
