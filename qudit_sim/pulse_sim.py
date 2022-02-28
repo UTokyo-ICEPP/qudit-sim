@@ -172,7 +172,14 @@ def make_hamiltonian_components(
     - :math:`\phi_{jk}`: Crosstalk phase shift of drive in channel :math:`j` sensed by qudit :math:`k`
     - :math:`\Omega_j`: Base amplitude of drive in channel :math:`j`
     - :math:`p_j (t), q_j (t)`: I and Q components of the pulse envelope of drive in channel :math:`j`
-    - :math:`\nu_j`: Local oscillator frequency of drive in channel :math:`j`
+    - :math:`\nu_j`: Local oscillator frequency of drive in channel :math:`j`.
+    
+    When considering more than a single drive frequency per channel, it can be more convenient to express
+    the drive Hamiltonian in the frequency domain:
+    
+    .. math::
+    
+        H_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \Omega_j \int d\nu \left( \tilde{p}_j(\nu) \cos (\nu t) + \tilde{q}_j(\nu) \sin (\nu t) \right) \left( e^{i\phi_{jk}} b_k^{\dagger} + e^{-i\phi_{jk}} b_k \right)
     
     **Qudit-frame Hamiltonian with Rotating-wave approximation:**
     
@@ -209,14 +216,22 @@ def make_hamiltonian_components(
         \tilde{H}_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \Omega_j \left( p_j(t) \cos (\nu_j t) + q_j(t) \sin (\nu_j t) \right) \left( e^{i (\omega_k t + \phi_{jk})} e^{i \Delta_k (N_k - 1) t} b_k^{\dagger} \right. \\
         \left. + e^{-i (\omega_k t + \phi_{jk})} e^{-i \Delta_k N_k t} b_k \right),
     
-    and with the rotating wave approximation
+    and with the rotating wave approximation (RWA)
     
     .. math::
     
-        \bar{H}_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left[ (p_j(t) + i q_j(t)) e^{i (\epsilon_{kj} t + \phi_{jk})} e^{i \Delta_k (N_k - 1) t} b_k^{\dagger} \right. \\
-        \left. + (p_j(t) - i q_j(t)) e^{-i (\epsilon_{kj} t + \phi_{jk})} e^{-i \Delta_k N_k t} b_k \right],
+        \bar{H}_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left[ r_j(t) e^{i (\epsilon_{kj} t + \phi_{jk})} e^{i \Delta_k (N_k - 1) t} b_k^{\dagger} \right. \\
+        \left. + r^{*}_j(t) e^{-i (\epsilon_{kj} t + \phi_{jk})} e^{-i \Delta_k N_k t} b_k \right],
         
-    where :math:`\epsilon_{kj} = \omega_k - \nu_j`.
+    where :math:`\epsilon_{kj} = \omega_k - \nu_j` and :math:`r_j(t) = p_j(t) + i q_j(t)`.
+    
+    The RWA drive Hamiltonian in the frequency domain is (assuming :math:`\tilde{p}_j` and :math:`\tilde{q}_j` have
+    support only around the qudit frequencies)
+    
+    .. math::
+    
+        \bar{H}_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \int d\nu \left[ \tilde{r}_j(\nu) e^{i [(\omega_k - \nu) t + \phi_{jk}]} e^{i \Delta_k (N_k - 1) t} b_k^{\dagger} \right. \\
+        \left. + \tilde{r}^{*}_j(\nu) e^{-i [(\omega_k - \nu) t + \phi_{jk}]} e^{-i \Delta_k N_k t} b_k \right].
     
     **QuTiP implementation:**
     

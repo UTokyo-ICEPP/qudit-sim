@@ -96,7 +96,7 @@ def make_prod_basis(
 
 
 def heff_expr(
-    heff: np.ndarray,
+    coefficients: np.ndarray,
     symbol: Optional[str] = None,
     threshold: Optional[float] = None
 ) -> str:
@@ -117,14 +117,14 @@ def heff_expr(
     """
     
     if symbol is None:
-        if heff.shape[0] == 4:
+        if coefficients.shape[0] == 4:
             labels = ['I', 'X', 'Y', 'Z']
         else:
-            labels = list((r'\lambda_{%d}' % i) for i in range(heff.shape[0]))
+            labels = list((r'\lambda_{%d}' % i) for i in range(coefficients.shape[0]))
     else:
-        labels = list((r'%s_{%d}' % (symbol, i)) for i in range(heff.shape[0]))
+        labels = list((r'%s_{%d}' % (symbol, i)) for i in range(coefficients.shape[0]))
         
-    maxval = np.amax(np.abs(heff))
+    maxval = np.amax(np.abs(coefficients))
     for base, unit in [(1.e+9, 'GHz'), (1.e+6, 'MHz'), (1.e+3, 'kHz')]:
         norm = 2. * np.pi * base
         if maxval > norm:
@@ -134,8 +134,8 @@ def heff_expr(
         
     expr = ''
     
-    for index in np.ndindex(heff.shape):
-        coeff = heff[index]
+    for index in np.ndindex(coefficients.shape):
+        coeff = coefficients[index]
         if abs(coeff) < threshold:
             continue
             
@@ -144,14 +144,14 @@ def heff_expr(
         elif expr:
             expr += ' + '
             
-        if len(heff.shape) == 1:
+        if len(coefficients.shape) == 1:
             expr += f'{abs(coeff) / norm:.3f}{labels[index[0]]}'
         else:
             oper = ''.join(labels[i] for i in index)
-            if len(heff.shape) == 2:
+            if len(coefficients.shape) == 2:
                 denom = '2'
             else:
-                denom = '2^{%d}' % (len(heff.shape) - 1)
+                denom = '2^{%d}' % (len(coefficients.shape) - 1)
                 
             expr += f'{abs(coeff) / norm:.3f}' + (r'\frac{%s}{%s}' % (oper, denom))
         

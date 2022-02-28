@@ -13,6 +13,7 @@ __all__ = [
     'run_pulse_sim',
     'make_generalized_paulis',
     'make_prod_basis',
+    'heff_expr',
     'find_heff',
     'find_gate',
 ]
