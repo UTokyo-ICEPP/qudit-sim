@@ -125,13 +125,16 @@ def heff_expr(
         labels = list((r'%s_{%d}' % (symbol, i)) for i in range(coefficients.shape[0]))
         
     maxval = np.amax(np.abs(coefficients))
-    for base, unit in [(1.e+9, 'GHz'), (1.e+6, 'MHz'), (1.e+3, 'kHz')]:
+    for base, unit in [(1.e+9, 'GHz'), (1.e+6, 'MHz'), (1.e+3, 'kHz'), (1., 'Hz')]:
         norm = 2. * np.pi * base
         if maxval > norm:
             if threshold is None:
                 threshold = norm * 1.e-3
             break
-        
+            
+    if threshold is None:
+        raise RuntimeError(f'Passed coefficients with maxabs = {maxval}')
+            
     expr = ''
     
     for index in np.ndindex(coefficients.shape):

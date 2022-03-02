@@ -1,292 +1,49 @@
 from typing import Any, Dict, List, Tuple, Sequence, Optional, Union, Callable
-import string
+import os
 import sys
+import string
+import logging
 from functools import partial
+logging.basicConfig(level=logging.INFO)
+
 import numpy as np
 import scipy
-import scipy.optimize as sciopt
-import jax
-import jax.numpy as jnp
-import jax.scipy.linalg as jscila
-from iminuit import Minuit
-import optax
 import h5py
 import qutip as qtp
 
 from .paulis import make_generalized_paulis, make_prod_basis
 from .pulse_sim import run_pulse_sim
 
-#jax.config.update('jax_enable_x64', True)
-
-def process_fidelity(time_evolution, basis, coeffs, tlist, numpy=np):
-    num_qubits = len(coeffs.shape)
-    axes = list(range(num_qubits))
-    heff = numpy.tensordot(basis, coeffs, (axes, axes)) / (2 ** (num_qubits - 1))
-    
-    return _process_fidelity(time_evolution, heff, tlist, numpy)
-
-
-def _process_fidelity(time_evolution, heff, tlist, numpy):
-    if numpy is np:
-        eigh = np.linalg.eig
-    elif numpy is jnp:
-        eigh = jax.scipy.linalg.eigh
-        
-    heff_t = tlist[:, None, None] * numpy.tile(heff[None, ...], (tlist.shape[0], 1, 1))
-    
-    def unitarize(mat):
-        eigvals, eigvecs = eigh(mat)
-        dd = numpy.tile(eigvals[:, None, :], (1, eigvecs.shape[1], 1))
-        return numpy.matmul(eigvecs * numpy.exp(1.j * dd), eigvecs.conj().transpose(0, 2, 1))
-    
-    udag_t = unitarize(heff_t)
-    
-    tr_u_udag = numpy.trace(numpy.matmul(time_evolution, udag_t), axis1=1, axis2=2)
-    fidelity = (numpy.square(tr_u_udag.real) + numpy.square(tr_u_udag.imag)) / (heff.shape[-1] ** 2)
-    
-    return fidelity
-
-
-def maximize_process_fidelity(
-    time_evolution: np.ndarray,
-    paulis: np.ndarray,
-    num_qubits: int,
-    tlist: np.ndarray,
-    save_result_to: Optional[str] = None,
-    optimizer: Union[optax.GradientTransformation, str] = optax.adam(0.01),
-    init: Union[str, np.ndarray] = 'log_unitary_fit',
-    max_updates: int = 1000,
-    convergence: float = 1.e-6,
-    **kwargs
+def matrix_ufunc(
+    op: Callable[[np.ndarray], np.ndarray],
+    mat: np.ndarray,
+    with_diagonals: bool = False
 ) -> np.ndarray:
+    """Apply a unitary-invariant unary matrix operator to an array of normal matrices.
     
-    basis = jnp.array(make_prod_basis(paulis, num_qubits))
+    The argument `mat` must be an array of normal matrices (in the last two dimensions). This function
+    unitary-diagonalizes the matrices, applies `op` to the diagonals, and inverts the diagonalization.
     
-    # Compute the loss from the flattened coeffs array
-    basis_no_id = basis.reshape(-1, basis.shape[-2], basis.shape[-1])[1:]
-    
-    if isinstance(init, str) and init == 'log_unitary_fit':
-        initial = fit_to_log_unitary(
-            time_evolution,
-            paulis,
-            num_qubits,
-            tlist,
-            save_result_to=save_result_to,
-            **kwargs)[1:] * tlist[-1]
-    else:
-        initial = jnp.array(init * tlist[-1])
+    Args:
+        op: Unary operator to be applied to the diagonals of `mat`.
+        mat: Array of normal matrices (shape (..., n, n)). No check on normality is performed.
+        with_diagonals: If True, also return the array `op(eigenvalues)`.
 
-    time_evolution = jnp.asarray(time_evolution)
-    tlist_norm = jnp.array(tlist / tlist[-1])
-    
-    def loss_fn(coeffs):
-        heff = jnp.tensordot(basis_no_id, coeffs, (0, 0)) / (2 ** (num_qubits - 1))
-        fidelity = _process_fidelity(time_evolution[1:], heff, tlist_norm[1:], jnp)
-        fidelity = jnp.concatenate((jnp.array([1.]), fidelity))
-        fidelity_spectrum = jnp.fft.fft(fidelity)
-        lowpass = jnp.exp(-2. * jnp.linspace(0., 1., tlist_norm.shape[0] - 1))
-        return jnp.sum(-jnp.abs(fidelity_spectrum[1:]) * lowpass)
-        #return 1. - 1. / tlist_norm.shape[0] - jnp.mean(fidelity)
-    
-    if optimizer == 'minuit':
-        minimizer = Minuit(loss_fn, initial, grad=jax.grad(loss_fn))
-        minimizer.strategy = 0
-        minimizer.migrad()
-
-        coeffs = np.concatenate(([0.], minimizer.values / tlist[-1])).reshape(basis.shape[:-2])
-        
-    else:
-        loss_and_grad = jax.jit(jax.value_and_grad(lambda params: loss_fn(params['c'])))
-
-        params = {'c': initial}
-        opt_state = optimizer.init(params)
-
-        loss_values = np.empty(max_updates, dtype='f8')
-
-        @jax.jit
-        def step(params, opt_state):
-            loss, gradient = loss_and_grad(params)
-            updates, opt_state = optimizer.update(gradient, opt_state)
-            params = optax.apply_updates(params, updates)
-            return params, opt_state, loss, gradient
-
-        for iup in range(max_updates):
-            params, opt_state, loss, gradient = step(params, opt_state)
-
-            loss_values[iup] = loss
-
-            if jnp.amax(jnp.abs(gradient['c'])) < convergence:
-                break
-
-        if save_result_to:
-            with h5py.File(f'{save_result_to}.h5', 'a') as out:
-                out.create_dataset('loss', data=loss_values)
-                out.create_dataset('num_updates', data=np.array(iup))
-
-        coeffs = np.concatenate(([0.], params['c'] / tlist[-1])).reshape(basis.shape[:-2])
-        
-    return coeffs
-
-
-def fit_to_log_unitary(
-    time_evolution: np.ndarray,
-    paulis: np.ndarray,
-    num_qubits: int,
-    tlist: np.ndarray,
-    save_result_to: Optional[str] = None,
-    fit_tol: float = 0.01,
-    min_xpoints: int = 10,
-    warn_fit_failure: bool = True
-) -> np.ndarray:
+    Returns:
+        An array corresponding to `op(mat)`. If `diagonals==True`, another array corresponding to `op(eigvals)`.
     """
-            fit_tol: Tolerance factor for the linear fit. The function tries to iteratively find a time interval
-            where the best fit line `f(t)` satisfies `abs(sum(U(t) - f(t)) / sum(U(t))) < fit_tol`.
-    """
-    
-    ## Take the log of the time evolution operator
+    eigvals, eigcols = np.linalg.eig(mat)
+    eigrows = np.conjugate(np.moveaxis(eigcols, -2, -1))
 
-    eigvals, eigcols = np.linalg.eig(time_evolution)
-    eigrows = np.conjugate(np.transpose(eigcols, axes=(0, 2, 1)))
+    op_eigvals = op(eigvals)
+    tiled_op_eigvals = np.tile(op_eigvals[..., None, :], (eigcols.shape[1], 1))
     
-    omega_t = -np.angle(eigvals) # list of energy eigenvalues (mod 2pi) times t
-    
-    ilogu_t = (eigcols * np.tile(omega_t[:, np.newaxis], (1, omega_t.shape[1], 1))) @ eigrows
-    
-    ## Extract the (generalized) Pauli components
-    
-    prod_basis = make_prod_basis(paulis, num_qubits)
-    
-    # Compute the inner product (trace of matrix product) with the prod_basis at each time point
-    # Implicitly using the 17-qubit limit in assuming that the indices of the basis won't reach x
-    qubit_indices = string.ascii_letters[:num_qubits]
-    pauli_coeffs_t = np.einsum(f'txy,{qubit_indices}yx->t{qubit_indices}', ilogu_t, prod_basis).real
-    # Divide the trace by two to account for the normalization of the generalized Paulis
-    pauli_coeffs_t /= 2.
-    
-    # Find the first t where an eigenvalue does a 2pi jump
-    omega_min = np.amin(omega_t, axis=1)
-    omega_max = np.amax(omega_t, axis=1)
+    op_mat = np.matmul(eigcols * tiled_op_eigvals, eigrows)
 
-    margin = 0.1
-
-    min_hits_minus_pi = np.asarray(omega_min < -np.pi + margin).nonzero()[0]
-    if len(min_hits_minus_pi) == 0:
-        tmax_min = omega_t.shape[0]
+    if with_diagonals:
+        return op_mat, op_eigvals
     else:
-        tmax_min = min_hits_minus_pi[0]
-    
-    max_hits_pi = np.asarray(omega_max > np.pi - margin).nonzero()[0]
-    if len(max_hits_pi) == 0:
-        tmax_max = omega_t.shape[0]
-    else:
-        tmax_max = max_hits_pi[0]
-        
-    tmax = min(tmax_min, tmax_max)
-
-    if save_result_to:
-        with h5py.File(f'{save_result_to}.h5', 'a') as out:
-            out.create_dataset('omega', data=omega_t)
-            out.create_dataset('eigcols', data=eigcols)
-            out.create_dataset('pauli_coeffs', data=pauli_coeffs_t)
-            out.create_dataset('tmax', data=np.array([tmax]))
-            out.create_dataset('fit_success', shape=pauli_coeffs_t.shape[1:], dtype='i')
-            out.create_dataset('fit_range', shape=(pauli_coeffs_t.shape[1:] + (2,)), dtype='i')
-            out.create_dataset('fit_residual', shape=pauli_coeffs_t.shape[1:], dtype='f8')
-    
-    ## Do a linear fit to each component
-    pauli_coeffs = np.zeros(pauli_coeffs_t.shape[1:])
-    
-    # This is probably not the most numpythonic way of indexing the array..
-    time_series_list = pauli_coeffs_t.reshape(pauli_coeffs_t.shape[0], np.prod(pauli_coeffs.shape)).T
-    
-    line = lambda a, x: a * x
-    for ic, coeffs_t in enumerate(time_series_list):
-        icm = np.unravel_index(ic, pauli_coeffs.shape)
-        
-        # Iteratively determine the interval that yields a fit within tolerance
-        start = 0
-        end = tlist.shape[0]
-        min_residual = None
-        while True:
-            xdata = tlist[start:end]
-            ydata = coeffs_t[start:end]
-            
-            if xdata.shape[0] <= min_xpoints:
-                if warn_fit_failure:
-                    sys.stderr.write(f'Linear fit for coefficient of {icm} did not yield a'
-                                     f' reliable result (minimum residual = {min_residual}).\n')
-                
-                if save_result_to:
-                    with h5py.File(f'{save_result_to}.h5', 'a') as out:
-                        out['fit_success'][icm] = 0
-                        out['fit_range'][icm] = [start, end]
-                        out['fit_residual'][icm] = residual
-                        
-                elif warn_fit_failure:
-                    sys.stderr.write(' Run the function with the save_result_to option and'
-                                     ' check the raw output.\n')
-                popt = np.array([0.])
-                break
-            """
-            # ydata is usually oscillatory - make the envelope array and determine p0 from the average
-            local_max = []
-            local_min = []
-            grad = 0
-            for t in range(1, ydata.shape[0]):
-                if ydata[t] - ydata[t - 1] > 0.:
-                    if grad < 0:
-                        local_min.append((t - 1, ydata[t - 1]))
-                        
-                    grad = 1
-                    
-                elif ydata[t] - ydata[t - 1] < 0.:
-                    if grad > 0:
-                        local_max.append((t - 1, ydata[t - 1]))
-
-                    grad = -1
-                    
-            env_high = np.empty_like(ydata)
-            tprev = 0
-            yprev = 0.
-            for t, y in local_max:
-                env_high[tprev:t] = np.linspace(yprev, y, t - tprev, endpoint=False)
-                tprev = t
-                yprev = y
-            
-            env_low = np.empty_like(ydata)
-            tprev = 0
-            yprev = 0.
-            for t, y in local_min:
-                env_low[tprev:t] = np.linspace(yprev, y, t - tprev, endpoint=False)
-                tprev = t
-                yprev = y                
-                
-            envrange = min(local_max[-1][0], local_min[-1][0])
-            average = (env_high[:envrange] + env_low[:envrange]) * 0.5
-            p0 = np.mean((env_high[1:envrange] - env_high[:envrange - 1]) / (xdata[1] - xdata[0]))
-            """            
-            p0 = None
-            popt, _ = sciopt.curve_fit(line, xdata, ydata, p0=p0)
-            
-            residual = abs(np.sum(ydata - popt[0] * xdata) / np.sum(ydata))
-            if min_residual is None or residual < min_residual:
-                min_residual = residual
-                
-            if residual < fit_tol:
-                if save_result_to:
-                    with h5py.File(f'{save_result_to}.h5', 'a') as out:
-                        out['fit_success'][icm] = 1
-                        out['fit_range'][icm] = [start, end]
-                        out['fit_residual'][icm] = residual
-                    
-                break
-                
-            start += int(xdata.shape[0] * 0.1)
-            end -= int(xdata.shape[0] * 0.1)
-                
-        pauli_coeffs[icm] = popt[0]
-
-    return pauli_coeffs
+        return op_mat
 
 
 def find_heff(
@@ -295,9 +52,13 @@ def find_heff(
     drive_def: Dict[int, Dict[str, float]],
     num_sim_levels: int = 2,
     comp_dim: int = 2,
-    extraction_fn: Callable = maximize_process_fidelity,
-    extraction_params: Dict = dict(),
+    num_cycles: int = 400,
     save_result_to: Optional[str] = None,
+    save_iterations: bool = False,
+    max_cumul_over_max: float = 20.,
+    min_coeff_ratio: float = 0.005,
+    max_iteration: int = 100,
+    log_level: int = logging.WARNING
 ) -> np.ndarray:
     """Run a pulse simulation with constant drives and extract the Pauli components of the effective Hamiltonian.
     
@@ -314,12 +75,18 @@ def find_heff(
             each channel must be a constant expression (float or string).
         num_sim_levels: Number of oscillator levels in the simulation.
         comp_dim: Dimensionality of the computational space.
+        num_cycles: Duration of the square pulse, in units of cycles in the highest frequency appearing in the Hamiltonian.
         save_result_to: File name (without the extension) to save the simulation and extraction results to.
+        save_iterations: If True, save detailed intermediate data from fit iterations.
+        max_cumul_over_max: Convergence condition.
+        min_coeff_ratio: Convergence condition.
+        max_iteration: Maximum number of fit & subtract iterations.
         
     Returns:
         An array with the value at index `[i, j, ..]` corresponding to the coefficient of
             :math:`(\lambda_i \otimes \lambda_j \otimes \dots)/2^{n-1}` of the effective Hamiltonian.
     """
+    logging.getLogger().setLevel(log_level)
     
     ## Validate and format the input
     
@@ -342,31 +109,157 @@ def find_heff(
     ## Evolve the identity operator to obtain the time evolution operators
     
     psi0 = qtp.tensor([qtp.qeye(num_sim_levels)] * num_qubits)
+    
+    logging.info('Running a square pulse simulation for %d cycles', num_cycles)
 
     result = run_pulse_sim(
         qubits, params, drive_def,
         psi0=psi0,
-        tlist=(10, 400),
+        tlist=(10, num_cycles),
         save_result_to=save_result_to)
     
     time_evolution = np.concatenate(list(np.expand_dims(state.full(), axis=0) for state in result.states))
+    tlist = result.times
+
+    ## Set up the Pauli product basis of the space of Hermitian operators
+    paulis = make_generalized_paulis(comp_dim, matrix_dim=num_sim_levels)
+    basis = make_prod_basis(paulis, num_qubits)
+    # Flattened list of basis operators excluding the identity
+    basis_no_id = basis.reshape(-1, *basis.shape[-2:])[1:]
+    basis_size = basis_no_id.shape[0]
+    # Basis array multiplied with time - concatenate with coeffs to produce Heff*t
+    basis_t = tlist[:, None, None, None] * np.repeat(basis_no_id[None, ...], tlist.shape[0], axis=0) / (2 ** (num_qubits - 1))
     
     if save_result_to:
         with h5py.File(f'{save_result_to}.h5', 'w') as out:
             out.create_dataset('time_evolution', data=time_evolution)
             out.create_dataset('tlist', data=result.times)
+            if not save_iterations:
+                out.create_dataset('omegas', shape=(tlist.shape[0], time_evolution.shape[-1]), dtype='f')
+                out.create_dataset('pauli_coeffs', shape=(tlist.shape[0], basis_size), dtype='f')
+                
+        if save_iterations:
+            with h5py.File(f'{save_result_to}_iter.h5', 'w') as out:
+                out.create_dataset('omegas', shape=(max_iteration, tlist.shape[0], time_evolution.shape[-1]), dtype='f')
+                out.create_dataset('pauli_coeffs', shape=(max_iteration, tlist.shape[0], basis_size), dtype='f')
+                out.create_dataset('tmax', shape=(max_iteration,), dtype='i')
+                out.create_dataset('coeffs', shape=(max_iteration, basis_size), dtype='f')
+                out.create_dataset('fit_success', shape=(max_iteration, basis_size), dtype='i')
+                out.create_dataset('cumul_over_max', shape=(max_iteration, basis_size), dtype='f')
             
-    paulis = make_generalized_paulis(comp_dim, matrix_dim=num_sim_levels)
+    ## Output array
 
-    pauli_coeffs = extraction_fn(
-        time_evolution,
-        paulis,
-        num_qubits,
-        result.times,
-        save_result_to=save_result_to,
-        **extraction_params)
+    heff_coeffs = np.zeros(basis_size)
 
-    return pauli_coeffs
+    ## Iteratively fit and subtract            
+            
+    def fit_fn(t, a):
+        return t * a
+
+    unitaries = time_evolution
+
+    for iloop in range(max_iteration):
+        logging.info('Fit-and-subtract iteration %d', iloop)
+        
+        ## Compute ilog(U(t))
+
+        ilogus, omegas = matrix_ufunc(lambda u: -np.angle(u), unitaries, with_diagonals=True)
+    
+        ## Extract the Pauli components
+
+        # Divide the trace by two to account for the normalization of the generalized Paulis
+        pauli_coeffs = np.einsum(f'txy,iyx->ti', ilogus, basis_no_id).real / 2.
+    
+        ## Find the first t where an eigenvalue does a 2pi jump
+        tmax = tlist.shape[0]
+        for omega_ext in [np.amin(omegas, axis=1), -np.amax(omegas, axis=1)]:
+            margin = 0.1
+            hits_minus_pi = np.asarray(omega_ext < -np.pi + margin).nonzero()[0]
+            if len(hits_minus_pi) != 0:
+                tmax = min(tmax, hits_minus_pi[0])
+                
+        ## Do a linear fit to each component
+
+        xdata = tlist[:tmax] / tlist[-1]
+        
+        @partial(np.vectorize, otypes=[float, bool, float], signature='(t)->(),(),()')
+        def get_slope(ydata):
+            try:
+                popt, pcov = scipy.optimize.curve_fit(fit_fn, xdata, ydata, p0=(1.,))
+            except:
+                slope = 0.
+                success = False
+                cumul_over_max = -1.
+            else:
+                slope = popt[0]
+                success = True
+                curve_opt = fit_fn(xdata, *popt)
+                cumul = np.cumsum(ydata - curve_opt)
+                cumul_over_max = np.amax(np.abs(cumul)) / np.amax(np.abs(ydata))
+            
+            return slope, success, cumul_over_max
+        
+        slope, success, cumul_over_max = get_slope(pauli_coeffs[:tmax].T)
+
+        ## Coeffs from slopes (slopes obtained from a normalized time series)
+    
+        coeffs = slope / tlist[-1]
+        
+        ## Save the computation results
+        
+        if save_result_to:
+            if save_iterations:
+                with h5py.File(f'{save_result_to}_iter.h5', 'a') as out:
+                    out['omegas'][iloop] = omegas
+                    out['pauli_coeffs'][iloop] = pauli_coeffs
+                    out['tmax'][iloop] = tmax
+                    out['coeffs'][iloop] = coeffs
+                    out['fit_success'][iloop] = success
+                    out['cumul_over_max'][iloop] = cumul_over_max
+            elif iloop == 0:
+                with h5py.File(f'{save_result_to}.h5', 'a') as out:
+                    out['omegas'][:] = omegas
+                    out['pauli_coeffs'][:] = pauli_coeffs
+                    
+        ## Find the best-fit component (smallest cumul_over_max)
+    
+        ibestfit = np.argmin(np.where(success, cumul_over_max, max_cumul_over_max))
+        
+        bestfit_pauli = np.unravel_index(ibestfit + 1, basis.shape[:-2])
+        logging.info('  Best-fit component: %s (%f)', bestfit_pauli, coeffs[ibestfit])
+        
+        ## If the best-fit component does not yield a meaningful update, stop the iteration
+        
+        if iloop == 0:
+            coeff_ratio = min_coeff_ratio + 1.
+        else:
+            coeff_ratio = np.abs(coeffs[ibestfit]) / np.amax(np.abs(heff_coeffs))
+            
+        if (not success[ibestfit]
+            or cumul_over_max[ibestfit] > max_cumul_over_max
+            or coeff_ratio < min_coeff_ratio):
+            break
+            
+        ## Update the output array taking the coefficient of the best-fit component
+         
+        heff_coeffs[ibestfit] += coeffs[ibestfit]
+        
+        ## Unitarily subtract Heff so far from the time evolution
+        
+        if iloop != max_iteration - 1:
+            heff_t = np.tensordot(basis_t, heff_coeffs, (1, 0))
+            exp_iheffs = matrix_ufunc(np.exp, 1.j * heff_t)
+            unitaries = np.matmul(time_evolution, exp_iheffs)
+            
+    if save_result_to and save_iterations:
+        with h5py.File(f'{save_result_to}_iter.h5', 'r') as source:
+            with h5py.File(f'{save_result_to}.h5', 'a') as out:
+                for key in source.keys():
+                    out.create_dataset(key, data=source[key][:iloop + 1])
+
+        os.unlink(f'{save_result_to}_iter.h5')
+
+    return np.concatenate(([0.], heff_coeffs)).reshape(basis.shape[:-2])
 
 
 def find_gate(
