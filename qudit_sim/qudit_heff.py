@@ -82,7 +82,11 @@ def maximize_process_fidelity(
     def loss_fn(coeffs):
         heff = jnp.tensordot(basis_no_id, coeffs, (0, 0)) / (2 ** (num_qubits - 1))
         fidelity = _process_fidelity(time_evolution[1:], heff, tlist_norm[1:], jnp)
-        return 1. - 1. / tlist_norm.shape[0] - jnp.mean(fidelity)
+        fidelity = jnp.concatenate((jnp.array([1.]), fidelity))
+        fidelity_spectrum = jnp.fft.fft(fidelity)
+        lowpass = jnp.exp(-2. * jnp.linspace(0., 1., tlist_norm.shape[0] - 1))
+        return jnp.sum(-jnp.abs(fidelity_spectrum[1:]) * lowpass)
+        #return 1. - 1. / tlist_norm.shape[0] - jnp.mean(fidelity)
     
     if optimizer == 'minuit':
         minimizer = Minuit(loss_fn, initial, grad=jax.grad(loss_fn))
@@ -145,7 +149,20 @@ def fit_to_log_unitary(
     eigrows = np.conjugate(np.transpose(eigcols, axes=(0, 2, 1)))
     
     omega_t = -np.angle(eigvals) # list of energy eigenvalues (mod 2pi) times t
-
+    
+    ilogu_t = (eigcols * np.tile(omega_t[:, np.newaxis], (1, omega_t.shape[1], 1))) @ eigrows
+    
+    ## Extract the (generalized) Pauli components
+    
+    prod_basis = make_prod_basis(paulis, num_qubits)
+    
+    # Compute the inner product (trace of matrix product) with the prod_basis at each time point
+    # Implicitly using the 17-qubit limit in assuming that the indices of the basis won't reach x
+    qubit_indices = string.ascii_letters[:num_qubits]
+    pauli_coeffs_t = np.einsum(f'txy,{qubit_indices}yx->t{qubit_indices}', ilogu_t, prod_basis).real
+    # Divide the trace by two to account for the normalization of the generalized Paulis
+    pauli_coeffs_t /= 2.
+    
     # Find the first t where an eigenvalue does a 2pi jump
     omega_min = np.amin(omega_t, axis=1)
     omega_max = np.amax(omega_t, axis=1)
@@ -165,19 +182,6 @@ def fit_to_log_unitary(
         tmax_max = max_hits_pi[0]
         
     tmax = min(tmax_min, tmax_max)
-    
-    heff_t = (eigcols * np.tile(omega_t[:, np.newaxis], (1, omega_t.shape[1], 1))) @ eigrows
-    
-    ## Extract the (generalized) Pauli components
-    
-    prod_basis = make_prod_basis(paulis, num_qubits)
-
-    # Compute the inner product (trace of matrix product) with the prod_basis at each time point
-    # Implicitly using the 17-qubit limit in assuming that the indices of the basis won't reach x
-    qubit_indices = string.ascii_letters[:num_qubits]
-    pauli_coeffs_t = np.einsum(f'txy,{qubit_indices}yx->t{qubit_indices}', heff_t, prod_basis).real
-    # Divide the trace by two to account for the normalization of the generalized Paulis
-    pauli_coeffs_t /= 2.
 
     if save_result_to:
         with h5py.File(f'{save_result_to}.h5', 'a') as out:
@@ -190,21 +194,18 @@ def fit_to_log_unitary(
             out.create_dataset('fit_residual', shape=pauli_coeffs_t.shape[1:], dtype='f8')
     
     ## Do a linear fit to each component
-    
-    num_paulis = paulis.shape[0]
-    
     pauli_coeffs = np.zeros(pauli_coeffs_t.shape[1:])
     
     # This is probably not the most numpythonic way of indexing the array..
     time_series_list = pauli_coeffs_t.reshape(pauli_coeffs_t.shape[0], np.prod(pauli_coeffs.shape)).T
-
+    
     line = lambda a, x: a * x
     for ic, coeffs_t in enumerate(time_series_list):
         icm = np.unravel_index(ic, pauli_coeffs.shape)
         
         # Iteratively determine the interval that yields a fit within tolerance
         start = 0
-        end = tmax
+        end = tlist.shape[0]
         min_residual = None
         while True:
             xdata = tlist[start:end]
