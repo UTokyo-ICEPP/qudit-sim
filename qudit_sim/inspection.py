@@ -9,7 +9,8 @@ def inspect_find_heff(filename):
         num_qubits = source['num_qubits'][()]
         num_sim_levels = source['num_sim_levels'][()]
         comp_dim = source['comp_dim'][()]
-        tlist = source['tlist'][:]
+        tlist = source['tlist'][()]
+        omegas = source['omegas'][()]
         max_com = source['max_com'][()]
         min_coeff_ratio = source['min_coeff_ratio'][()]
         num_update = source['num_update'][()]
@@ -29,7 +30,7 @@ def inspect_find_heff(filename):
     basis_size = ilogu_coeffs.shape[-1]
     nx = np.floor(np.sqrt(basis_size + 1)).astype(int)
     nx = min(nx, 12)
-    ny = np.ceil((basis_size + 1) / nx).astype(int)
+    ny = np.ceil((basis_size + 1) / nx).astype(int) + 1
     
     max_heff_coeff = np.amax(np.abs(heff_coeffs), axis=1)
     max_heff_coeff = np.repeat(max_heff_coeff[:, None], heff_coeffs.shape[1], axis=1)
@@ -65,6 +66,10 @@ def inspect_find_heff(filename):
             ax.axvline(np.log10(max_com), color='red')
             ax.axhline(np.log10(min_coeff_ratio), color='red')
             
+        ax = axes[0, 1]
+        ax.set_xlabel('t (ns)')
+        ax.plot(tlist, np.sort(omegas, axis=1))
+            
         num_candidates = is_update_candidate[iloop].nonzero()[0].shape[0]
         if num_update > 0:
             num_candidates = min(num_update, num_candidates)
@@ -78,8 +83,8 @@ def inspect_find_heff(filename):
         ymin -= 0.2 * vrange
             
         for ibase in range(basis_size):
-            ax = axes[(ibase + 1) // nx, (ibase + 1) % nx]
-            ax.set_title(f'${basis_labels[ibase + 1]}$')
+            ax = axes[(ibase // nx) + 1, ibase % nx]
+            ax.set_title(f'${basis_labels[ibase]}$')
             ax.plot(tlist, ilogu_coeffs[iloop, :, ibase])
             ax.text(tlist[10], ymin + (ymax - ymin) * 0.1, f'com {com[iloop, ibase]:.3f} cr {coeff_ratio[iloop, ibase]:.3f}')
 

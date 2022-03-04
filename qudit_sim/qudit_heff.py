@@ -180,22 +180,14 @@ def find_heff_from(
     ## Set up the Pauli product basis of the space of Hermitian operators
     paulis = make_generalized_paulis(comp_dim, matrix_dim=num_sim_levels)
     basis = make_prod_basis(paulis, num_qubits)
-    # Flattened list of basis operators excluding the identity
-    basis_no_id = basis.reshape(-1, *basis.shape[-2:])[1:]
-    basis_size = basis_no_id.shape[0]
+    # Flattened list of basis operators
+    basis_list = basis.reshape(-1, *basis.shape[-2:])
+    basis_size = basis_list.shape[0]
     # Basis array multiplied with time - concatenate with coeffs to produce Heff*t
-    basis_t = tlist[:, None, None, None] * np.repeat(basis_no_id[None, ...], tlist.shape[0], axis=0) / (2 ** (num_qubits - 1))
+    basis_t = tlist[:, None, None, None] * np.repeat(basis_list[None, ...], tlist.shape[0], axis=0) / (2 ** (num_qubits - 1))
 
     ## Time evolution unitaries
     time_evolution = np.concatenate(list(np.expand_dims(state.full(), axis=0) for state in result.states))
-    
-    if comp_dim < num_sim_levels:
-        # Factor out the global phases
-        ilogus = -matrix_ufunc(np.angle, time_evolution)
-        phases = np.trace(ilogus, axis1=-2, axis2=-1) / ilogus.shape[-1]
-        ilogus -= phases[:, None, None] * np.eye(ilogus.shape[-1])
-        time_evolution = matrix_ufunc(lambda m: np.exp(-1.j * m), ilogus)
-        del phases
     
     if save_result_to:
         with h5py.File(f'{save_result_to}.h5', 'w') as out:
@@ -243,7 +235,7 @@ def find_heff_from(
         ## Extract the Pauli components
 
         # Divide the trace by two to account for the normalization of the generalized Paulis
-        ilogu_coeffs = np.einsum(f'txy,iyx->ti', ilogus, basis_no_id).real / 2.
+        ilogu_coeffs = np.tensordot(ilogus, basis_list, ((1, 2), (2, 1))).real / 2.
     
         ## Find the first t where an eigenvalue does a 2pi jump
         tmax = tlist.shape[0]
@@ -319,8 +311,9 @@ def find_heff_from(
         update_indices = np.argsort(np.where(is_update_candidate, -np.abs(coeffs), 0.))
         update_indices = update_indices[:num_candidates]
         
-        update_pauli = np.unravel_index(update_indices + 1, basis.shape[:-2])
-        logging.debug('  Best-fit component: %s (%s)', update_pauli, coeffs[update_indices])
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            update_pauli = np.unravel_index(update_indices + 1, basis.shape[:-2])
+            logging.debug('  Best-fit component: %s (%s)', update_pauli, coeffs[update_indices])
         
         ## Update the output array taking the coefficient of the best-fit component
          
@@ -345,7 +338,7 @@ def find_heff_from(
 
         os.unlink(f'{save_result_to}_iter.h5')
 
-    return np.concatenate(([0.], heff_coeffs)).reshape(basis.shape[:-2])
+    return heff_coeffs.reshape(basis.shape[:-2])
 
 
 def find_gate(
