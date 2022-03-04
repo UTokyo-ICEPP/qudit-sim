@@ -1,7 +1,9 @@
 from typing import Any, Dict, List, Tuple, Sequence, Optional, Union, Callable
 import os
 import sys
+import time
 import string
+import collections
 import logging
 from functools import partial
 logging.basicConfig(level=logging.INFO)
@@ -53,11 +55,12 @@ def find_heff(
     num_sim_levels: int = 2,
     comp_dim: int = 2,
     num_cycles: int = 400,
+    max_com: float = 20.,
+    min_coeff_ratio: float = 0.005,
+    num_update: int = 0,
+    max_iterations: int = 100,
     save_result_to: Optional[str] = None,
     save_iterations: bool = False,
-    max_cumul_over_max: float = 20.,
-    min_coeff_ratio: float = 0.005,
-    max_iteration: int = 100,
     log_level: int = logging.WARNING
 ) -> np.ndarray:
     """Run a pulse simulation with constant drives and extract the Pauli components of the effective Hamiltonian.
@@ -76,16 +79,53 @@ def find_heff(
         num_sim_levels: Number of oscillator levels in the simulation.
         comp_dim: Dimensionality of the computational space.
         num_cycles: Duration of the square pulse, in units of cycles in the highest frequency appearing in the Hamiltonian.
+        max_com: Convergence condition.
+        min_coeff_ratio: Convergence condition.
+        num_update: Number of coefficients to update per iteration. If <= 0, all candidate coefficients are updated.
+        max_iterations: Maximum number of fit & subtract iterations.
         save_result_to: File name (without the extension) to save the simulation and extraction results to.
         save_iterations: If True, save detailed intermediate data from fit iterations.
-        max_cumul_over_max: Convergence condition.
-        min_coeff_ratio: Convergence condition.
-        max_iteration: Maximum number of fit & subtract iterations.
         
     Returns:
         An array with the value at index `[i, j, ..]` corresponding to the coefficient of
             :math:`(\lambda_i \otimes \lambda_j \otimes \dots)/2^{n-1}` of the effective Hamiltonian.
     """
+    if isinstance(qubits, int):
+        qubits = (qubits,)
+    
+    result = run_pulse_sim_for_heff(
+        qubits,
+        params,
+        drive_def,
+        num_sim_levels,
+        num_cycles,
+        save_result_to,
+        log_level)
+    
+    heff_coeffs = find_heff_from(
+        result,
+        len(qubits),
+        comp_dim,
+        max_com,
+        min_coeff_ratio,
+        num_update,
+        max_iterations,
+        save_result_to,
+        save_iterations,
+        log_level)
+    
+    return heff_coeffs
+
+
+def run_pulse_sim_for_heff(
+    qubits: Sequence[int],
+    params: Dict[str, Any],
+    drive_def: Dict[int, Dict[str, float]],
+    num_sim_levels: int = 2,
+    num_cycles: int = 400,
+    save_result_to: Optional[str] = None,
+    log_level: int = logging.WARNING    
+):
     logging.getLogger().setLevel(log_level)
     
     ## Validate and format the input
@@ -94,8 +134,6 @@ def find_heff(
         qubits = (qubits,)
         
     num_qubits = len(qubits)
-    
-    assert comp_dim <= num_sim_levels, 'Number of levels in simulation cannot be less than computational dimension'
     
     for key, value in drive_def.items():
         try:
@@ -112,13 +150,31 @@ def find_heff(
     
     logging.info('Running a square pulse simulation for %d cycles', num_cycles)
 
-    result = run_pulse_sim(
+    return run_pulse_sim(
         qubits, params, drive_def,
         psi0=psi0,
         tlist=(10, num_cycles),
         save_result_to=save_result_to)
+
+
+def find_heff_from(
+    result: qtp.solver.Result,
+    num_qubits: int = 1,
+    comp_dim: int = 2,
+    max_com: float = 20.,
+    min_coeff_ratio: float = 0.005,
+    num_update: int = 0,
+    max_iterations: int = 100,
+    save_result_to: Optional[str] = None,
+    save_iterations: bool = False,
+    log_level: int = logging.WARNING
+) -> np.ndarray:
+    logging.getLogger().setLevel(log_level)
     
-    time_evolution = np.concatenate(list(np.expand_dims(state.full(), axis=0) for state in result.states))
+    num_sim_levels = result.states[0].dims[0][0]
+    
+    assert comp_dim <= num_sim_levels, 'Number of levels in simulation cannot be less than computational dimension'
+    
     tlist = result.times
 
     ## Set up the Pauli product basis of the space of Hermitian operators
@@ -129,23 +185,42 @@ def find_heff(
     basis_size = basis_no_id.shape[0]
     # Basis array multiplied with time - concatenate with coeffs to produce Heff*t
     basis_t = tlist[:, None, None, None] * np.repeat(basis_no_id[None, ...], tlist.shape[0], axis=0) / (2 ** (num_qubits - 1))
+
+    ## Time evolution unitaries
+    time_evolution = np.concatenate(list(np.expand_dims(state.full(), axis=0) for state in result.states))
+    
+    if comp_dim < num_sim_levels:
+        # Factor out the global phases
+        ilogus = -matrix_ufunc(np.angle, time_evolution)
+        phases = np.trace(ilogus, axis1=-2, axis2=-1) / ilogus.shape[-1]
+        ilogus -= phases[:, None, None] * np.eye(ilogus.shape[-1])
+        time_evolution = matrix_ufunc(lambda m: np.exp(-1.j * m), ilogus)
+        del phases
     
     if save_result_to:
         with h5py.File(f'{save_result_to}.h5', 'w') as out:
+            out.create_dataset('num_qubits', data=num_qubits)
+            out.create_dataset('num_sim_levels', data=num_sim_levels)
+            out.create_dataset('comp_dim', data=comp_dim)
             out.create_dataset('time_evolution', data=time_evolution)
             out.create_dataset('tlist', data=result.times)
-            if not save_iterations:
-                out.create_dataset('omegas', shape=(tlist.shape[0], time_evolution.shape[-1]), dtype='f')
-                out.create_dataset('pauli_coeffs', shape=(tlist.shape[0], basis_size), dtype='f')
-                
+        
         if save_iterations:
             with h5py.File(f'{save_result_to}_iter.h5', 'w') as out:
-                out.create_dataset('omegas', shape=(max_iteration, tlist.shape[0], time_evolution.shape[-1]), dtype='f')
-                out.create_dataset('pauli_coeffs', shape=(max_iteration, tlist.shape[0], basis_size), dtype='f')
-                out.create_dataset('tmax', shape=(max_iteration,), dtype='i')
-                out.create_dataset('coeffs', shape=(max_iteration, basis_size), dtype='f')
-                out.create_dataset('fit_success', shape=(max_iteration, basis_size), dtype='i')
-                out.create_dataset('cumul_over_max', shape=(max_iteration, basis_size), dtype='f')
+                out.create_dataset('max_com', data=max_com)
+                out.create_dataset('min_coeff_ratio', data=min_coeff_ratio)
+                out.create_dataset('num_update', data=num_update)
+                out.create_dataset('omegas', shape=(max_iterations, tlist.shape[0], time_evolution.shape[-1]), dtype='f')
+                out.create_dataset('ilogu_coeffs', shape=(max_iterations, tlist.shape[0], basis_size), dtype='f')
+                out.create_dataset('tmax', shape=(max_iterations,), dtype='i')
+                out.create_dataset('heff_coeffs', shape=(max_iterations, basis_size), dtype='f')
+                out.create_dataset('coeffs', shape=(max_iterations, basis_size), dtype='f')
+                out.create_dataset('fit_success', shape=(max_iterations, basis_size), dtype='i')
+                out.create_dataset('com', shape=(max_iterations, basis_size), dtype='f')
+        else:
+            with h5py.File(f'{save_result_to}.h5', 'a') as out:
+                out.create_dataset('omegas', shape=(tlist.shape[0], time_evolution.shape[-1]), dtype='f')
+                out.create_dataset('ilogu_coeffs', shape=(tlist.shape[0], basis_size), dtype='f')
             
     ## Output array
 
@@ -158,7 +233,7 @@ def find_heff(
 
     unitaries = time_evolution
 
-    for iloop in range(max_iteration):
+    for iloop in range(max_iterations):
         logging.info('Fit-and-subtract iteration %d', iloop)
         
         ## Compute ilog(U(t))
@@ -168,7 +243,7 @@ def find_heff(
         ## Extract the Pauli components
 
         # Divide the trace by two to account for the normalization of the generalized Paulis
-        pauli_coeffs = np.einsum(f'txy,iyx->ti', ilogus, basis_no_id).real / 2.
+        ilogu_coeffs = np.einsum(f'txy,iyx->ti', ilogus, basis_no_id).real / 2.
     
         ## Find the first t where an eigenvalue does a 2pi jump
         tmax = tlist.shape[0]
@@ -189,17 +264,17 @@ def find_heff(
             except:
                 slope = 0.
                 success = False
-                cumul_over_max = -1.
+                com = -1.
             else:
                 slope = popt[0]
                 success = True
                 curve_opt = fit_fn(xdata, *popt)
                 cumul = np.cumsum(ydata - curve_opt)
-                cumul_over_max = np.amax(np.abs(cumul)) / np.amax(np.abs(ydata))
+                com = np.amax(np.abs(cumul)) / np.amax(np.abs(ydata))
             
-            return slope, success, cumul_over_max
+            return slope, success, com
         
-        slope, success, cumul_over_max = get_slope(pauli_coeffs[:tmax].T)
+        slope, success, com = get_slope(ilogu_coeffs[:tmax].T)
 
         ## Coeffs from slopes (slopes obtained from a normalized time series)
     
@@ -211,42 +286,49 @@ def find_heff(
             if save_iterations:
                 with h5py.File(f'{save_result_to}_iter.h5', 'a') as out:
                     out['omegas'][iloop] = omegas
-                    out['pauli_coeffs'][iloop] = pauli_coeffs
+                    out['ilogu_coeffs'][iloop] = ilogu_coeffs
                     out['tmax'][iloop] = tmax
+                    out['heff_coeffs'][iloop] = heff_coeffs
                     out['coeffs'][iloop] = coeffs
                     out['fit_success'][iloop] = success
-                    out['cumul_over_max'][iloop] = cumul_over_max
+                    out['com'][iloop] = com
+                    
             elif iloop == 0:
                 with h5py.File(f'{save_result_to}.h5', 'a') as out:
                     out['omegas'][:] = omegas
-                    out['pauli_coeffs'][:] = pauli_coeffs
-                    
-        ## Find the best-fit component (smallest cumul_over_max)
-    
-        ibestfit = np.argmin(np.where(success, cumul_over_max, max_cumul_over_max))
+                    out['ilogu_coeffs'][:] = ilogu_coeffs
+
+        ## Update Heff with the best-fit coefficients
         
-        bestfit_pauli = np.unravel_index(ibestfit + 1, basis.shape[:-2])
-        logging.info('  Best-fit component: %s (%f)', bestfit_pauli, coeffs[ibestfit])
-        
-        ## If the best-fit component does not yield a meaningful update, stop the iteration
-        
-        if iloop == 0:
-            coeff_ratio = min_coeff_ratio + 1.
-        else:
-            coeff_ratio = np.abs(coeffs[ibestfit]) / np.amax(np.abs(heff_coeffs))
+        is_update_candidate = success & (com < max_com)
             
-        if (not success[ibestfit]
-            or cumul_over_max[ibestfit] > max_cumul_over_max
-            or coeff_ratio < min_coeff_ratio):
+        # If we have successfully made ilogu small that the fit range is the entire tlist,
+        # also cut on the size of the coefficient (to avoid updating Heff with ~0 indefinitely)
+        if iloop != 0 and tmax == tlist.shape[0]:
+            max_coeff = np.amax(np.abs(heff_coeffs))
+            is_update_candidate &= (np.abs(coeffs) / max_coeff > min_coeff_ratio)
+            
+        num_candidates = is_update_candidate.nonzero()[0].shape[0]
+        if num_update > 0:
+            num_candidates = min(num_update, num_candidates)
+            
+        if num_candidates == 0:
             break
-            
+
+        # Take the first n largest-coefficient candidates
+        update_indices = np.argsort(np.where(is_update_candidate, -np.abs(coeffs), 0.))
+        update_indices = update_indices[:num_candidates]
+        
+        update_pauli = np.unravel_index(update_indices + 1, basis.shape[:-2])
+        logging.debug('  Best-fit component: %s (%s)', update_pauli, coeffs[update_indices])
+        
         ## Update the output array taking the coefficient of the best-fit component
          
-        heff_coeffs[ibestfit] += coeffs[ibestfit]
+        heff_coeffs[update_indices] += coeffs[update_indices]
         
-        ## Unitarily subtract Heff so far from the time evolution
+        ## Unitarily subtract the current Heff from the time evolution
         
-        if iloop != max_iteration - 1:
+        if iloop != max_iterations - 1:
             heff_t = np.tensordot(basis_t, heff_coeffs, (1, 0))
             exp_iheffs = matrix_ufunc(np.exp, 1.j * heff_t)
             unitaries = np.matmul(time_evolution, exp_iheffs)
@@ -255,7 +337,11 @@ def find_heff(
         with h5py.File(f'{save_result_to}_iter.h5', 'r') as source:
             with h5py.File(f'{save_result_to}.h5', 'a') as out:
                 for key in source.keys():
-                    out.create_dataset(key, data=source[key][:iloop + 1])
+                    data = source[key]
+                    if len(data.shape) > 0:
+                        out.create_dataset(key, data=data[:iloop + 1])
+                    else:
+                        out.create_dataset(key, data=data)
 
         os.unlink(f'{save_result_to}_iter.h5')
 
@@ -327,7 +413,7 @@ def find_gate(
     
     ilog_diagonal = np.diag(-np.angle(eigvals))
 
-    ilog_u = eigcols @ ilog_diagonal @ eigrows
+    ilogu = eigcols @ ilog_diagonal @ eigrows
     
     ## Extract the (generalized) Pauli components
     
@@ -337,10 +423,10 @@ def find_gate(
     # Compute the inner product (trace of matrix product) with the prod_basis at each time point
     # Implicitly using the 17-qubit limit in assuming that the indices of the basis won't reach x
     qubit_indices = string.ascii_letters[:num_qubits]
-    pauli_coeffs = np.einsum(f'xy,{qubit_indices}yx->{qubit_indices}', ilog_u, prod_basis).real
+    ilogu_coeffs = np.einsum(f'xy,{qubit_indices}yx->{qubit_indices}', ilogu, prod_basis).real
     # Divide the trace by two to account for the normalization of the generalized Paulis
-    pauli_coeffs /= 2.
+    ilogu_coeffs /= 2.
     
-    return pauli_coeffs
+    return ilogu_coeffs
 
 

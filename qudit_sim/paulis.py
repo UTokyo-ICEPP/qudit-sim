@@ -115,14 +115,7 @@ def heff_expr(
     Returns:
         A LaTeX expression string for the effective Hamiltonian.
     """
-    
-    if symbol is None:
-        if coefficients.shape[0] == 4:
-            labels = ['I', 'X', 'Y', 'Z']
-        else:
-            labels = list((r'\lambda_{%d}' % i) for i in range(coefficients.shape[0]))
-    else:
-        labels = list((r'%s_{%d}' % (symbol, i)) for i in range(coefficients.shape[0]))
+    labels = pauli_labels(coefficients.shape[0], symbol)
         
     maxval = np.amax(np.abs(coefficients))
     for base, unit in [(1.e+9, 'GHz'), (1.e+6, 'MHz'), (1.e+3, 'kHz'), (1., 'Hz')]:
@@ -159,3 +152,15 @@ def heff_expr(
             expr += f'{abs(coeff) / norm:.3f}' + (r'\frac{%s}{%s}' % (oper, denom))
         
     return (r'\frac{H_{\mathrm{eff}}}{2 \pi \mathrm{%s}} = ' % unit) + expr
+
+
+def pauli_labels(num_paulis: int, symbol: Optional[str] = None):
+    if symbol is None:
+        if num_paulis == 4:
+            labels = ['I', 'X', 'Y', 'Z']
+        else:
+            labels = list((r'\lambda_{%d}' % i) for i in range(num_paulis))
+    else:
+        labels = list((r'%s_{%d}' % (symbol, i)) for i in range(num_paulis))
+        
+    return labels
