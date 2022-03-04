@@ -13,7 +13,8 @@ import scipy
 import h5py
 import qutip as qtp
 
-from .paulis import make_generalized_paulis, make_prod_basis
+from .paulis import (get_num_paulis, make_generalized_paulis, make_prod_basis,
+                    unravel_basis_index, get_l0_projection)
 from .pulse_sim import run_pulse_sim
 
 def matrix_ufunc(
@@ -178,10 +179,10 @@ def find_heff_from(
     tlist = result.times
 
     ## Set up the Pauli product basis of the space of Hermitian operators
-    paulis = make_generalized_paulis(comp_dim, matrix_dim=num_sim_levels)
+    paulis = make_generalized_paulis(num_sim_levels)
     basis = make_prod_basis(paulis, num_qubits)
-    # Flattened list of basis operators
-    basis_list = basis.reshape(-1, *basis.shape[-2:])
+    # Flattened list of basis operators excluding the identity operator
+    basis_list = basis.reshape(-1, *basis.shape[-2:])[1:]
     basis_size = basis_list.shape[0]
     # Basis array multiplied with time - concatenate with coeffs to produce Heff*t
     basis_t = tlist[:, None, None, None] * np.repeat(basis_list[None, ...], tlist.shape[0], axis=0) / (2 ** (num_qubits - 1))
@@ -271,24 +272,6 @@ def find_heff_from(
         ## Coeffs from slopes (slopes obtained from a normalized time series)
     
         coeffs = slope / tlist[-1]
-        
-        ## Save the computation results
-        
-        if save_result_to:
-            if save_iterations:
-                with h5py.File(f'{save_result_to}_iter.h5', 'a') as out:
-                    out['omegas'][iloop] = omegas
-                    out['ilogu_coeffs'][iloop] = ilogu_coeffs
-                    out['tmax'][iloop] = tmax
-                    out['heff_coeffs'][iloop] = heff_coeffs
-                    out['coeffs'][iloop] = coeffs
-                    out['fit_success'][iloop] = success
-                    out['com'][iloop] = com
-                    
-            elif iloop == 0:
-                with h5py.File(f'{save_result_to}.h5', 'a') as out:
-                    out['omegas'][:] = omegas
-                    out['ilogu_coeffs'][:] = ilogu_coeffs
 
         ## Update Heff with the best-fit coefficients
         
@@ -303,21 +286,37 @@ def find_heff_from(
         num_candidates = is_update_candidate.nonzero()[0].shape[0]
         if num_update > 0:
             num_candidates = min(num_update, num_candidates)
-            
-        if num_candidates == 0:
-            break
 
         # Take the first n largest-coefficient candidates
         update_indices = np.argsort(np.where(is_update_candidate, -np.abs(coeffs), 0.))
         update_indices = update_indices[:num_candidates]
         
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            update_pauli = np.unravel_index(update_indices + 1, basis.shape[:-2])
-            logging.debug('  Best-fit component: %s (%s)', update_pauli, coeffs[update_indices])
-        
         ## Update the output array taking the coefficient of the best-fit component
          
         heff_coeffs[update_indices] += coeffs[update_indices]
+        
+        ## Save the computation results
+        
+        if save_result_to:
+            if save_iterations:
+                with h5py.File(f'{save_result_to}_iter.h5', 'a') as out:
+                    out['omegas'][iloop] = omegas
+                    out['ilogu_coeffs'][iloop] = ilogu_coeffs
+                    out['tmax'][iloop] = tmax
+                    out['coeffs'][iloop] = coeffs
+                    out['fit_success'][iloop] = success
+                    out['com'][iloop] = com
+                    out['heff_coeffs'][iloop] = heff_coeffs
+                    
+            elif iloop == 0:
+                with h5py.File(f'{save_result_to}.h5', 'a') as out:
+                    out['omegas'][:] = omegas
+                    out['ilogu_coeffs'][:] = ilogu_coeffs
+
+        ## Break if there were no updates in this iteration
+        
+        if num_candidates == 0:
+            break
         
         ## Unitarily subtract the current Heff from the time evolution
         
@@ -338,7 +337,23 @@ def find_heff_from(
 
         os.unlink(f'{save_result_to}_iter.h5')
 
-    return heff_coeffs.reshape(basis.shape[:-2])
+    heff_coeffs = np.concatenate(([0.], heff_coeffs)).reshape(basis.shape[:-2])
+    
+    if comp_dim < num_sim_levels:
+        ## Truncate the hamiltonian to the computational subspace
+        l0_projection = get_l0_projection(comp_dim, num_sim_levels)
+
+        for iq in range(num_qubits):
+            indices = [slice(None)] * num_qubits
+            indices[iq] = 0
+            indices = tuple(indices)
+            
+            heff_coeffs[indices] = np.tensordot(heff_coeffs, l0_projection, (iq, 0))
+            
+        num_comp_paulis = get_num_paulis(comp_dim)
+        heff_coeffs = heff_coeffs[(slice(num_comp_paulis),) * num_qubits]
+
+    return heff_coeffs
 
 
 def find_gate(

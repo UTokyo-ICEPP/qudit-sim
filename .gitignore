@@ -2,3 +2,6 @@
 __pycache__
 *.h5
 *.qu
+*.pyx
+Untitled*
+untitled*

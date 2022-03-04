@@ -1,6 +1,10 @@
-from typing import Optional
+from typing import Optional, Any
 import string
 import numpy as np
+
+def get_num_paulis(comp_dim: int) -> int:
+    return comp_dim ** 2
+
 
 def make_generalized_paulis(
     comp_dim: int = 2,
@@ -38,7 +42,7 @@ def make_generalized_paulis(
         
     assert matrix_dim >= comp_dim, 'Matrix dimension cannot be smaller than Pauli dimension'
     
-    num_paulis = comp_dim ** 2
+    num_paulis = get_num_paulis(comp_dim)
     
     paulis = np.zeros((num_paulis, matrix_dim, matrix_dim), dtype=np.complex128)
     paulis[0, :comp_dim, :comp_dim] = np.diagflat(np.ones(comp_dim))
@@ -62,20 +66,47 @@ def make_generalized_paulis(
     return paulis
 
 
+def get_l0_projection(reduced_dim: int, original_dim: int) -> np.ndarray:
+    """Return the vector corresponding to lambda_0 in reduced_dim in the original_dim space.
+    
+    Args:
+        reduced_dim: Matrix dimension of the target subspace.
+        original_dim: Matrix dimension of the full space.
+        
+    Returns:
+        Coefficient vector v(m, n) such that v(m, n) . paulis(n) = lambda_0(m).
+    """
+    assert reduced_dim <= original_dim
+    
+    coeffs_l0 = np.zeros(original_dim ** 2)
+    coeffs_l0[0] = 1.
+    
+    ## Making use of the recursion relation 
+    #   lambda_0^{d-n-1;d} = 1/sqrt(d-n) (sqrt(d-n-1)*lambda_0^{d-n;d} + lambda_{(d-n)^2-1})
+    # where lambda_0^{k;d} is the k-dimensional lambda_0 expanded (zero-padded) to d dimensions
+    
+    for dim in range(original_dim, reduced_dim, -1):
+        coeffs_l0 *= np.sqrt(dim - 1)
+        coeffs_l0[dim ** 2 - 1] = 1.
+        coeffs_l0 /= np.sqrt(dim)
+        
+    return coeffs_l0
+    
+
 def make_prod_basis(
-    basis: np.ndarray,
+    paulis: np.ndarray,
     num_qubits: int
 ) -> np.ndarray:
     """Return a list of basis matrices of multi-qubit operators.
     
     Args:
-        basis: Basis of single-qubit operators. Array with shape
-            `(num_basis, matrix_dim, matrix_dim)`.
+        paulis: Basis of single-qubit operators. Array with shape
+            `(num_paulis, matrix_dim, matrix_dim)`.
         num_qubits: Number of qubits.
         
     Returns:
         The full list of basis matrices as a single `num_qubits + 2`-dimensional array.
-            The first `num_qubits` dimensions are size `num_basis`, and the last two are
+            The first `num_qubits` dimensions are size `num_paulis`, and the last two are
             size `matrix_dim ** num_qubits`.
     """
     # Use of einsum implies that we can deal with at most 52 // 3 = 17 qubits
@@ -90,9 +121,21 @@ def make_prod_basis(
 
     indices = f'{",".join(indices_in)}->{"".join(indices_out)}'
     
-    shape = [basis.shape[0]] * num_qubits + [basis.shape[1] ** num_qubits] * 2
+    shape = [paulis.shape[0]] * num_qubits + [paulis.shape[1] ** num_qubits] * 2
     
-    return np.einsum(indices, *([basis] * num_qubits)).reshape(*shape)
+    return np.einsum(indices, *([paulis] * num_qubits)).reshape(*shape)
+
+
+def unravel_basis_index(
+    indices: Any,
+    comp_dim: int,
+    num_qubits: int
+) -> np.ndarray:
+    """Compute the index into prod_basis from a flat list index.
+    """
+    num_paulis = get_num_paulis(comp_dim)
+    shape = [num_paulis] * num_qubits
+    return np.unravel_index(indices, shape)
 
 
 def heff_expr(
