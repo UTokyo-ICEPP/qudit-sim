@@ -39,9 +39,8 @@ def matrix_ufunc(
     eigrows = np.conjugate(np.moveaxis(eigcols, -2, -1))
 
     op_eigvals = op(eigvals)
-    tiled_op_eigvals = np.tile(op_eigvals[..., None, :], (eigcols.shape[1], 1))
     
-    op_mat = np.matmul(eigcols * tiled_op_eigvals, eigrows)
+    op_mat = np.matmul(eigcols * op_eigvals[..., None, :], eigrows)
 
     if with_diagonals:
         return op_mat, op_eigvals
