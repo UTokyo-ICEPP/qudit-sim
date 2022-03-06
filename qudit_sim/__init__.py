@@ -25,14 +25,12 @@ __all__ += [
     'pauli_labels'
 ]
 
-from .qudit_heff import (matrix_ufunc, find_heff, run_pulse_sim_for_heff,
-                         find_heff_from, find_gate)
+from .qudit_heff import (find_heff, run_pulse_sim_for_heff,
+                         find_gate)
 
 __all__ += [
-    'matrix_ufunc',
     'find_heff',
     'run_pulse_sim_for_heff',
-    'find_heff_from',
     'find_gate'
 ]
 
@@ -40,4 +38,16 @@ from .inspection import inspect_find_heff
 
 __all__ += [
     'inspect_find_heff'
+]
+
+from .utils import matrix_ufunc
+
+__all__ += [
+    'matrix_ufunc'
+]
+
+from .heff.iterative_fit import iterative_fit
+
+__all__ += [
+    'iterative_fit'
 ]

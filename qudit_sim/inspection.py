@@ -10,10 +10,10 @@ def inspect_find_heff(filename):
         num_sim_levels = source['num_sim_levels'][()]
         comp_dim = source['comp_dim'][()]
         tlist = source['tlist'][()]
-        omegas = source['omegas'][()]
+        ilogvs = source['ilogvs'][()]
         max_com = source['max_com'][()]
         min_coeff_ratio = source['min_coeff_ratio'][()]
-        num_update = source['num_update'][()]
+        num_update_per_iteration = source['num_update_per_iteration'][()]
         ilogu_coeffs = source['ilogu_coeffs'][()]
         tmax = source['tmax'][()]
         heff_coeffs = source['heff_coeffs'][()]
@@ -80,10 +80,10 @@ def inspect_find_heff(filename):
             ax.axvline(np.log10(max_com), color='red')
             ax.axhline(np.log10(min_coeff_ratio), color='red')
 
-        # omegas
+        # ilogvs
         ax = axes[0, 1]
         ax.set_xlabel('t (ns)')
-        ax.plot(tlist, np.sort(omegas[iloop], axis=1))
+        ax.plot(tlist, np.sort(ilogvs[iloop], axis=1))
 
         ## Second row and on: individual pauli coefficients
         
