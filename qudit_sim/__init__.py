@@ -60,7 +60,7 @@ else:
         'maximize_fidelity'
     ]
     
-from .heff.inspection import heff_expr, inspect_iterative_fit, inspect_maximize_fidelity
+from .heff.visualize import heff_expr, inspect_iterative_fit, inspect_maximize_fidelity
 
 __all__ += [
     'heff_expr',
