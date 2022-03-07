@@ -12,7 +12,7 @@ import qutip as qtp
 from ..paulis import make_generalized_paulis, make_prod_basis
 from ..utils import matrix_ufunc, heff_fidelity
 from .iterative_fit import iterative_fit
-from .common import truncate_heff
+from .common import get_ilogus_and_valid_it, truncate_heff
 
 def maximize_fidelity(
     result: qtp.solver.Result,
@@ -20,7 +20,7 @@ def maximize_fidelity(
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
     optimizer: Union[optax.GradientTransformation, str] = optax.adam(0.01),
-    init: Union[str, np.ndarray] = 'iterative_fit',
+    init: Union[str, np.ndarray] = 'slope_estimate',
     max_updates: int = 1000,
     convergence: float = 1.e-6,
     **kwargs
@@ -47,24 +47,44 @@ def maximize_fidelity(
     
     ## Time evolution unitaries
     time_evolution = np.concatenate(list(np.expand_dims(state.full(), axis=0) for state in result.states))
-    time_evolution = jnp.array(time_evolution[1:])
     
-    tlist_norm = jnp.array(tlist[1:] / tlist[-1])
+    ## Save the setup
+    if save_result_to:
+        with h5py.File(f'{save_result_to}.h5', 'w') as out:
+            out.create_dataset('num_qubits', data=num_qubits)
+            out.create_dataset('num_sim_levels', data=num_sim_levels)
+            out.create_dataset('comp_dim', data=comp_dim)
+            out.create_dataset('time_evolution', data=time_evolution)
+            out.create_dataset('tlist', data=result.times)
     
+    ## Set the initial parameter values
     if isinstance(init, str):
-        if init == 'iterative_fit':
+        if init == 'slope_estimate':
+            ilogus, _, last_valid_it = get_ilogus_and_valid_it(time_evolution)
+            ilogu_coeffs = np.tensordot(ilogus, basis_list, ((1, 2), (2, 1))).real / 2.
+            init = ilogu_coeffs[last_valid_it] / tlist[last_valid_it]
+
+        elif init == 'iterative_fit':
+            logging.info('Performing iterative fit to estimate the initial parameter values')
+            
             init = iterative_fit(
                 result,
                 comp_dim=num_sim_levels,
                 log_level=log_level,
-                **kwargs)[1:]
+                **kwargs).reshape(-1)[1:]
+            
         elif init == 'random':
-            init = np.random.random(basis_size) * 2. - 1.
-
+            init = (np.random.random(basis_size) * 2. - 1.) / tlist[-1]
+            
     initial = jnp.array(init * tlist[-1])
     
+    ## Working arrays (index 0 is trivial and in fact causes the grad to diverge)
+    time_evolution = jnp.array(time_evolution[1:])
+    tlist_norm = jnp.array(tlist[1:] / tlist[-1])
+    
+    ## Loss minimization (fidelity maximization)
     def loss_fn(heff_coeffs_norm):
-        fidelity = heff_fidelity(time_evolution, heff_coeffs_norm, basis_list, tlist_norm, num_qubits, npmod=jnp)
+        fidelity = heff_fidelity(time_evolution, heff_coeffs_norm, basis_list, num_qubits, tlist_norm, npmod=jnp)
         return 1. - 1. / tsize - jnp.mean(fidelity)
     
     if optimizer == 'minuit':
@@ -76,16 +96,17 @@ def maximize_fidelity(
         minimizer.migrad()
         
         logging.info('Done.')
+        
+        num_updates = minimizer.nfcn
 
         heff_coeffs = np.concatenate(([0.], minimizer.values / tlist[-1])).reshape(basis.shape[:-2])
         
     else:
+        if save_result_to:
+            coeff_values = np.zeros((max_updates, initial.shape[0]), dtype='f8')
+            loss_values = np.zeros(max_updates, dtype='f8')
+        
         loss_and_grad = jax.jit(jax.value_and_grad(lambda params: loss_fn(params['c'])))
-
-        params = {'c': initial}
-        opt_state = optimizer.init(params)
-
-        loss_values = np.empty(max_updates, dtype='f8')
 
         @jax.jit
         def step(params, opt_state):
@@ -95,25 +116,38 @@ def maximize_fidelity(
             return params, opt_state, loss, gradient
         
         logging.info('Starting maximization loop..')
+        
+        params = {'c': initial}
+        opt_state = optimizer.init(params)
 
         for iup in range(max_updates):
-            params, opt_state, loss, gradient = step(params, opt_state)
+            new_params, opt_state, loss, gradient = step(params, opt_state)
             
             logging.info('Iteration %d: loss %f', iup, loss)
 
-            loss_values[iup] = loss
+            if save_result_to:
+                coeff_values[iup] = params['c'] / tlist[-1]
+                loss_values[iup] = loss
 
-            if jnp.amax(jnp.abs(gradient['c'])) < convergence:
+            if np.amax(np.abs(gradient['c'])) < convergence:
                 break
                 
+            params = new_params
+                
         logging.info('Done.')
-
-        if save_result_to:
-            with h5py.File(f'{save_result_to}.h5', 'w') as out:
-                out.create_dataset('loss', data=loss_values)
-                out.create_dataset('num_updates', data=np.array(iup))
-
+        
+        num_updates = iup
+        
         heff_coeffs = np.concatenate(([0.], params['c'] / tlist[-1])).reshape(basis.shape[:-2])
+
+    if save_result_to:
+        final_fidelity = np.concatenate(([1.], heff_fidelity(time_evolution, heff_coeffs, basis, num_qubits, tlist[1:])))
+        with h5py.File(f'{save_result_to}.h5', 'a') as out:
+            out.create_dataset('heff_coeffs', data=heff_coeffs)
+            out.create_dataset('final_fidelity', data=final_fidelity)
+            if optimizer != 'minuit':
+                out.create_dataset('coeffs', data=coeff_values[:num_updates])
+                out.create_dataset('loss', data=loss_values[:num_updates])
         
     heff_coeffs = truncate_heff(heff_coeffs, num_sim_levels, comp_dim, num_qubits)
         

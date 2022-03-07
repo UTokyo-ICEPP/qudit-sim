@@ -34,16 +34,20 @@ __all__ += [
     'find_gate'
 ]
 
-from .inspection import inspect_find_heff
+from .inspection import inspect_iterative_fit, inspect_maximize_fidelity
 
 __all__ += [
-    'inspect_find_heff'
+    'inspect_iterative_fit',
+    'inspect_maximize_fidelity'
 ]
 
-from .utils import matrix_ufunc, heff_fidelity
+from .utils import matrix_ufunc, make_heff, make_heff_t, make_ueff, heff_fidelity
 
 __all__ += [
     'matrix_ufunc',
+    'make_heff',
+    'make_heff_t',
+    'make_ueff',
     'heff_fidelity'
 ]
 

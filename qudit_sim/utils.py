@@ -43,20 +43,54 @@ def matrix_ufunc(
         return op_mat, op_eigvals
     else:
         return op_mat
+    
+
+def make_heff(
+    heff_coeffs: array_type,
+    basis: array_type,
+    num_qubits: int,
+    npmod=np
+) -> array_type:
+    heff_coeffs = heff_coeffs.reshape(-1)
+    basis_list = basis.reshape(-1, *basis.shape[-2:])
+    return npmod.tensordot(basis_list, heff_coeffs, (0, 0)) / (2 ** (num_qubits - 1))
+
+
+def make_heff_t(
+    heff_coeffs: array_type,
+    basis: array_type,
+    num_qubits: int,
+    tlist: array_type,
+    npmod=np
+) -> array_type:
+    heff = make_heff(heff_coeffs, basis, num_qubits, npmod=npmod)
+    return tlist[:, None, None] * heff[None, ...]
+
+
+def make_ueff(
+    heff_coeffs: array_type,
+    basis: array_type,
+    num_qubits: int,
+    tlist: array_type,
+    phase_factor: float = -1.,
+    npmod=np
+) -> array_type:
+    heff_t = make_heff_t(heff_coeffs, basis, num_qubits, tlist, npmod=npmod)
+    return matrix_ufunc(lambda v: npmod.exp(phase_factor * 1.j * v), heff_t, hermitian=True, npmod=npmod)
+
 
 def heff_fidelity(
     time_evolution: array_type,
     heff_coeffs: array_type,
-    basis_list: array_type,
-    tlist: array_type,
+    basis: array_type,
     num_qubits: int,
+    tlist: array_type,
     npmod=np
 ) -> array_type:
-    heff = npmod.tensordot(basis_list, heff_coeffs, (0, 0)) / (2 ** (num_qubits - 1))
-    heff_t = tlist[:, None, None] * heff[None, ...]
+    heff_t = make_heff_t(heff_coeffs, basis, num_qubits, tlist, npmod=npmod)
     ueffdag_t = matrix_ufunc(lambda v: npmod.exp(1.j * v), heff_t, hermitian=True, npmod=npmod)
-  
-    tr_u_ueffdag = npmod.tensordot(time_evolution, ueffdag_t, ((2, 1), (1, 2)))
-    fidelity = (npmod.square(tr_u_ueffdag.real) + npmod.square(tr_u_ueffdag.imag)) / (basis_list.shape[-1] ** 2)
+
+    tr_u_ueffdag = npmod.trace(npmod.matmul(time_evolution, ueffdag_t), axis1=1, axis2=2)
+    fidelity = (npmod.square(tr_u_ueffdag.real) + npmod.square(tr_u_ueffdag.imag)) / (basis.shape[-1] ** 2)
     
     return fidelity

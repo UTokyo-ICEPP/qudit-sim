@@ -19,8 +19,8 @@ else:
     import jax.scipy.optimize
 
 from ..paulis import make_generalized_paulis, make_prod_basis
-from ..utils import matrix_ufunc
-from .common import truncate_heff
+from ..utils import matrix_ufunc, make_ueff
+from .common import get_ilogus_and_valid_it, truncate_heff
 
 def iterative_fit(
     result: qtp.solver.Result,
@@ -78,7 +78,7 @@ def iterative_fit(
                 out.create_dataset('num_update_per_iteration', data=num_update_per_iteration)
                 out.create_dataset('ilogvs', shape=(max_iterations, tsize, time_evolution.shape[-1]), dtype='f')
                 out.create_dataset('ilogu_coeffs', shape=(max_iterations, tsize, basis_size), dtype='f')
-                out.create_dataset('tmax', shape=(max_iterations,), dtype='i')
+                out.create_dataset('last_valid_it', shape=(max_iterations,), dtype='i')
                 out.create_dataset('heff_coeffs', shape=(max_iterations, basis_size), dtype='f')
                 out.create_dataset('coeffs', shape=(max_iterations, basis_size), dtype='f')
                 out.create_dataset('fit_success', shape=(max_iterations, basis_size), dtype='i')
@@ -108,13 +108,13 @@ def iterative_fit(
         res = sciopt.minimize(fun, npmod.array([x0]), args=(ydata, mask), method='BFGS')
         return res.x[0] / tend, res.success
     
-    def update_heff(ilogus, tmax, heff_coeffs):
+    def update_heff(ilogus, last_valid_it, heff_coeffs):
         # Divide the trace by two to account for the normalization of the generalized Paulis
         ilogu_coeffs = npmod.tensordot(ilogus, basis_list, ((1, 2), (2, 1))).real / 2.
 
         ## Do a linear fit to each component
-        mask = (npmod.arange(tsize) < tmax).astype(float)
-        coeffs, success = get_coeffs(ilogu_coeffs.T, ilogu_coeffs.T[:, tmax - 1], mask[None, :])
+        mask = (npmod.arange(tsize) < last_valid_it).astype(float)
+        coeffs, success = get_coeffs(ilogu_coeffs.T, ilogu_coeffs.T[:, last_valid_it - 1], mask[None, :])
         
         cumul = npmod.cumsum((tlist[:, None] * coeffs[None, :] - ilogu_coeffs) * mask[:, None], axis=0)
         maxabs = npmod.amax(npmod.abs(ilogu_coeffs) * mask[:, None], axis=0)
@@ -125,7 +125,7 @@ def iterative_fit(
         # If we have successfully made ilogu small that the fit range is the entire tlist,
         # also cut on the size of the coefficient (to avoid updating Heff with ~0 indefinitely)
         coeff_nonnegligible = (npmod.abs(coeffs) > min_coeff_ratio * npmod.amax(npmod.abs(heff_coeffs)))
-        is_update_candidate &= coeff_nonnegligible | (tmax != tsize)
+        is_update_candidate &= coeff_nonnegligible | (last_valid_it != tsize)
         
         num_candidates = npmod.min(npmod.array([num_update_per_iteration, npmod.count_nonzero(is_update_candidate)]))
 
@@ -143,10 +143,8 @@ def iterative_fit(
             return heff_coeffs + coeffs_update, num_candidates > 0
 
     def update_unitaries(heff_coeffs):
-        heff = npmod.tensordot(basis_list, heff_coeffs, (0, 0))
-        heff_t = tlist[:, None, None] * heff[None, ...]
-        exp_iheffs = matrix_ufunc(lambda v: npmod.exp(1.j * v), heff_t, hermitian=True, npmod=npmod)
-        return npmod.matmul(time_evolution, exp_iheffs)
+        ueff_dagger = make_ueff(heff_coeffs, basis_list, num_qubits, tlist, phase_factor=1., npmod=jnp)
+        return npmod.matmul(time_evolution, ueff_dagger)
     
     if use_jax:
         time_evolution = jnp.array(time_evolution)
@@ -164,18 +162,9 @@ def iterative_fit(
     for iloop in range(max_iterations):
         logging.info('Fit-and-subtract iteration %d', iloop)
         
-        ## Compute ilog(U(t))
-        ilogus, ilogvs = matrix_ufunc(lambda u: -np.angle(u), unitaries, with_diagonals=True)
-        
-        ## Find the first t where an eigenvalue does a 2pi jump
-        tmax = tsize
-        for ilogv_ext in [np.amin(ilogvs, axis=1), -np.amax(ilogvs, axis=1)]:
-            margin = 0.1
-            hits_minus_pi = np.asarray(ilogv_ext < -np.pi + margin).nonzero()[0]
-            if len(hits_minus_pi) != 0:
-                tmax = min(tmax, hits_minus_pi[0])
+        ilogus, ilogvs, last_valid_it = get_ilogus_and_valid_it(unitaries)
     
-        update_result = update_heff(ilogus, tmax, heff_coeffs)
+        update_result = update_heff(ilogus, last_valid_it, heff_coeffs)
         
         ## Save the computation results
         if save_result_to:
@@ -184,7 +173,7 @@ def iterative_fit(
             if save_iterations:
                 with h5py.File(f'{save_result_to}_iter.h5', 'a') as out:
                     out['ilogvs'][iloop] = ilogvs
-                    out['tmax'][iloop] = tmax
+                    out['last_valid_it'][iloop] = last_valid_it
                     out['ilogu_coeffs'][iloop] = ilogu_coeffs
                     out['coeffs'][iloop] = coeffs
                     out['fit_success'][iloop] = success
