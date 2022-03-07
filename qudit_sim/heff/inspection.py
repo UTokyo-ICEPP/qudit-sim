@@ -6,6 +6,65 @@ from ..paulis import (get_num_paulis, make_generalized_paulis, make_prod_basis,
                       pauli_labels, unravel_basis_index, get_l0_projection)
 from ..utils import matrix_ufunc, make_ueff
 
+def heff_expr(
+    coefficients: np.ndarray,
+    symbol: Optional[str] = None,
+    threshold: Optional[float] = None
+) -> str:
+    """Generate a LaTeX expression of the effective Hamiltonian from the Pauli coefficients.
+    
+    The dymamic range of the numerical values of the coefficients is set by the maximum absolute
+    value. For example, if the maximum absolute value is between 1.e+6 and 1.e+9, the coefficients
+    are expressed in MHz, with the minimum of 0.001 MHz. Pauli terms whose coefficients have
+    absolute values below the threshold are ommitted.
+    
+    Args:
+        heff: Array of Pauli coefficients returned by find_heff
+        symbol: Symbol to use instead of :math:`\lambda` for the matrices.
+        threshold: Ignore terms with absolute coefficients below this value.
+        
+    Returns:
+        A LaTeX expression string for the effective Hamiltonian.
+    """
+    labels = pauli_labels(coefficients.shape[0], symbol)
+        
+    maxval = np.amax(np.abs(coefficients))
+    for base, unit in [(1.e+9, 'GHz'), (1.e+6, 'MHz'), (1.e+3, 'kHz'), (1., 'Hz')]:
+        norm = 2. * np.pi * base
+        if maxval > norm:
+            if threshold is None:
+                threshold = norm * 1.e-3
+            break
+            
+    if threshold is None:
+        raise RuntimeError(f'Passed coefficients with maxabs = {maxval}')
+            
+    expr = ''
+    
+    for index in np.ndindex(coefficients.shape):
+        coeff = coefficients[index]
+        if abs(coeff) < threshold:
+            continue
+            
+        if coeff < 0.:
+            expr += ' - '
+        elif expr:
+            expr += ' + '
+            
+        if len(coefficients.shape) == 1:
+            expr += f'{abs(coeff) / norm:.3f}{labels[index[0]]}'
+        else:
+            oper = ''.join(labels[i] for i in index)
+            if len(coefficients.shape) == 2:
+                denom = '2'
+            else:
+                denom = '2^{%d}' % (len(coefficients.shape) - 1)
+                
+            expr += f'{abs(coeff) / norm:.3f}' + (r'\frac{%s}{%s}' % (oper, denom))
+        
+    return (r'\frac{H_{\mathrm{eff}}}{2 \pi \mathrm{%s}} = ' % unit) + expr
+
+
 def inspect_iterative_fit(
     filename: str,
     ignore_coeffs_below: float = 0.

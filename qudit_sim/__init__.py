@@ -13,7 +13,7 @@ __all__ += [
 ]
 
 from .paulis import (get_num_paulis, make_generalized_paulis, make_prod_basis,
-                     get_l0_projection, unravel_basis_index, heff_expr, pauli_labels)
+                     get_l0_projection, unravel_basis_index, pauli_labels)
 
 __all__ += [
     'get_num_paulis',
@@ -60,9 +60,10 @@ else:
         'maximize_fidelity'
     ]
     
-from .heff.inspection import inspect_iterative_fit, inspect_maximize_fidelity
+from .heff.inspection import heff_expr, inspect_iterative_fit, inspect_maximize_fidelity
 
 __all__ += [
+    'heff_expr',
     'inspect_iterative_fit',
     'inspect_maximize_fidelity'
 ]
