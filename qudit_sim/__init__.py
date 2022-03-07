@@ -40,10 +40,11 @@ __all__ += [
     'inspect_find_heff'
 ]
 
-from .utils import matrix_ufunc
+from .utils import matrix_ufunc, heff_fidelity
 
 __all__ += [
-    'matrix_ufunc'
+    'matrix_ufunc',
+    'heff_fidelity'
 ]
 
 from .heff.iterative_fit import iterative_fit
@@ -51,3 +52,13 @@ from .heff.iterative_fit import iterative_fit
 __all__ += [
     'iterative_fit'
 ]
+
+try:
+    from .heff.maximize_fidelity import maximize_fidelity
+except ImportError:
+    # JAX not available
+    pass
+else:
+    __all__ += [
+        'maximize_fidelity'
+    ]

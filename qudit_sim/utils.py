@@ -1,10 +1,16 @@
-from typing import Callable
+from typing import Callable, Union
 
 import numpy as np
+try:
+    import jax.numpy as jnp
+except ImportError:
+    array_type = np.ndarray
+else:
+    array_type = Union[np.ndarray, jnp.DeviceArray]
 
 def matrix_ufunc(
     op: Callable,
-    mat: np.ndarray,
+    mat: array_type,
     hermitian: bool = False,
     with_diagonals: bool = False,
     npmod=np
@@ -37,3 +43,20 @@ def matrix_ufunc(
         return op_mat, op_eigvals
     else:
         return op_mat
+
+def heff_fidelity(
+    time_evolution: array_type,
+    heff_coeffs: array_type,
+    basis_list: array_type,
+    tlist: array_type,
+    num_qubits: int,
+    npmod=np
+) -> array_type:
+    heff = npmod.tensordot(basis_list, heff_coeffs, (0, 0)) / (2 ** (num_qubits - 1))
+    heff_t = tlist[:, None, None] * heff[None, ...]
+    ueffdag_t = matrix_ufunc(lambda v: npmod.exp(1.j * v), heff_t, hermitian=True, npmod=npmod)
+  
+    tr_u_ueffdag = npmod.tensordot(time_evolution, ueffdag_t, ((2, 1), (1, 2)))
+    fidelity = (npmod.square(tr_u_ueffdag.real) + npmod.square(tr_u_ueffdag.imag)) / (basis_list.shape[-1] ** 2)
+    
+    return fidelity

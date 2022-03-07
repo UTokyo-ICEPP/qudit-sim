@@ -18,10 +18,9 @@ else:
     import jax.numpy as jnp
     import jax.scipy.optimize
 
-from ..paulis import (get_num_paulis, make_generalized_paulis, make_prod_basis,
-                      unravel_basis_index, get_l0_projection)
-
+from ..paulis import make_generalized_paulis, make_prod_basis
 from ..utils import matrix_ufunc
+from .common import truncate_heff
 
 def iterative_fit(
     result: qtp.solver.Result,
@@ -35,15 +34,16 @@ def iterative_fit(
     save_iterations: bool = False,
     use_jax: bool = HAS_JAX
 ) -> np.ndarray:
+    original_log_level = logging.getLogger().level
     logging.getLogger().setLevel(log_level)
+    
+    if use_jax:
+        assert HAS_JAX, 'JAX is not installed'
     
     num_qubits = len(result.states[0].dims[0])
     num_sim_levels = result.states[0].dims[0][0]
     
     assert comp_dim <= num_sim_levels, 'Number of levels in simulation cannot be less than computational dimension'
-    
-    if use_jax:
-        assert HAS_JAX, 'JAX is not installed'
     
     tlist = result.times
     tsize = tlist.shape[0]
@@ -89,77 +89,76 @@ def iterative_fit(
                 out.create_dataset('ilogu_coeffs', shape=(tsize, basis_size), dtype='f')
 
     unitaries = time_evolution
+    tlist_norm = tlist / tend
     
     if use_jax:
-        time_evolution = jnp.array(time_evolution)
-        basis_list = jnp.array(basis_list)
-        # Normalized tlist
-        tlist_norm = jnp.array(tlist / tend)
-        
-        update_heff = jax.jit(partial(update_heff, numpy=jnp))
-        update_unitaries = jax.jit(partial(update_unitaries, numpy=jnp))
-        
-        numpy = jnp
+        npmod = jnp
         sciopt = jax.scipy.optimize
-        
     else:
-        tlist_norm = tlist / tend
-        
-        numpy = np
+        npmod = np
         sciopt = scipy.optimize
                 
-    def diff(params, ydata):
-        return ydata - tlist_norm * params[0]
-
     def fun(params, ydata, mask):
-        residual_masked = diff(params, ydata) * mask
-        return numpy.sum(numpy.square(residual_masked))
+        residual_masked = (tlist_norm * params[0] - ydata) * mask
+        return npmod.sum(npmod.square(residual_masked))
 
-    @partial(numpy.vectorize, excluded=(1,), signature='(t),()->(),(),()')
-    def get_coeffs(ydata, tmax):
-        mask = (numpy.arange(tsize) < tmax).astype(float)
-        res = jsciopt.minimize(fun, numpy.array([ydata[tmax]]), args=(ydata, mask), method='BFGS')
-        cumul = numpy.cumsum(diff(res.x, ydata) * mask)
-        com = numpy.amax(numpy.abs(cumul)) / numpy.amax(numpy.abs(ydata) * mask)
-        return res.x[0], res.success, com
+    @partial(npmod.vectorize, signature='(t),(),(t)->(),()')
+    def get_coeffs(ydata, x0, mask):
+        # Using minimize instead of curve_fit because the latter is not available in jax
+        res = sciopt.minimize(fun, npmod.array([x0]), args=(ydata, mask), method='BFGS')
+        return res.x[0] / tend, res.success
     
     def update_heff(ilogus, tmax, heff_coeffs):
         # Divide the trace by two to account for the normalization of the generalized Paulis
-        ilogu_coeffs = numpy.tensordot(ilogus, basis_list, ((1, 2), (2, 1))).real / 2.
+        ilogu_coeffs = npmod.tensordot(ilogus, basis_list, ((1, 2), (2, 1))).real / 2.
 
         ## Do a linear fit to each component
-        coeffs, success, com = get_coeffs(ilogu_coeffs.T, tmax, numpy=numpy)
+        mask = (npmod.arange(tsize) < tmax).astype(float)
+        coeffs, success = get_coeffs(ilogu_coeffs.T, ilogu_coeffs.T[:, tmax - 1], mask[None, :])
+        
+        cumul = npmod.cumsum((tlist[:, None] * coeffs[None, :] - ilogu_coeffs) * mask[:, None], axis=0)
+        maxabs = npmod.amax(npmod.abs(ilogu_coeffs) * mask[:, None], axis=0)
+        com = npmod.amax(npmod.abs(cumul), axis=0) / maxabs
 
         ## Update Heff with the best-fit coefficients
         is_update_candidate = success & (com < max_com)
         # If we have successfully made ilogu small that the fit range is the entire tlist,
         # also cut on the size of the coefficient (to avoid updating Heff with ~0 indefinitely)
-        coeff_nonnegligible = (numpy.abs(coeffs) > min_coeff_ratio * numpy.amax(numpy.abs(heff_coeffs)))
-        is_update_candidate &= coeff_nonnegligible | (tmax == tsize)
-
-        num_candidates = numpy.min(numpy.array([num_update_per_iteration, numpy.count_nonzero(is_update_candidate)]))
+        coeff_nonnegligible = (npmod.abs(coeffs) > min_coeff_ratio * npmod.amax(npmod.abs(heff_coeffs)))
+        is_update_candidate &= coeff_nonnegligible | (tmax != tsize)
+        
+        num_candidates = npmod.min(npmod.array([num_update_per_iteration, npmod.count_nonzero(is_update_candidate)]))
 
         ## Take the first n largest-coefficient candidates
-        update_indices = numpy.argsort(numpy.where(is_update_candidate, -numpy.abs(coeffs), 0.))
-
+        update_indices = npmod.argsort(npmod.where(is_update_candidate, -npmod.abs(coeffs), 0.))
+        
         ## Update the output array taking the coefficient of the best-fit component
-        mask = (numpy.arange(coeffs.shape[0]) < num_candidates).astype(float)
-        coeffs_sorted = coeffs[update_indices] * mask
-        coeffs = coeffs_sorted[numpy.argsort(update_indices)]
-
+        mask = (npmod.arange(coeffs.shape[0]) < num_candidates).astype(float)
+        coeffs_update = coeffs[update_indices] * mask
+        coeffs_update = coeffs_update[npmod.argsort(update_indices)]
+        
         if save_result_to:
-            return heff_coeffs + coeffs, num_candidates > 0, ilogu_coeffs, coeffs, success, com
+            return heff_coeffs + coeffs_update, num_candidates > 0, ilogu_coeffs, coeffs, success, com
         else:
-            return heff_coeffs + coeffs, num_candidates > 0
+            return heff_coeffs + coeffs_update, num_candidates > 0
 
     def update_unitaries(heff_coeffs):
-        heff = numpy.tensordot(basis_list, heff_coeffs, (0, 0))
+        heff = npmod.tensordot(basis_list, heff_coeffs, (0, 0))
         heff_t = tlist[:, None, None] * heff[None, ...]
-        exp_iheffs = matrix_ufunc(numpy.exp, 1.j * heff_t, hermitian=True, numpy=numpy)
-        return numpy.matmul(time_evolution, exp_iheffs)
+        exp_iheffs = matrix_ufunc(lambda v: npmod.exp(1.j * v), heff_t, hermitian=True, npmod=npmod)
+        return npmod.matmul(time_evolution, exp_iheffs)
+    
+    if use_jax:
+        time_evolution = jnp.array(time_evolution)
+        basis_list = jnp.array(basis_list)
+        # Normalized tlist
+        tlist_norm = jnp.array(tlist_norm)
+        
+        update_heff = jax.jit(update_heff)
+        update_unitaries = jax.jit(update_unitaries)
     
     ## Output array
-    heff_coeffs = np.zeros(basis_size)
+    heff_coeffs = npmod.zeros(basis_size)
 
     ## Iterative fit & subtract loop
     for iloop in range(max_iterations):
@@ -199,14 +198,14 @@ def iterative_fit(
                     
         else:
             heff_coeffs, updated = update_result
-    
+            
         ## Break if there were no updates in this iteration
         if not updated:
             break
         
         ## Unitarily subtract the current Heff from the time evolution
         if iloop != max_iterations - 1:
-            unitaries = update_unitaries(time_evolution, basis_t, heff_coeffs)
+            unitaries = update_unitaries(heff_coeffs)
             
     if save_result_to and save_iterations:
         with h5py.File(f'{save_result_to}_iter.h5', 'r') as source:
@@ -221,19 +220,9 @@ def iterative_fit(
         os.unlink(f'{save_result_to}_iter.h5')
 
     heff_coeffs = np.concatenate(([0.], heff_coeffs)).reshape(basis.shape[:-2])
-    
-    if comp_dim < num_sim_levels:
-        ## Truncate the hamiltonian to the computational subspace
-        l0_projection = get_l0_projection(comp_dim, num_sim_levels)
 
-        for iq in range(num_qubits):
-            indices = [slice(None)] * num_qubits
-            indices[iq] = 0
-            indices = tuple(indices)
-            
-            heff_coeffs[indices] = np.tensordot(heff_coeffs, l0_projection, (iq, 0))
-            
-        num_comp_paulis = get_num_paulis(comp_dim)
-        heff_coeffs = heff_coeffs[(slice(num_comp_paulis),) * num_qubits]
+    heff_coeffs = truncate_heff(heff_coeffs, num_sim_levels, comp_dim, num_qubits)
+        
+    logging.getLogger().setLevel(original_log_level)
 
     return heff_coeffs

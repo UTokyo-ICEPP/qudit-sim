@@ -32,10 +32,14 @@ def inspect_find_heff(filename):
     nx = min(nx, 12)
     ny = np.ceil((basis_size + 1) / nx).astype(int) + 1
     
-    is_update_candidate = success & (com < max_com)
     max_heff_coeff = np.amax(np.abs(heff_coeffs), axis=1, keepdims=True)
-    coeff_nonnegligible = (numpy.abs(coeffs) > min_coeff_ratio * max_heff_coeff)
-    is_update_candidate &= coeff_nonnegligible | (tmax != tlist.shape[0])
+    max_heff_coeff = np.repeat(max_heff_coeff, heff_coeffs.shape[1], axis=1)
+    coeff_ratio = np.zeros_like(coeffs)
+    np.divide(np.abs(coeffs), max_heff_coeff, out=coeff_ratio, where=(max_heff_coeff > 0.))
+    
+    is_update_candidate = success & (com < max_com)
+    coeff_nonnegligible = (coeff_ratio > min_coeff_ratio)
+    is_update_candidate[1:] &= coeff_nonnegligible[1:] | (tmax[1:, None] != tlist.shape[0])
 
     update_indices = np.argsort(np.where(is_update_candidate, -np.abs(coeffs), 0.))
     
