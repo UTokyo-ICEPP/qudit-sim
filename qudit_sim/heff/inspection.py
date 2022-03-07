@@ -2,7 +2,9 @@ import numpy as np
 import h5py
 import matplotlib.pyplot as plt
 
-from .paulis import get_num_paulis, pauli_labels, unravel_basis_index, get_l0_projection
+from ..paulis import (get_num_paulis, make_generalized_paulis, make_prod_basis,
+                      pauli_labels, unravel_basis_index, get_l0_projection)
+from ..utils import matrix_ufunc, make_ueff
 
 def inspect_iterative_fit(
     filename: str,
@@ -154,6 +156,12 @@ def inspect_maximize_fidelity(
         tlist = source['tlist'][()]
         heff_coeffs = source['heff_coeffs'][()]
         final_fidelity = source['final_fidelity'][()]
+        try:
+            loss = source['loss'][()]
+            grad = source['grad'][()]
+        except KeyError:
+            loss = None
+            grad = None
     
     paulis = make_generalized_paulis(num_sim_levels)
     basis = make_prod_basis(paulis, num_qubits)
@@ -214,6 +222,17 @@ def inspect_maximize_fidelity(
             # fidelity
             ax.set_ylabel('fidelity')
             ax.plot(tlist * 1.e+6, final_fidelity)
+            
+            if loss is not None:
+                ax = axes[0, 1]
+                ax.set_xlabel('steps')
+                ax.set_ylabel('loss')
+                ax.plot(loss)
+                
+                ax = axes[0, 2]
+                ax.set_xlabel('steps')
+                ax.set_ylabel('max(abs(grad))')
+                ax.plot(np.amax(np.abs(grad), axis=1))
         else:
             ax.set_ylabel(r'$ilog(U(t)U_{eff}^{\dagger}(t))$ eigenphases')
             ax.plot(tlist * 1.e+6, ilogvs)

@@ -34,13 +34,6 @@ __all__ += [
     'find_gate'
 ]
 
-from .inspection import inspect_iterative_fit, inspect_maximize_fidelity
-
-__all__ += [
-    'inspect_iterative_fit',
-    'inspect_maximize_fidelity'
-]
-
 from .utils import matrix_ufunc, make_heff, make_heff_t, make_ueff, heff_fidelity
 
 __all__ += [
@@ -66,3 +59,10 @@ else:
     __all__ += [
         'maximize_fidelity'
     ]
+    
+from .heff.inspection import inspect_iterative_fit, inspect_maximize_fidelity
+
+__all__ += [
+    'inspect_iterative_fit',
+    'inspect_maximize_fidelity'
+]

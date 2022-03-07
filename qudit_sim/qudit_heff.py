@@ -17,7 +17,7 @@ from .paulis import (get_num_paulis, make_generalized_paulis, make_prod_basis,
                     unravel_basis_index, get_l0_projection)
 from .pulse_sim import run_pulse_sim
 
-from .heff import iterative_fit
+from .heff import iterative_fit, maximize_fidelity
 
 def find_heff(
     qubits: Sequence[int],
@@ -26,7 +26,7 @@ def find_heff(
     num_sim_levels: int = 2,
     num_cycles: int = 400,
     comp_dim: int = 2,
-    method: Callable = 'iterative_fit',
+    method: Callable = 'maximize_fidelity',
     extraction_params: Optional[Dict] = None,
     save_result_to: Optional[str] = None,
     save_iterations: bool = False,
