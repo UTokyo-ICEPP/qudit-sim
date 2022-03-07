@@ -60,10 +60,12 @@ else:
         'maximize_fidelity'
     ]
     
-from .heff.visualize import heff_expr, inspect_iterative_fit, inspect_maximize_fidelity
+from .heff.visualize import (heff_expr, coeffs_graph,
+                             inspect_iterative_fit, inspect_maximize_fidelity)
 
 __all__ += [
     'heff_expr',
+    'coeffs_graph',
     'inspect_iterative_fit',
     'inspect_maximize_fidelity'
 ]

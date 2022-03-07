@@ -1,5 +1,7 @@
+from typing import Optional
 import numpy as np
 import h5py
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 
 from ..paulis import (get_num_paulis, make_generalized_paulis, make_prod_basis,
@@ -33,7 +35,7 @@ def heff_expr(
         norm = 2. * np.pi * base
         if maxval > norm:
             if threshold is None:
-                threshold = norm * 1.e-3
+                threshold = norm * 1.e-2
             break
             
     if threshold is None:
@@ -63,6 +65,48 @@ def heff_expr(
             expr += f'{abs(coeff) / norm:.3f}' + (r'\frac{%s}{%s}' % (oper, denom))
         
     return (r'\frac{H_{\mathrm{eff}}}{2 \pi \mathrm{%s}} = ' % unit) + expr
+
+
+def coeffs_graph(
+    coefficients: np.ndarray,
+    symbol: Optional[str] = None,
+    threshold: Optional[float] = None
+) -> mpl.figure.Figure:
+    
+    labels = pauli_labels(coefficients.shape[0], symbol)
+        
+    maxval = np.amax(np.abs(coefficients))
+    for base, unit in [(1.e+9, 'GHz'), (1.e+6, 'MHz'), (1.e+3, 'kHz'), (1., 'Hz')]:
+        norm = 2. * np.pi * base
+        if maxval > norm:
+            if threshold is None:
+                threshold = norm * 1.e-2
+            break
+            
+    if threshold is None:
+        raise RuntimeError(f'Passed coefficients with maxabs = {maxval}')
+    
+    indices = np.argsort(-np.abs(coefficients.reshape(-1)))
+    nterms = np.count_nonzero(np.abs(coefficients) > threshold)
+    indices = indices[:nterms]
+    indices_shaped = np.unravel_index(indices, coefficients.shape)
+    
+    fig, ax = plt.subplots(1, 1)
+    ax.bar(np.arange(nterms), coefficients.reshape(-1)[indices] / norm)
+    
+    xticks = list(f'${labels[idx]}' for idx in indices_shaped[0])
+
+    for axis_indices in indices_shaped[1:]:
+        for ient, idx in enumerate(axis_indices):
+            xticks[ient] += f'{labels[idx]}'
+            
+    for ient in range(nterms):
+        xticks[ient] += '$'
+        
+    ax.set_xticks(np.arange(nterms), labels=xticks)
+    ax.set_ylabel(r'$\nu/(2\pi{' + unit + '})$')
+    
+    return fig
 
 
 def inspect_iterative_fit(
