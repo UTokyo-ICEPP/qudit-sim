@@ -7,7 +7,7 @@ def matrix_ufunc(
     mat: np.ndarray,
     hermitian: bool = False,
     with_diagonals: bool = False,
-    numpy=np
+    npmod=np
 ) -> np.ndarray:
     """Apply a unitary-invariant unary matrix operator to an array of normal matrices.
     
@@ -23,15 +23,15 @@ def matrix_ufunc(
         An array corresponding to `op(mat)`. If `diagonals==True`, another array corresponding to `op(eigvals)`.
     """
     if hermitian:
-        eigvals, eigcols = numpy.linalg.eigh(mat)
+        eigvals, eigcols = npmod.linalg.eigh(mat)
     else:
-        eigvals, eigcols = numpy.linalg.eig(mat)
+        eigvals, eigcols = npmod.linalg.eig(mat)
         
-    eigrows = numpy.conjugate(numpy.moveaxis(eigcols, -2, -1))
+    eigrows = npmod.conjugate(npmod.moveaxis(eigcols, -2, -1))
 
     op_eigvals = op(eigvals)
     
-    op_mat = numpy.matmul(eigcols * op_eigvals[..., None, :], eigrows)
+    op_mat = npmod.matmul(eigcols * op_eigvals[..., None, :], eigrows)
 
     if with_diagonals:
         return op_mat, op_eigvals

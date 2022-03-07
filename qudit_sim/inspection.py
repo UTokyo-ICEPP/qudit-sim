@@ -32,14 +32,11 @@ def inspect_find_heff(filename):
     nx = min(nx, 12)
     ny = np.ceil((basis_size + 1) / nx).astype(int) + 1
     
-    max_heff_coeff = np.amax(np.abs(heff_coeffs), axis=1)
-    max_heff_coeff = np.repeat(max_heff_coeff[:, None], heff_coeffs.shape[1], axis=1)
-    coeff_ratio = np.zeros_like(coeffs)
-    np.divide(np.abs(coeffs), max_heff_coeff, out=coeff_ratio, where=(max_heff_coeff > 0.))
-    
     is_update_candidate = success & (com < max_com)
-    fit_range_truncated = (tmax < tlist.shape[0])
-    is_update_candidate[1:] &= (fit_range_truncated[1:, None] | (coeff_ratio[1:] > min_coeff_ratio))
+    max_heff_coeff = np.amax(np.abs(heff_coeffs), axis=1, keepdims=True)
+    coeff_nonnegligible = (numpy.abs(coeffs) > min_coeff_ratio * max_heff_coeff)
+    is_update_candidate &= coeff_nonnegligible | (tmax != tlist.shape[0])
+
     update_indices = np.argsort(np.where(is_update_candidate, -np.abs(coeffs), 0.))
     
     log_com = np.zeros_like(com)
@@ -87,9 +84,7 @@ def inspect_find_heff(filename):
 
         ## Second row and on: individual pauli coefficients
         
-        num_candidates = is_update_candidate[iloop].nonzero()[0].shape[0]
-        if num_update > 0:
-            num_candidates = min(num_update, num_candidates)
+        num_candidates = min(num_update_per_iteration, np.count_nonzero(is_update_candidate[iloop]))
 
         selected = update_indices[iloop, :num_candidates]
         

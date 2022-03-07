@@ -26,8 +26,8 @@ def find_heff(
     num_sim_levels: int = 2,
     num_cycles: int = 400,
     comp_dim: int = 2,
-    method: Callable = iterative_fit,
-    extraction_params: Dict,
+    method: Callable = 'iterative_fit',
+    extraction_params: Optional[Dict] = None,
     save_result_to: Optional[str] = None,
     save_iterations: bool = False,
     log_level: int = logging.WARNING
@@ -70,8 +70,16 @@ def find_heff(
         num_cycles,
         save_result_to,
         log_level)
+    
+    if method == 'iterative_fit':
+        extraction_fn = iterative_fit
+    elif method == 'maximize_fidelity':
+        extraction_fn = maximize_fidelity
+        
+    if extraction_params is None:
+        extraction_params = dict()
 
-    heff_coeffs = method(
+    heff_coeffs = extraction_fn(
         result,
         comp_dim,
         save_result_to,
