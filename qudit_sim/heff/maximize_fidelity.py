@@ -10,16 +10,16 @@ import h5py
 import qutip as qtp
 
 from ..paulis import make_generalized_paulis, make_prod_basis
-from ..utils import matrix_ufunc, heff_fidelity
+from ..utils import matrix_ufunc
 from .iterative_fit import iterative_fit
-from .common import get_ilogus_and_valid_it, truncate_heff
+from .common import get_ilogus_and_valid_it, heff_fidelity, truncate_heff
 
 ## TODO Add jax_device keyword and allow parallel execution over multiple devices
 
 # Having this function defined here allows a reuse of jitted code, presumably
 @jax.jit
 def _loss_fn(time_evolution, heff_coeffs_norm, basis_list, num_qubits, tlist_norm):
-    fidelity = heff_fidelity(time_evolution, heff_coeffs_norm, basis_list, num_qubits, tlist_norm, npmod=jnp)
+    fidelity = heff_fidelity(time_evolution, heff_coeffs_norm, basis_list, tlist_norm, num_qubits, npmod=jnp)
     return 1. - 1. / (tlist_norm.shape[0] + 1) - jnp.mean(fidelity)
 
 def maximize_fidelity(
@@ -27,7 +27,7 @@ def maximize_fidelity(
     comp_dim: int = 2,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
-    optimizer: Union[optax.GradientTransformation, str] = optax.adam(0.05),
+    optimizer: Union[optax.GradientTransformation, str] = optax.adam(0.05), 
     init: Union[str, np.ndarray] = 'slope_estimate',
     max_updates: int = 10000,
     convergence: float = 1.e-4,
@@ -151,7 +151,7 @@ def maximize_fidelity(
         heff_coeffs = np.concatenate(([0.], params['c'] / tlist[-1])).reshape(basis.shape[:-2])
 
     if save_result_to:
-        final_fidelity = np.concatenate(([1.], heff_fidelity(time_evolution, heff_coeffs, basis, num_qubits, tlist[1:])))
+        final_fidelity = np.concatenate(([1.], heff_fidelity(time_evolution, heff_coeffs, basis, tlist[1:], num_qubits)))
         with h5py.File(f'{save_result_to}.h5', 'a') as out:
             out.create_dataset('heff_coeffs', data=heff_coeffs)
             out.create_dataset('final_fidelity', data=final_fidelity)

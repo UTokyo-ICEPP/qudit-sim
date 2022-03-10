@@ -2,12 +2,12 @@ from typing import Optional, Any
 import string
 import numpy as np
 
-def get_num_paulis(comp_dim: int) -> int:
-    return comp_dim ** 2
+def get_num_paulis(dim: int) -> int:
+    return dim ** 2
 
 
 def make_generalized_paulis(
-    comp_dim: int = 2,
+    dim: int = 2,
     matrix_dim: Optional[int] = None
 ) -> np.ndarray:
     """Return a list of generalized Pauli matrices of given dimension as a numpy array.
@@ -29,25 +29,25 @@ def make_generalized_paulis(
     \lambda^{(n)}_0 = \sqrt{\frac{2}{n}} I_n.
     
     Args:
-        comp_dim: Dimension of the Pauli matrices.
-        matrix_dim: Dimension of the containing matrix, which may be greater than `comp_dim`.
+        dim: Dimension of the Pauli matrices.
+        matrix_dim: Dimension of the containing matrix, which may be greater than `dim`.
         
     Returns:
         The full list of Pauli matrices as an array of dtype `complex128` and shape
-            `(comp_dim ** 2, matrix_dim, matrix_dim)`.
+            `(dim ** 2, matrix_dim, matrix_dim)`.
     """
     
     if matrix_dim is None:
-        matrix_dim = comp_dim
+        matrix_dim = dim
         
-    assert matrix_dim >= comp_dim, 'Matrix dimension cannot be smaller than Pauli dimension'
+    assert matrix_dim >= dim, 'Matrix dimension cannot be smaller than Pauli dimension'
     
-    num_paulis = get_num_paulis(comp_dim)
+    num_paulis = get_num_paulis(dim)
     
     paulis = np.zeros((num_paulis, matrix_dim, matrix_dim), dtype=np.complex128)
-    paulis[0, :comp_dim, :comp_dim] = np.diagflat(np.ones(comp_dim))
+    paulis[0, :dim, :dim] = np.diagflat(np.ones(dim))
     ip = 1
-    for idim in range(1, comp_dim):
+    for idim in range(1, dim):
         for irow in range(idim):
             paulis[ip, irow, idim] = 1.
             paulis[ip, idim, irow] = 1.
@@ -128,12 +128,12 @@ def make_prod_basis(
 
 def unravel_basis_index(
     indices: Any,
-    comp_dim: int,
+    dim: int,
     num_qubits: int
 ) -> np.ndarray:
     """Compute the index into prod_basis from a flat list index.
     """
-    num_paulis = get_num_paulis(comp_dim)
+    num_paulis = get_num_paulis(dim)
     shape = [num_paulis] * num_qubits
     return np.unravel_index(indices, shape)
 
@@ -147,4 +147,14 @@ def pauli_labels(num_paulis: int, symbol: Optional[str] = None):
     else:
         labels = list((r'%s_{%d}' % (symbol, i)) for i in range(num_paulis))
         
-    return labels
+    return np.array(labels)
+
+
+def prod_basis_labels(dim: int, num_qubits: int, symbol: Optional[str] = None):
+    num_paulis = get_num_paulis(dim)
+    labels = pauli_labels(num_paulis, symbol=symbol)
+    out = labels
+    for _ in range(1, num_qubits):
+        out = np.char.add(np.repeat(out[..., None], num_paulis, axis=-1), labels)
+        
+    return out

@@ -19,8 +19,8 @@ else:
     import jax.scipy.optimize
 
 from ..paulis import make_generalized_paulis, make_prod_basis
-from ..utils import matrix_ufunc, make_ueff
-from .common import get_ilogus_and_valid_it, truncate_heff
+from ..utils import matrix_ufunc
+from .common import get_ilogus_and_valid_it, make_ueff, truncate_heff
 
 def iterative_fit(
     result: qtp.solver.Result,
@@ -143,7 +143,7 @@ def iterative_fit(
             return heff_coeffs + coeffs_update, num_candidates > 0
 
     def update_unitaries(heff_coeffs):
-        ueff_dagger = make_ueff(heff_coeffs, basis_list, num_qubits, tlist, phase_factor=1., npmod=jnp)
+        ueff_dagger = make_ueff(heff_coeffs, basis_list, tlist, num_qubits, phase_factor=1., npmod=jnp)
         return npmod.matmul(time_evolution, ueff_dagger)
     
     if use_jax:

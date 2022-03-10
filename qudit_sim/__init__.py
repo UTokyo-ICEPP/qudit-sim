@@ -13,7 +13,8 @@ __all__ += [
 ]
 
 from .paulis import (get_num_paulis, make_generalized_paulis, make_prod_basis,
-                     get_l0_projection, unravel_basis_index, pauli_labels)
+                     get_l0_projection, unravel_basis_index,
+                     pauli_labels, prod_basis_labels)
 
 __all__ += [
     'get_num_paulis',
@@ -22,7 +23,8 @@ __all__ += [
     'get_l0_projection',
     'unravel_basis_index',
     'heff_expr',
-    'pauli_labels'
+    'pauli_labels',
+    'prod_basis_labels'
 ]
 
 from .qudit_heff import (find_heff, run_pulse_sim_for_heff,
@@ -34,14 +36,10 @@ __all__ += [
     'find_gate'
 ]
 
-from .utils import matrix_ufunc, make_heff, make_heff_t, make_ueff, heff_fidelity
+from .utils import matrix_ufunc
 
 __all__ += [
-    'matrix_ufunc',
-    'make_heff',
-    'make_heff_t',
-    'make_ueff',
-    'heff_fidelity'
+    'matrix_ufunc'
 ]
 
 from .heff.iterative_fit import iterative_fit
@@ -68,4 +66,14 @@ __all__ += [
     'coeffs_graph',
     'inspect_iterative_fit',
     'inspect_maximize_fidelity'
+]
+
+from .heff.common import (make_heff, make_heff_t, make_ueff,
+                          heff_fidelity)
+
+__all__ += [
+    'make_heff',
+    'make_heff_t',
+    'make_ueff',
+    'heff_fidelity'
 ]
