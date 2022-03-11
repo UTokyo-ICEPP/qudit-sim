@@ -1,10 +1,13 @@
 from typing import Any, Dict, List, Tuple, Sequence, Optional, Union
 import os
 import copy
+import tempfile
 import numpy as np
 import qutip as qtp
 
 phase_epsilon = 1.e-9
+
+DriveDef = Dict[int, Dict[str, Any]]
 
 class DriveExprGen:
     def __init__(self, num_channels: int) -> None:
@@ -22,7 +25,7 @@ class DriveExprGen:
         
     def generate(
         self,
-        drive_def: Dict[int, Dict[str, Any]]
+        drive_def: DriveDef
     ) -> Tuple[str, str]:
         """Generate the time-dependent coefficient expression for H_x and H_y
         
@@ -122,7 +125,7 @@ class DriveExprGen:
     
     def max_frequency(
         self,
-        drive_def: Dict[int, Dict[str, Any]]
+        drive_def: DriveDef
     ) -> float:
         """Return the maximum frequency for the drive def."""
         
@@ -334,7 +337,7 @@ def make_hamiltonian_components(
 def build_pulse_hamiltonian(
     h_int: Sequence[Tuple[float, qtp.Qobj, qtp.Qobj]],
     h_drive: Sequence[Tuple[DriveExprGen, qtp.Qobj, qtp.Qobj]],
-    drive_def: Dict[int, Dict[str, Any]]
+    drive_def: DriveDef
 ) -> List[Union[qtp.Qobj, Tuple[qtp.Qobj, str]]]:
     """Build the list of Hamiltonian terms to be passed to the QuTiP solver from a drive pulse definition.
     
@@ -378,7 +381,7 @@ def build_pulse_hamiltonian(
 def make_tlist(
     h_int: Sequence[Tuple[float, qtp.Qobj, qtp.Qobj]],
     h_drive: Sequence[Tuple[DriveExprGen, qtp.Qobj, qtp.Qobj]],
-    drive_def: Dict[int, Dict[str, Any]],
+    drive_def: Union[List[DriveDef], DriveDef],
     points_per_cycle: int,
     num_cycles: int
 ) -> np.ndarray:
@@ -387,7 +390,7 @@ def make_tlist(
     Args:
         h_int: List of interaction term components returned by `make_hamiltonian_components`.
         h_drive: List of drive term components returned by `make_hamiltonian_components`.
-        drive_def: Drive definition. See the docstring of DriveExprGen for details.
+        drive_def: Drive definition or a list thereof. See the docstring of DriveExprGen for details.
         points_per_cycle: Number of points per cycle at the highest frequency.
         num_cycles: Number of overall cycles.
         
@@ -395,7 +398,12 @@ def make_tlist(
         Array of time points.
     """
     frequency_list = list(abs(freq) for freq, _, _ in h_int)
-    frequency_list.extend(expr_gen.max_frequency(drive_def) for expr_gen, _, _ in h_drive)
+    if isinstance(drive_def, list):
+        for dd in drive_def:
+            frequency_list.extend(expr_gen.max_frequency(dd) for expr_gen, _, _ in h_drive)
+    else:
+        frequency_list.extend(expr_gen.max_frequency(drive_def) for expr_gen, _, _ in h_drive)
+        
     max_frequency = max(frequency_list)
 
     if max_frequency == 0.:
@@ -413,25 +421,29 @@ def make_tlist(
 def run_pulse_sim(
     qubits: Sequence[int],
     params: Dict[str, Any],
-    drive_def: Dict[int, Dict[str, Any]],
+    drive_def: Union[List[DriveDef], DriveDef],
     psi0: qtp.Qobj = qtp.basis(2, 0),
     tlist: Union[np.ndarray, Tuple[int, int]] = (10, 100),
     e_ops: Optional[Sequence[Any]] = None,
     options: Optional[qtp.solver.Options] = None,
-    save_result_to: Optional[str] = None
+    save_result_to: Optional[str] = None,
+    num_cpus: int = 0
 ) -> qtp.solver.Result:
     """Run a pulse simulation.
 
     Args:
         qubits: List of qudits to include in the Hamiltonian.
         params: Hamiltonian parameters. See the docstring of make_hamiltonian_components for details.
-        drive_def: Drive definition. See the docstring of DriveExprGen for details.
+        drive_def: Drive definition or a list thereof. See the docstring of DriveExprGen for details.
+            If a list is passed, `save_result_to` is ignored.
         psi0: Initial state Qobj.
         tlist: Time points to use in the simulation or a pair `(points_per_cycle, num_cycles)` where in the latter
             case the cycle of the fastest oscillating term in the Hamiltonian will be used.
         e_ops: List of observables passed to the QuTiP solver.
         options: QuTiP solver options.
         save_result_to: File name (without the extension) to save the simulation result to.
+        num_cpus: Number of threads to use when a list is passed as `drive_def`. If <=0, set to
+            `qutip.settings.num_cpus`.
 
     Returns:
         Result of running `qutip.sesolve`.
@@ -448,20 +460,30 @@ def run_pulse_sim(
         qubits, params,
         num_levels=num_sim_levels)
     
-    hamiltonian = build_pulse_hamiltonian(h_int, h_drive, drive_def)
-    
     if isinstance(tlist, tuple):
         # List of time slices not given; define using the highest frequency in the Hamiltonian.
         tlist = make_tlist(h_int, h_drive, drive_def, *tlist)
-
-    cd = os.getcwd()
-    os.chdir('/tmp')
-
-    result = qtp.sesolve(hamiltonian, psi0, tlist, e_ops=e_ops, options=options)
-
-    os.chdir(cd)
+        
+    cwd = os.getcwd()
+    with tempfile.TemporaryDirectory() as tempdir:
+        os.chdir(tempdir)
     
-    if save_result_to:
-        qtp.fileio.qsave(result, save_result_to)
+        if isinstance(drive_def, list):
+            hamiltonians = list(build_pulse_hamiltonian(h_int, h_drive, dd) for dd in drive_def)
+            kwargs = {'e_ops': e_ops, 'options': options}
+            if num_cpus > 0:
+                kwargs['num_cpus'] = num_cpus
+            
+            result = qtp.parallel.parallel_map(qtp.sesolve, hamiltonians, task_args=(psi0, tlist), task_kwargs=kwargs)
+
+        else:
+            hamiltonian = build_pulse_hamiltonian(h_int, h_drive, drive_def)
+
+            result = qtp.sesolve(hamiltonian, psi0, tlist, e_ops=e_ops, options=options)
+
+            if save_result_to:
+                qtp.fileio.qsave(result, save_result_to)
+                
+        os.chdir(cwd)
         
     return result

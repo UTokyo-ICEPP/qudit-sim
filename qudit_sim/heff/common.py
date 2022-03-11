@@ -65,7 +65,8 @@ def make_heff_t(
 ) -> array_type:
     heff = make_heff(heff_coeffs, basis_or_dim, num_qubits=num_qubits, npmod=npmod)
     tlist = npmod.asarray(tlist)
-    return tlist.reshape(tlist.shape + (1, 1)) * heff.reshape(tlist.shape + heff.shape)
+    tdims = (1,) * len(tlist.shape)
+    return tlist[..., None, None] * heff.reshape(tdims + heff.shape)
 
 
 def make_ueff(
@@ -103,6 +104,8 @@ def truncate_heff(
     comp_dim: int,
     num_qubits: int
 ) -> np.ndarray:
+    heff_coeffs = heff_coeffs.copy()
+    
     if comp_dim == num_sim_levels:
         return heff_coeffs
 

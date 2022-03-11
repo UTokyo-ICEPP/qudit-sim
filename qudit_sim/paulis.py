@@ -150,8 +150,7 @@ def pauli_labels(num_paulis: int, symbol: Optional[str] = None):
     return np.array(labels)
 
 
-def prod_basis_labels(dim: int, num_qubits: int, symbol: Optional[str] = None):
-    num_paulis = get_num_paulis(dim)
+def prod_basis_labels(num_paulis: int, num_qubits: int, symbol: Optional[str] = None):
     labels = pauli_labels(num_paulis, symbol=symbol)
     out = labels
     for _ in range(1, num_qubits):

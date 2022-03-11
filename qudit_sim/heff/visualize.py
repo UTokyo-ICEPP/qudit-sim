@@ -321,7 +321,7 @@ def _plot_ilogu_coeffs(axes, coeffs_data, threshold, tlist, num_sim_levels, comp
     num_comp_paulis = get_num_paulis(comp_dim)
     basis_size = num_paulis ** num_qubits - 1
 
-    labels = prod_basis_labels(num_sim_levels, num_qubits)
+    labels = prod_basis_labels(num_paulis, num_qubits)
     
     ymax = np.amax(coeffs_data)
     ymin = np.amin(coeffs_data)
