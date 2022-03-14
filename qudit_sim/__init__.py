@@ -12,6 +12,15 @@ __all__ += [
     'run_pulse_sim'
 ]
 
+from .hamiltonian import (ScaledExpression, ComplexExpression,
+                          RWAHamiltonian)
+
+__all__ += [
+    'ScaledExpression',
+    'ComplexExpression',
+    'RWAHamiltonian'
+]
+
 from .paulis import (get_num_paulis, make_generalized_paulis, make_prod_basis,
                      get_l0_projection, unravel_basis_index,
                      pauli_labels, prod_basis_labels)
