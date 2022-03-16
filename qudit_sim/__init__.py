@@ -1,19 +1,13 @@
 __all__ = []
 
-from .pulse_sim import (DriveExprGen, make_hamiltonian_components,
-                       build_pulse_hamiltonian, make_tlist,
-                       run_pulse_sim)
+from .pulse_sim import run_pulse_sim
 
 __all__ += [
-    'DriveExprGen',
-    'make_hamiltonian_components',
-    'build_pulse_hamiltonian',
-    'make_tlist',
     'run_pulse_sim'
 ]
 
-from .hamiltonian import (ScaledExpression, ComplexExpression,
-                          RWAHamiltonian)
+from .hamiltonian_utils import (ScaledExpression, ComplexExpression)
+from .hamiltonian import RWAHamiltonian
 
 __all__ += [
     'ScaledExpression',
@@ -36,12 +30,12 @@ __all__ += [
     'prod_basis_labels'
 ]
 
-from .qudit_heff import (find_heff, run_pulse_sim_for_heff,
+from .qudit_heff import (find_heff, run_constant_drive_sim,
                          find_gate)
 
 __all__ += [
     'find_heff',
-    'run_pulse_sim_for_heff',
+    'run_constant_drive_sim',
     'find_gate'
 ]
 

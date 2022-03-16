@@ -1,205 +1,22 @@
-from typing import Any, Dict, Sequence, List
-import collections
+from typing import Any, Dict, Sequence, List, Tuple, Callable, Optional, Union
 import copy
-import re
 import numpy as np
 import qutip as qtp
 
-FREQUENCY_EPSILON = 1.e-6
+from .hamiltonian_utils import (ScaledExpression, ComplexExpression, ComplexFunction)
 
-class ScaledExpression:
-    def __init__(self, arg1, arg2=None, epsilon=1.e-6):
-        self._expression = None
-        
-        if isinstance(arg1, ScaledExpression):
-            self.scale = arg1.scale
-            self._expression = arg1._expression
-            self.epsilon = arg1.epsilon
-            return
-        
-        if arg2 is None and isinstance(arg1, tuple):
-            arg1, arg2 = arg1
-        
-        if arg2 is None:
-            if isinstance(arg1, str):
-                try:
-                    self.scale = eval(arg1)
-                except NameError:
-                    self.scale = 1.
-                    self._expression = arg1
-            else:
-                self.scale = arg1
-        else:
-            self.scale = arg1
-            try:
-                self.scale *= eval(arg2)
-            except (TypeError, NameError):
-                self._expression = arg2
+DriveAmplitude = Union[Callable, ScaledExpression.InitArg]
 
-        self.epsilon = epsilon
-        
-    @property
-    def expression(self):
-        if self._expression is None:
-            return None
-        elif (re.match(r'[a-z]*\(.+\)$', self._expression)
-            or re.match(r'[^+-]+$', self._expression)):
-            return self._expression
-        else:
-            return f'({self._expression})'
-        
-    def __str__(self):
-        if self.is_zero():
-            return '0'
-        elif self._expression is None:
-            return f'{self.scale}'
-        elif self.scale == 1.:
-            return self.expression
-        elif self.scale == -1.:
-            return f'-{self.expression}'
-        else:
-            return f'{self.scale}*{self.expression}'
-        
-    def __repr__(self):
-        return f'ScaledExpression({self.scale}, {self._expression}, {self.epsilon})'
-        
-    def __add__(self, rhs):
-        if isinstance(rhs, ScaledExpression):
-            if self._expression is None and rhs._expression is None:
-                return ScaledExpression(self.scale + rhs.scale)
-            elif self.is_zero():
-                return ScaledExpression(rhs)
-            elif rhs.is_zero():
-                return ScaledExpression(self)
-            else:
-                if rhs.scale < 0.:
-                    return ScaledExpression(1., f'{self}-{-rhs}')
-                else:
-                    return ScaledExpression(1., f'{self}+{rhs}')
-        else:
-            if isinstance(rhs, str):
-                return self.__add__(ScaledExpression(1., rhs))
-            else:
-                return self.__add__(ScaledExpression(rhs))
-            
-    def __sub__(self, rhs):
-        return self.__add__(-rhs)
+FREQUENCY_EPSILON = 1.e+2
     
-    def __neg__(self):
-        return ScaledExpression(-self.scale, self._expression, self.epsilon)
-        
-    def __mul__(self, rhs):
-        if isinstance(rhs, ScaledExpression):
-            num = self.scale * rhs.scale
+def cos_freq(freq):
+    return lambda t, args: np.cos(freq * t)
 
-            if self._expression is None:
-                if rhs._expression is None:
-                    return ScaledExpression(num)
-                else:
-                    return ScaledExpression(num, rhs.expression)
-            else:
-                if rhs._expression is None:
-                    return ScaledExpression(num, self.expression)
-                else:
-                    return ScaledExpression(num, f'{self.expression}*{rhs.expression}')
-        else:
-            if isinstance(rhs, str):
-                return self.__mul__(ScaledExpression(1., rhs))
-            else:
-                return self.__mul__(ScaledExpression(rhs))
-            
-    def __abs__(self):
-        if self.is_zero():
-            return ScaledExpression(0., None, self.epsilon)
-        elif self._expression is None:
-            return ScaledExpression(abs(self.scale), None, self.epsilon)
-        else:
-            return ScaledExpression(abs(self.scale), f'abs({self._expression})', self.epsilon)
-        
-    def scale_abs(self):
-        return ScaledExpression(abs(self.scale), self._expression, self.epsilon)
-            
-    def is_zero(self):
-        return abs(self.scale) < self.epsilon
-    
+def sin_freq(freq):
+    return lambda t, args: np.sin(freq * t)
 
-class ComplexExpression:
-    def __init__(self, real, imag):
-        self.real = ScaledExpression(real)
-        self.imag = ScaledExpression(imag)
-            
-    def __str__(self):
-        return f'{self.real}+{self.imag}j'
     
-    def __repr__(self):
-        return f'ComplexExpression({self.real}, {self.imag})'
-        
-    def __mul__(self, rhs):
-        if isinstance(rhs, ComplexExpression) or isinstance(rhs, complex):
-            real = self.real * rhs.real - self.imag * rhs.imag
-            imag = self.real * rhs.imag + self.imag * rhs.real
-            return ComplexExpression(real, imag)
-        else:
-            return ComplexExpression(self.real * rhs, self.imag * rhs)
-        
-    def __add__(self, rhs):
-        if isinstance(rhs, ComplexExpression) or isinstance(rhs, complex):
-            real = self.real + rhs.real
-            imag = self.imag + rhs.imag
-            return ComplexExpression(real, imag)
-        else:
-            return ComplexExpression(self.real + rhs, self.imag)
-        
-    def __getitem__(self, key):
-        if key == 0:
-            return self.real
-        elif key == 1:
-            return self.imag
-        else:
-            raise IndexError(f'Index {key} out of range')
-            
-    def __abs__(self):
-        if self.real.is_zero():
-            return abs(self.imag)
-        elif self.imag.is_zero():
-            return abs(self.real)
-        elif self.real.expression == self.imag.expression:
-            scale = np.sqrt(np.square(self.real.scale) + np.square(self.imag.scale))
-            return ScaledExpression(scale, f'abs({self.real._expression})')
-        else:
-            r2 = self.real * self.real
-            i2 = self.imag * self.imag
-            m2 = r2 + i2
-            return ScaledExpression(f'np.sqrt({m2})')
-            
-    def is_zero(self):
-        return self.real.is_zero() and self.imag.is_zero()
-    
-    def angle(self):
-        if self.imag.is_zero():
-            return np.arctan2(0., self.real.scale)
-        elif self.real.is_zero():
-            return np.arctan2(self.imag.scale, 0.)
-        elif self.real.expression == self.imag.expression:
-            return np.arctan2(self.imag.scale, self.real.scale)
-        else:
-            raise ValueError('Angle cannot be defined for non-static phase ComplexExpression')
-            
-    def polar(self):
-        phase = self.angle()
-        
-        if self.imag.is_zero():
-            radial = self.real.scale_abs()
-        elif self.real.is_zero():
-            radial = self.imag.scale_abs()
-        elif self.real.expression == self.imag.expression:
-            scale = np.sqrt(np.square(self.real.scale) + np.square(self.imag.scale))
-            radial = ScaledExpression(scale, self.real._expression, self.real.epsilon)
-
-        return radial, phase
-    
-
-class RWAHamiltonian:
+class RWAHamiltonianGenerator:
     r"""Rotating-wave approximation Hamiltonian in the qudit frame.
 
     **Full Hamiltonian:**
@@ -318,7 +135,8 @@ class RWAHamiltonian:
         self,
         qubits: Sequence[int],
         params: Dict[str, Any],
-        num_levels: int = 2
+        num_levels: int = 2,
+        compile_hint: bool = True
     ) -> None:
         r"""
         Args:
@@ -328,6 +146,7 @@ class RWAHamiltonian:
                 factor `z` (complex corresponding to :math:`\alpha_{jk} e^{i\phi_{jk}}`) of drive on qubit `i` seen
                 by qubit `j`. `i` and `j` are qubit ids given in `qubits`.
             num_levels: Number of oscillator levels to consider.
+            compile_hint: If True, interaction Hamiltonian terms are given as compilable strings.
         """
         ## Validate and format the input
 
@@ -339,7 +158,7 @@ class RWAHamiltonian:
         self.qubit_index_mapping = dict((q, iq) for iq, q in enumerate(qubits))
         
         self.num_levels = num_levels
-
+        
         ## Parse the parameters
         
         self.qubit_frequencies = np.array([params[f'wq{q}'] for q in qubits])
@@ -357,13 +176,20 @@ class RWAHamiltonian:
         # Element [j,k]: \alpha_{jk} \frac{\Omega}{2} \exp (i \phi_{jk})
         self.drive_base = amps[:, None] * crosstalk_matrix
         
-        self._max_frequency = 0.
-
-        ## Compute the interaction term components
-
+        self._max_frequency_int = 0.
+        self._max_frequency_drive = 0.
+        
+        ## Lists of Hamiltonian terms
+        
+        self._hdrive = list()
+        self._hint = list()
         self._static_term = qtp.Qobj()
-        self._hamiltonian = []
 
+        # Does this represent an array-based Hamiltonian?
+        self._need_tlist = False
+        
+        ## Compute the interaction term components
+        
         for q1 in qubits:
             iq1 = self.qubit_index_mapping[q1]
 
@@ -395,44 +221,57 @@ class RWAHamiltonian:
                         h_y = J * 1.j * (qtp.tensor(op).dag() - qtp.tensor(op))
                         freq = freq_diff + D1 * l1 - D2 * l2
 
-                        self._hamiltonian.append((h_x, f'cos({freq}*t)'))
-                        self._hamiltonian.append((h_y, f'sin({freq}*t)'))
+                        if compile_hint:
+                            self._hint.append([h_x, f'cos({freq}*t)'])
+                            self._hint.append([h_y, f'sin({freq}*t)'])
+                        else:
+                            self._hint.append([h_x, cos_freq(freq)])
+                            self._hint.append([h_y, sin_freq(freq)])
                         
-                        self._max_frequency = max(self._max_frequency, abs(freq))
+                        self._max_frequency_int = max(self._max_frequency_int, abs(freq))
                         
     @property
     def max_frequency(self) -> float:
-        return self._max_frequency
+        """Return the maximum frequency appearing in this Hamiltonian."""
+        
+        return max(self._max_frequency_int, self._max_frequency_drive)
     
     @property
-    def hamiltonian(self) -> List:
-        if self._static_term == qtp.Qobj():
-            return list(self._hamiltonian)
-        else:
-            # The static term does not have to be the first element (nor does it have to be a single term, actually)
-            # but qutip recommends following this convention
-            return [self._static_term] + self._hamiltonian
+    def need_tlist(self) -> bool:
+        return self._need_tlist
 
     def add_drive(
         self,
         qubit: int,
-        drive_def: Dict[str, Any]
+        frequency: float,
+        amplitude: Optional[Union[complex, np.ndarray, DriveAmplitude, Tuple[DriveAmplitude, DriveAmplitude]]] = None
     ) -> None:
-
+        """Add a drive term.
+        
+        Args:
+            qubit: ID of the qubit to apply the drive to.
+            frequency: Carrier frequency of the drive.
+            amplitude: A constant drive amplitude or an envelope function.
+        """
         ich = self.qubit_index_mapping[qubit]
         num_qubits = len(self.qubit_index_mapping)
         
-        try:
-            amp_def = drive_def["amplitude"]
-        except KeyError:
+        if amplitude is None:
             drive_amp = ComplexExpression(1., 0.)
         else:
-            if isinstance(amp_def, complex):
-                drive_amp = ComplexExpression(amp_def.real, amp_def.imag)
-            elif isinstance(amp_def, tuple):
-                drive_amp = ComplexExpression(amp_def[0], amp_def[1])
+            if isinstance(amplitude, complex):
+                drive_amp = ComplexExpression(amplitude.real, amplitude.imag)
+            elif isinstance(amplitude, np.ndarray):
+                drive_amp = amplitude
+                self._need_tlist = True
             else:
-                drive_amp = ComplexExpression(amp_def, 0.)
+                if not isinstance(amplitude, tuple):
+                    amplitude = (amplitude, 0.)
+                    
+                if callable(amplitude[0]):
+                    drive_amp = ComplexFunction(amplitude[0], amplitude[1])
+                else:
+                    drive_amp = ComplexExpression(amplitude[0], amplitude[1])
             
         for iq in range(num_qubits):
             if self.drive_base[ich, iq] == 0.:
@@ -441,28 +280,35 @@ class RWAHamiltonian:
             # Amplitude expressions for X (even) and Y (odd) terms
             # Corresponds to R_j(t) := \alpha_{jk} \frac{\Omega_j}{2} r_j(t) \exp(i \phi_{jk})
             envelope = drive_amp * self.drive_base[ich, iq]
-            try:
-                radial, phase = envelope.polar()
-            except ValueError:
-                radial = None
+            if isinstance(envelope, ComplexExpression):
+                try:
+                    radial, phase = envelope.polar()
+                except ValueError:
+                    radial = None
             
             # Define one Hamiltonian term per level
             for level in range(self.num_levels - 1):
                 # \omega_k + n \Delta_k
                 level_frequency = self.qubit_frequencies[iq] + level * self.anharmonicities[iq]
                 # \nu_j - \omega_k - n \Delta_k
-                detuning = drive_def['frequency'] - level_frequency
+                detuning = frequency - level_frequency
                 
                 if abs(detuning) < FREQUENCY_EPSILON:
-                    amplitude = copy.deepcopy(envelope)
-                elif radial is not None:
-                    carrier_phase = f'{-detuning}*t{phase:+}'
-                    amplitude = ComplexExpression(f'cos({carrier_phase})', f'sin({carrier_phase})')
-                    amplitude *= radial
-                else:
-                    carrier = ComplexExpression(f'cos({-detuning}*t)', f'sin({-detuning}*t)')
-                    amplitude = carrier * envelope
-
+                    level_drive = copy.deepcopy(envelope)
+                    
+                elif isinstance(envelope, ComplexExpression):
+                    if radial is not None:
+                        carrier_phase = f'{-detuning}*t{phase:+}'
+                        level_drive = ComplexExpression(f'cos({carrier_phase})', f'sin({carrier_phase})')
+                        level_drive *= radial
+                    else:
+                        carrier = ComplexExpression(f'cos({-detuning}*t)', f'sin({-detuning}*t)')
+                        level_drive = carrier * envelope
+                        
+                elif isinstance(envelope, (ComplexFunction, np.ndarray)):
+                    carrier = ComplexFunction(cos_freq(-detuning), sin_freq(-detuning))
+                    level_drive = carrier * envelope
+                    
                 qudit_ops = [qtp.qeye(self.num_levels)] * num_qubits
                 qudit_ops[iq] = (np.sqrt(level + 1) * qtp.basis(self.num_levels, level)
                     * qtp.basis(self.num_levels, level + 1).dag())
@@ -470,13 +316,82 @@ class RWAHamiltonian:
                 h_x = annihilator.dag() + annihilator
                 h_y = 1.j * (annihilator.dag() - annihilator)
                 
-                for h, amp in zip((h_x, h_y), amplitude):
-                    if amp.is_zero():
-                        continue
-                        
-                    if amp.expression is None:
-                        self._static_term += h * amp.scale
+                for h, amp in zip((h_x, h_y), level_drive):
+                    if isinstance(level_drive, ComplexExpression):
+                        if amp.is_zero():
+                            continue
+
+                        if amp.expression is None:
+                            self._static_term += h * amp.scale
+                        else:
+                            self._hdrive.append([h * amp.scale, amp.expression])
+
                     else:
-                        self._hamiltonian.append((h * amp.scale, amp.expression))
+                        if amp:
+                            self._hdrive.append([h, amp])
                         
-                self._max_frequency = max(self._max_frequency, abs(detuning))
+                self._max_frequency_drive = max(self._max_frequency_drive, abs(detuning))
+                
+    def clear_drive(self) -> None:
+        """Reset all drive-related attributes."""
+        self._hdrive = list()
+        self._max_frequency_drive = 0.
+        self._need_tlist = False
+        
+    def generate(self) -> List:
+        """Return the list of Hamiltonian terms passable to qutip.sesolve."""
+        
+        if self._need_tlist:
+            raise RuntimeError('This Hamiltonian must be instantiated with array_hamiltonian()')
+        
+        if self._static_term == qtp.Qobj():
+            return self._hint + self._hdrive
+        else:
+            # The static term does not have to be the first element (nor does it have to be a single term, actually)
+            # but qutip recommends following this convention
+            return [self._static_term] + self._hint + self._hdrive
+
+    def array_generate(
+        self,
+        tlist: np.ndarray,
+        args: Optional[Dict[str, Any]] = None
+    ) -> List:
+        """Return a list of Hamiltonian terms passable to qutip.sesolve.
+        
+        When at least one drive term is given in terms of an ndarray, the concrete Hamiltonian must be generated
+        through this function. When all time-dependent terms are string-based, the output is identical to what is
+        obtained from `generate()`.
+        """
+        hamiltonian = []
+        
+        if self._static_term != qtp.Qobj():
+            hamiltonian.append(self._static_term)
+            
+        for h, f in self._hint + self._hdrive:
+            if callable(f):
+                hamiltonian.append([h, f(tlist, args)])
+            else:
+                hamiltonian.append([h, f])
+        
+        return hamiltonian
+
+    def make_tlist(
+        self,
+        points_per_cycle: int,
+        num_cycles: int
+    ) -> np.ndarray:
+        """Generate a list of time points using the maximum frequency in the Hamiltonian.
+        
+        Raises an exception when the maximum frequency is 0 (i.e. single-qubit simulation with resonant drive).
+    
+        Args:
+            points_per_cycle: Number of points per cycle at the highest frequency.
+            num_cycles: Number of overall cycles.
+
+        Returns:
+            Array of time points.
+        """
+        if self.max_frequency == 0.:
+            raise RuntimeError('Cannot determine the maximum time for simulation')
+            
+        return np.linspace(0., 2. * np.pi / self.max_frequency * num_cycles, points_per_cycle * num_cycles)

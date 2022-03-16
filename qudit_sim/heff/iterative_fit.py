@@ -7,7 +7,6 @@ logging.basicConfig(level=logging.INFO)
 import numpy as np
 import scipy.optimize
 import h5py
-import qutip as qtp
 
 try:
     import jax
@@ -23,7 +22,10 @@ from ..utils import matrix_ufunc
 from .common import get_ilogus_and_valid_it, make_ueff, truncate_heff
 
 def iterative_fit(
-    result: qtp.solver.Result,
+    time_evolution: np.ndarray,
+    tlist: np.ndarray,
+    num_qubits: int = 1,
+    num_sim_levels: int = 2,
     comp_dim: int = 2,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
@@ -34,18 +36,27 @@ def iterative_fit(
     save_iterations: bool = False,
     use_jax: bool = HAS_JAX
 ) -> np.ndarray:
+    """Determine the effective Hamiltonian from the simulation result using the iterative fit method.
+    
+    Args:
+        max_com: Convergence condition.
+        min_coeff_ratio: Convergence condition.
+        num_update: Number of coefficients to update per iteration. If <= 0, all candidate coefficients are updated.
+        max_iterations: Maximum number of fit & subtract iterations.
+        
+    Returns:
+        Pauli coefficients of the effective Hamiltonian.
+    """
     original_log_level = logging.getLogger().level
     logging.getLogger().setLevel(log_level)
+    
+    assert comp_dim <= num_sim_levels, 'Number of levels in simulation cannot be less than computational dimension'
+    matrix_dim = num_sim_levels ** num_qubits
+    assert time_evolution.shape == (tlist.shape[0], matrix_dim, matrix_dim), 'Inconsistent input shape'
     
     if use_jax:
         assert HAS_JAX, 'JAX is not installed'
     
-    num_qubits = len(result.states[0].dims[0])
-    num_sim_levels = result.states[0].dims[0][0]
-    
-    assert comp_dim <= num_sim_levels, 'Number of levels in simulation cannot be less than computational dimension'
-    
-    tlist = result.times
     tsize = tlist.shape[0]
     tend = tlist[-1]
 
@@ -60,17 +71,7 @@ def iterative_fit(
     if num_update_per_iteration <= 0:
         num_update_per_iteration = basis_size
 
-    ## Time evolution unitaries
-    time_evolution = np.concatenate(list(np.expand_dims(state.full(), axis=0) for state in result.states))
-    
-    if save_result_to:
-        with h5py.File(f'{save_result_to}.h5', 'w') as out:
-            out.create_dataset('num_qubits', data=num_qubits)
-            out.create_dataset('num_sim_levels', data=num_sim_levels)
-            out.create_dataset('comp_dim', data=comp_dim)
-            out.create_dataset('time_evolution', data=time_evolution)
-            out.create_dataset('tlist', data=result.times)
-        
+    if save_result_to:        
         if save_iterations:
             with h5py.File(f'{save_result_to}_iter.h5', 'w') as out:
                 out.create_dataset('max_com', data=max_com)

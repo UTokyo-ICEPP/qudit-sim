@@ -1,5 +1,4 @@
 from typing import Callable, Union
-
 import numpy as np
 try:
     import jax.numpy as jnp
@@ -7,6 +6,8 @@ except ImportError:
     array_type = np.ndarray
 else:
     array_type = Union[np.ndarray, jnp.DeviceArray]
+    
+from .paulis import 
     
 def matrix_ufunc(
     op: Callable,

@@ -7,23 +7,17 @@ import jax.numpy as jnp
 from iminuit import Minuit
 import optax
 import h5py
-import qutip as qtp
 
 from ..paulis import make_generalized_paulis, make_prod_basis
 from ..utils import matrix_ufunc
 from .iterative_fit import iterative_fit
 from .common import get_ilogus_and_valid_it, heff_fidelity, truncate_heff
 
-## TODO Add jax_device keyword and allow parallel execution over multiple devices
-
-# Having this function defined here allows a reuse of jitted code, presumably
-@jax.jit
-def _loss_fn(time_evolution, heff_coeffs_norm, basis_list, num_qubits, tlist_norm):
-    fidelity = heff_fidelity(time_evolution, heff_coeffs_norm, basis_list, tlist_norm, num_qubits, npmod=jnp)
-    return 1. - 1. / (tlist_norm.shape[0] + 1) - jnp.mean(fidelity)
-
 def maximize_fidelity(
-    result: qtp.solver.Result,
+    time_evolution: np.ndarray,
+    tlist: np.ndarray,
+    num_qubits: int = 1,
+    num_sim_levels: int = 2,
     comp_dim: int = 2,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
@@ -36,13 +30,10 @@ def maximize_fidelity(
     original_log_level = logging.getLogger().level
     logging.getLogger().setLevel(log_level)
     
-    num_qubits = len(result.states[0].dims[0])
-    num_sim_levels = result.states[0].dims[0][0]
-    
     assert comp_dim <= num_sim_levels, 'Number of levels in simulation cannot be less than computational dimension'
+    matrix_dim = num_sim_levels ** num_qubits
+    assert time_evolution.shape == (tlist.shape[0], matrix_dim, matrix_dim), 'Inconsistent input shape'
     
-    tlist = result.times
-
     ## Set up the Pauli product basis of the space of Hermitian operators
     paulis = make_generalized_paulis(num_sim_levels)
     basis = make_prod_basis(paulis, num_qubits)
@@ -50,18 +41,6 @@ def maximize_fidelity(
     # Flattened list of basis operators excluding the identity operator
     basis_list = jnp.array(basis.reshape(-1, *basis.shape[-2:])[1:])
     basis_size = basis_list.shape[0]
-    
-    ## Time evolution unitaries
-    time_evolution = np.concatenate(list(np.expand_dims(state.full(), axis=0) for state in result.states))
-    
-    ## Save the setup
-    if save_result_to:
-        with h5py.File(f'{save_result_to}.h5', 'w') as out:
-            out.create_dataset('num_qubits', data=num_qubits)
-            out.create_dataset('num_sim_levels', data=num_sim_levels)
-            out.create_dataset('comp_dim', data=comp_dim)
-            out.create_dataset('time_evolution', data=time_evolution)
-            out.create_dataset('tlist', data=result.times)
     
     ## Set the initial parameter values
     if isinstance(init, str):
@@ -74,7 +53,10 @@ def maximize_fidelity(
             logging.info('Performing iterative fit to estimate the initial parameter values')
             
             init = iterative_fit(
-                result,
+                time_evolution,
+                tlist,
+                num_qubits=num_qubits,
+                num_sim_levels=num_sim_levels,
                 comp_dim=num_sim_levels,
                 log_level=log_level,
                 **kwargs).reshape(-1)[1:]
@@ -89,6 +71,12 @@ def maximize_fidelity(
     tlist_norm = jnp.array(tlist[1:] / tlist[-1])
     
     ## Loss minimization (fidelity maximization)
+    @jax.jit
+    def _loss_fn(time_evolution, heff_coeffs_norm, basis_list, num_qubits, tlist_norm):
+        fidelity = heff_fidelity(time_evolution, heff_coeffs_norm, basis_list, tlist_norm, num_qubits, npmod=jnp)
+        return 1. - 1. / (tlist_norm.shape[0] + 1) - jnp.mean(fidelity)
+    
+    
     if optimizer == 'minuit':
         loss_fn = jax.jit(lambda c: _loss_fn(time_evolution, c, basis_list, num_qubits, tlist_norm))
         grad = jax.jit(jax.grad(loss_fn))
