@@ -98,15 +98,15 @@ class RWAHamiltonianGenerator:
         \bar{H}_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left[ r_j(t) e^{-i (\epsilon_{jk} t - \phi_{jk})} e^{i \Delta_k (N_k - 1) t} b_k^{\dagger} \right. \\
         \left. + r^{*}_j(t) e^{i (\epsilon_{jk} t - \phi_{jk})} e^{-i \Delta_k N_k t} b_k \right],
         
-    where :math:`\epsilon_{jk} = \nu_j - \omega_k` and :math:`r_j(t) = p_j(t) + i q_j(t)`.
+    where :math:`\epsilon_{jk} := \nu_j - \omega_k` and :math:`r_j(t) := p_j(t) + i q_j(t)`.
     
     The RWA drive Hamiltonian in the frequency domain is (assuming :math:`\tilde{p}_j` and :math:`\tilde{q}_j` have
     support only around the qudit frequencies)
     
     .. math::
     
-        \bar{H}_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \int d\nu \left[ \tilde{r}_j(\nu) e^{i [(\omega_k - \nu) t + \phi_{jk}]} e^{i \Delta_k (N_k - 1) t} b_k^{\dagger} \right. \\
-        \left. + \tilde{r}^{*}_j(\nu) e^{-i [(\omega_k - \nu) t + \phi_{jk}]} e^{-i \Delta_k N_k t} b_k \right].
+        \bar{H}_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \int d\nu \left[ \tilde{r}_j(\nu) e^{-i [(\nu - \omega_k) t - \phi_{jk}]} e^{i \Delta_k (N_k - 1) t} b_k^{\dagger} \right. \\
+        \left. + \tilde{r}^{*}_j(\nu) e^{i [(\nu - \omega_k) t - \phi_{jk}]} e^{-i \Delta_k N_k t} b_k \right].
     
     **QuTiP implementation:**
     

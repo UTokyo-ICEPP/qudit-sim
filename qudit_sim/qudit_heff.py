@@ -5,6 +5,7 @@ import time
 import string
 import collections
 import logging
+import multiprocessing
 from functools import partial
 logging.basicConfig(level=logging.INFO)
 
@@ -12,6 +13,11 @@ import numpy as np
 import scipy
 import h5py
 import qutip as qtp
+try:
+    import jax
+    num_jax_devices = jax.local_device_count()
+except ImportError:
+    num_jax_devices = 1
 
 from .paulis import (get_num_paulis, make_generalized_paulis, make_prod_basis,
                     unravel_basis_index, get_l0_projection)
@@ -29,7 +35,7 @@ def find_heff(
     method: str = 'maximize_fidelity',
     extraction_params: Optional[Dict] = None,
     save_result_to: Optional[str] = None,
-    sim_num_cpus: int = 0,
+    num_cpus: int = None,
     log_level: int = logging.WARNING
 ) -> np.ndarray:
     """Run a pulse simulation with constant drives and extract the Pauli components of the effective Hamiltonian.
@@ -83,34 +89,41 @@ def find_heff(
     tlist_tuple = (10, num_cycles)
     
     if isinstance(drive_def, list):
-        task_args = (qubits, params, psi0, tlist_tuple)
-        kwargs = dict()
-        if sim_num_cpus > 0:
-            kwargs['num_cpus'] = sim_num_cpus
+        with multiprocessing.Pool(processes=num_cpus) as pool:
+            async_results = list()
+            for ddef in drive_def:
+                args = (qubits, params, ddef, psi0, tlist_tuple)
+                res = pool.apply_async(run_pulse_sim, args)
+                async_res.append(res)
 
-        results = qtp.parallel.parallel_map(run_pulse_sim, drive_def, task_args=task_args, **kwargs)
+            results = list(res.get() for res in async_results)
+
+            async_results = list()
+            jax_device_id = 0
+            for result in results:
+                time_evolution = np.stack(list(state.full() for state in result.states))
+                tlist = result.times
+
+                args = (time_evolution, tlist)
+                kwargs = {
+                    'num_qubits': num_qubits,
+                    'num_sim_levels': num_sim_levels,
+                    'comp_dim': comp_dim,
+                    'log_level': log_level,
+                    'jax_device_id': jax_device_id
+                }
+                kwargs.update(extraction_params)
+
+                jax_device_id += 1
+                jax_device_id %= num_jax_devices
+
+                res = pool.apply_async(extraction_fn, args, kwargs)
+                async_res.append(res)
+
+            heff_coeffs = list(res.get() for res in async_results)
         
-        # Temporary implementation - in the final form, pass the results array to extraction_fn directly and
-        # let it return an array
-        
-        heff_coeffs = list()
-
-        for result in results:
-            time_evolution = np.stack(list(state.full() for state in result.states))
-            tlist = result.times
-            
-            coeffs = extraction_fn(
-                time_evolution,
-                tlist,
-                num_qubits=num_qubits,
-                num_sim_levels=num_sim_levels,
-                comp_dim=comp_dim,
-                log_level=log_level,
-                **extraction_params)
-            
-            heff_coeffs.append(coeffs)
-
         return np.stack(heff_coeffs)
+    
     else:
         result = run_pulse_sim(drive_def, qubits, params, psi0, tlist_tuple, save_result_to=save_result_to)
         

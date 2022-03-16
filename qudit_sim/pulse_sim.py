@@ -9,9 +9,9 @@ from .hamiltonian import RWAHamiltonianGenerator
 DriveDef = Dict[Union[int, str], Dict[str, Any]]
 
 def run_pulse_sim(
-    drive_def: Dict,
     qubits: Sequence[int],
     params: Dict[str, Any],
+    drive_def: Dict,
     psi0: qtp.Qobj = qtp.basis(2, 0),
     tlist: Union[np.ndarray, Tuple[int, int]] = (10, 100),
     force_array: bool = False,
@@ -23,11 +23,11 @@ def run_pulse_sim(
     """Run a pulse simulation.
 
     Args:
+        qubits: List of qudits to include in the Hamiltonian.
+        params: Hamiltonian parameters. See the docstring of RWAHamiltonian for details.
         drive_def: Drive definition dict. Keys are qubit ids and values are dicts of format
             `{'frequency': frequency, 'amplitude': amplitude}`. Can optionally include a key `'args'` where the
             corresponding value is then passed to the `args` argument of `sesolve`.
-        qubits: List of qudits to include in the Hamiltonian.
-        params: Hamiltonian parameters. See the docstring of RWAHamiltonian for details.
         psi0: Initial state Qobj.
         tlist: Time points to use in the simulation or a pair `(points_per_cycle, num_cycles)` where in the latter
             case the cycle of the fastest oscillating term in the Hamiltonian will be used.

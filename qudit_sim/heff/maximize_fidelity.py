@@ -1,5 +1,6 @@
 from typing import Optional, Union
 import logging
+from functools import partial
 
 import numpy as np
 import jax
@@ -21,6 +22,7 @@ def maximize_fidelity(
     comp_dim: int = 2,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
+    jax_device_id: Optional[int] = None,
     optimizer: Union[optax.GradientTransformation, str] = optax.adam(0.05), 
     init: Union[str, np.ndarray] = 'slope_estimate',
     max_updates: int = 10000,
@@ -34,12 +36,17 @@ def maximize_fidelity(
     matrix_dim = num_sim_levels ** num_qubits
     assert time_evolution.shape == (tlist.shape[0], matrix_dim, matrix_dim), 'Inconsistent input shape'
     
+    if jax_device_id is None:
+        jax_device = None
+    else:
+        jax_device = jax.devices()[jax_device_id]
+    
     ## Set up the Pauli product basis of the space of Hermitian operators
     paulis = make_generalized_paulis(num_sim_levels)
     basis = make_prod_basis(paulis, num_qubits)
     del paulis
     # Flattened list of basis operators excluding the identity operator
-    basis_list = jnp.array(basis.reshape(-1, *basis.shape[-2:])[1:])
+    basis_list = jax.device_put(basis.reshape(-1, *basis.shape[-2:])[1:], device=jax_device)
     basis_size = basis_list.shape[0]
     
     ## Set the initial parameter values
@@ -59,27 +66,28 @@ def maximize_fidelity(
                 num_sim_levels=num_sim_levels,
                 comp_dim=num_sim_levels,
                 log_level=log_level,
+                jax_device_id=jax_device_id,
                 **kwargs).reshape(-1)[1:]
             
         elif init == 'random':
             init = (np.random.random(basis_size) * 2. - 1.) / tlist[-1]
             
-    initial = jnp.array(init * tlist[-1])
+    initial = jax.device_put(init * tlist[-1], device=jax_device)
     
     ## Working arrays (index 0 is trivial and in fact causes the grad to diverge)
-    time_evolution = jnp.array(time_evolution[1:])
-    tlist_norm = jnp.array(tlist[1:] / tlist[-1])
+    time_evolution = jax.device_put(time_evolution[1:], device=jax_device)
+    tlist_norm = jax.device_put(tlist[1:] / tlist[-1], device=jax_device)
     
     ## Loss minimization (fidelity maximization)
-    @jax.jit
+    @partial(jax.jit, device=jax_device)
     def _loss_fn(time_evolution, heff_coeffs_norm, basis_list, num_qubits, tlist_norm):
         fidelity = heff_fidelity(time_evolution, heff_coeffs_norm, basis_list, tlist_norm, num_qubits, npmod=jnp)
         return 1. - 1. / (tlist_norm.shape[0] + 1) - jnp.mean(fidelity)
     
-    
     if optimizer == 'minuit':
-        loss_fn = jax.jit(lambda c: _loss_fn(time_evolution, c, basis_list, num_qubits, tlist_norm))
-        grad = jax.jit(jax.grad(loss_fn))
+        loss_fn = jax.jit(lambda c: _loss_fn(time_evolution, c, basis_list, num_qubits, tlist_norm),
+                          device=jax_device)
+        grad = jax.jit(jax.grad(loss_fn), device=jax_device)
         
         minimizer = Minuit(loss_fn, initial, grad=grad)
         minimizer.strategy = 0
@@ -100,8 +108,9 @@ def maximize_fidelity(
             loss_values = np.zeros(max_updates, dtype='f8')
             grad_values = np.zeros((max_updates, initial.shape[0]), dtype='f8')
             
-        loss_fn = jax.jit(lambda params: _loss_fn(time_evolution, params['c'], basis_list, num_qubits, tlist_norm))
-        loss_and_grad = jax.jit(jax.value_and_grad(loss_fn))
+        loss_fn = jax.jit(lambda params: _loss_fn(time_evolution, params['c'], basis_list, num_qubits, tlist_norm),
+                          device=jax_device)
+        loss_and_grad = jax.jit(jax.value_and_grad(loss_fn), device=jax_device)
 
         @jax.jit
         def step(params, opt_state):
