@@ -5,7 +5,7 @@ import time
 import string
 import collections
 import logging
-import multiprocessing
+from multiprocessing import Process, cpu_count
 from functools import partial
 logging.basicConfig(level=logging.INFO)
 
@@ -13,17 +13,13 @@ import numpy as np
 import scipy
 import h5py
 import qutip as qtp
-try:
-    import jax
-    num_jax_devices = jax.local_device_count()
-except ImportError:
-    num_jax_devices = 1
 
 from .paulis import (get_num_paulis, make_generalized_paulis, make_prod_basis,
                     unravel_basis_index, get_l0_projection)
 from .pulse_sim import run_pulse_sim, DriveDef
+from .parallel import parallel_map
 
-from .heff import iterative_fit, maximize_fidelity
+logger = logging.getLogger(__name__)
 
 def find_heff(
     qubits: Sequence[int],
@@ -35,7 +31,9 @@ def find_heff(
     method: str = 'maximize_fidelity',
     extraction_params: Optional[Dict] = None,
     save_result_to: Optional[str] = None,
-    num_cpus: int = None,
+    sim_num_cpus: int = 0,
+    ext_num_cpus: int = 0,
+    jax_devices: Optional[List] = None,
     log_level: int = logging.WARNING
 ) -> np.ndarray:
     """Run a pulse simulation with constant drives and extract the Pauli components of the effective Hamiltonian.
@@ -59,12 +57,19 @@ def find_heff(
         save_result_to: File name (without the extension) to save the simulation and extraction results to.
             Simulation result will not be saved when a list is passed as `drive_def`.
         sim_num_cpus: Number of threads to use for the pulse simulation when a list is passed as `drive_def`.
-            If <=0, set to `qutip.settings.num_cpus`.
+            If <=0, set to `multiprocessing.cpu_count()`.
+        ext_num_cpus: Number of threads to use for Pauli coefficient extraction when a list is passed as `drive_def`.
+            If <=0, set to `multiprocessing.cpu_count()`. For extraction methods that use GPUs, the combination of
+            `jax_devices` and this parameter controls how many processes will be run on each device.
+        jax_devices: List of GPU ids (integers starting at 0) to use.
         
     Returns:
         An array with the value at index `[i, j, ..]` corresponding to the coefficient of
             :math:`(\lambda_i \otimes \lambda_j \otimes \dots)/2^{n-1}` of the effective Hamiltonian.
     """
+    original_log_level = logger.level
+    logger.setLevel(log_level)
+    
     if isinstance(qubits, int):
         qubits = (qubits,)
         
@@ -73,8 +78,10 @@ def find_heff(
     ## Extraction function and parameters
     
     if method == 'iterative_fit':
+        from .heff import iterative_fit
         extraction_fn = iterative_fit
     elif method == 'maximize_fidelity':
+        from .heff import maximize_fidelity
         extraction_fn = maximize_fidelity
         
     if extraction_params is None:
@@ -84,48 +91,75 @@ def find_heff(
     
     psi0 = qtp.tensor([qtp.qeye(num_sim_levels)] * num_qubits)
     
-    logging.info('Running a square pulse simulation for %d cycles', num_cycles)
+    logger.info('Running a square pulse simulation for %d cycles', num_cycles)
 
     tlist_tuple = (10, num_cycles)
     
     if isinstance(drive_def, list):
-        with multiprocessing.Pool(processes=num_cpus) as pool:
-            async_results = list()
-            for ddef in drive_def:
-                args = (qubits, params, ddef, psi0, tlist_tuple)
-                res = pool.apply_async(run_pulse_sim, args)
-                async_res.append(res)
-
-            results = list(res.get() for res in async_results)
-
-            async_results = list()
-            jax_device_id = 0
-            for result in results:
-                time_evolution = np.stack(list(state.full() for state in result.states))
-                tlist = result.times
-
-                args = (time_evolution, tlist)
-                kwargs = {
-                    'num_qubits': num_qubits,
-                    'num_sim_levels': num_sim_levels,
-                    'comp_dim': comp_dim,
-                    'log_level': log_level,
-                    'jax_device_id': jax_device_id
-                }
-                kwargs.update(extraction_params)
-
-                jax_device_id += 1
-                jax_device_id %= num_jax_devices
-
-                res = pool.apply_async(extraction_fn, args, kwargs)
-                async_res.append(res)
-
-            heff_coeffs = list(res.get() for res in async_results)
+        results = parallel_map(
+            run_pulse_sim,
+            mapped_args=drive_def,
+            arg_position=2,
+            common_args=(qubits, params),
+            common_kwargs={'psi0': psi0, 'tlist': tlist_tuple, 'log_level': log_level},
+            num_cpus=sim_num_cpus,
+            log_level=log_level
+        )
         
-        return np.stack(heff_coeffs)
+        logger.info('Passing the simulation results to %s', extraction_fn.__name__)
+        
+        if jax_devices is None:
+            try:
+                import jax
+                num_jax_devices = jax.local_device_count()
+            except ImportError:
+                num_jax_devices = 1
+
+            jax_devices = list(range(num_jax_devices))
+
+        jax_device_iter = iter(jax_devices)
+            
+        mapped_args = []
+        mapped_kwargs = []
+        for time_evolution, tlist in results:
+            try:
+                jax_device_id = next(jax_device_iter)
+            except StopIteration:
+                jax_device_iter = iter(jax_devices)
+                jax_device_id = next(jax_device_iter)
+            
+            mapped_args.append((time_evolution, tlist))
+            mapped_kwargs.append({'jax_device_id': jax_device_id})
+            
+        common_kwargs = {
+            'num_qubits': num_qubits,
+            'num_sim_levels': num_sim_levels,
+            'comp_dim': comp_dim,
+            'log_level': log_level
+        }
+        common_kwargs.update(extraction_params)
+        
+        heff_coeffs = parallel_map(
+            extraction_fn,
+            mapped_args=mapped_args,
+            mapped_kwargs=mapped_kwargs,
+            common_kwargs=common_kwargs,
+            num_cpus=ext_num_cpus,
+            log_level=log_level,
+            thread_based=True
+        )
+        
+        heff_coeffs = np.stack(heff_coeffs)
     
     else:
-        result = run_pulse_sim(drive_def, qubits, params, psi0, tlist_tuple, save_result_to=save_result_to)
+        result = run_pulse_sim(
+            qubits,
+            params,
+            drive_def,
+            psi0=psi0,
+            tlist=tlist_tuple,
+            save_result_to=save_result_to,
+            log_level=log_level)
         
         time_evolution = np.stack(list(state.full() for state in result.states))
         tlist = result.times
@@ -138,7 +172,7 @@ def find_heff(
                 out.create_dataset('time_evolution', data=time_evolution)
                 out.create_dataset('tlist', data=tlist)
 
-        return extraction_fn(
+        heff_coeffs = extraction_fn(
             time_evolution,
             tlist,
             num_qubits=num_qubits,
@@ -147,3 +181,7 @@ def find_heff(
             save_result_to=save_result_to,
             log_level=log_level,
             **extraction_params)
+
+    logger.setLevel(original_log_level)
+    
+    return heff_coeffs

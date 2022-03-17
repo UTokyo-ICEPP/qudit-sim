@@ -7,7 +7,7 @@ from .hamiltonian_utils import (ScaledExpression, ComplexExpression, ComplexFunc
 
 DriveAmplitude = Union[Callable, ScaledExpression.InitArg]
 
-FREQUENCY_EPSILON = 1.e+2
+REL_FREQUENCY_EPSILON = 1.e-7
     
 def cos_freq(freq):
     return lambda t, args: np.cos(freq * t)
@@ -293,7 +293,7 @@ class RWAHamiltonianGenerator:
                 # \nu_j - \omega_k - n \Delta_k
                 detuning = frequency - level_frequency
                 
-                if abs(detuning) < FREQUENCY_EPSILON:
+                if abs(detuning) < REL_FREQUENCY_EPSILON * self.qubit_frequencies[iq]:
                     level_drive = copy.deepcopy(envelope)
                     
                 elif isinstance(envelope, ComplexExpression):

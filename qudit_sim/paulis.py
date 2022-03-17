@@ -2,6 +2,8 @@ from typing import Optional, Any
 import string
 import numpy as np
 
+from .utils import matrix_ufunc
+
 def get_num_paulis(dim: int) -> int:
     return dim ** 2
 
@@ -157,3 +159,11 @@ def prod_basis_labels(num_paulis: int, num_qubits: int, symbol: Optional[str] = 
         out = np.char.add(np.repeat(out[..., None], num_paulis, axis=-1), labels)
         
     return out
+
+
+def get_generator_coefficients(unitaries: np.ndarray, dim: int, num_qubits: int):
+    paulis = make_generalized_paulis(dim)
+    basis = make_prod_basis(paulis, num_qubits)
+    generators = matrix_ufunc(lambda u: -np.angle(u), unitaries)
+    
+    return np.tensordot(generators, basis, ((-1, -2), (-2, -1))).real / 2.

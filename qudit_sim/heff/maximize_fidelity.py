@@ -14,6 +14,8 @@ from ..utils import matrix_ufunc
 from .iterative_fit import iterative_fit
 from .common import get_ilogus_and_valid_it, heff_fidelity, truncate_heff
 
+logger = logging.getLogger(__name__)
+
 def maximize_fidelity(
     time_evolution: np.ndarray,
     tlist: np.ndarray,
@@ -29,8 +31,8 @@ def maximize_fidelity(
     convergence: float = 1.e-4,
     **kwargs
 ) -> np.ndarray:
-    original_log_level = logging.getLogger().level
-    logging.getLogger().setLevel(log_level)
+    original_log_level = logger.level
+    logger.setLevel(log_level)
     
     assert comp_dim <= num_sim_levels, 'Number of levels in simulation cannot be less than computational dimension'
     matrix_dim = num_sim_levels ** num_qubits
@@ -53,11 +55,14 @@ def maximize_fidelity(
     if isinstance(init, str):
         if init == 'slope_estimate':
             ilogus, _, last_valid_it = get_ilogus_and_valid_it(time_evolution)
+            if last_valid_it <= 1:
+                raise RuntimeError('Failed to obtain an initial estimate of the slopes')
+                
             ilogu_coeffs = np.tensordot(ilogus, basis_list, ((1, 2), (2, 1))).real / 2.
             init = ilogu_coeffs[last_valid_it - 1] / tlist[last_valid_it - 1]
 
         elif init == 'iterative_fit':
-            logging.info('Performing iterative fit to estimate the initial parameter values')
+            logger.info('Performing iterative fit to estimate the initial parameter values')
             
             init = iterative_fit(
                 time_evolution,
@@ -92,11 +97,11 @@ def maximize_fidelity(
         minimizer = Minuit(loss_fn, initial, grad=grad)
         minimizer.strategy = 0
         
-        logging.info('Running MIGRAD..')
+        logger.info('Running MIGRAD..')
         
         minimizer.migrad()
         
-        logging.info('Done.')
+        logger.info('Done.')
         
         num_updates = minimizer.nfcn
 
@@ -119,7 +124,7 @@ def maximize_fidelity(
             params = optax.apply_updates(params, updates)
             return params, opt_state, loss, gradient
         
-        logging.info('Starting maximization loop..')
+        logger.info('Starting maximization loop..')
         
         params = {'c': initial}
         opt_state = optimizer.init(params)
@@ -134,7 +139,7 @@ def maximize_fidelity(
                 
             max_grad = np.amax(np.abs(gradient['c']))
                 
-            logging.debug('Iteration %d: loss %f max_grad %f', iup, loss, max_grad)
+            logger.debug('Iteration %d: loss %f max_grad %f', iup, loss, max_grad)
 
             if max_grad < convergence:
                 break
@@ -143,7 +148,7 @@ def maximize_fidelity(
                 
         num_updates = iup + 1
 
-        logging.info('Done after %d steps.', iup)
+        logger.info('Done after %d steps.', iup)
         
         heff_coeffs = np.concatenate(([0.], params['c'] / tlist[-1])).reshape(basis.shape[:-2])
 
@@ -159,6 +164,6 @@ def maximize_fidelity(
         
     heff_coeffs = truncate_heff(heff_coeffs, num_sim_levels, comp_dim, num_qubits)
         
-    logging.getLogger().setLevel(original_log_level)
+    logger.setLevel(original_log_level)
     
     return heff_coeffs

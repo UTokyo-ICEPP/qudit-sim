@@ -1,10 +1,15 @@
 from typing import Any, Dict, List, Tuple, Sequence, Optional, Union
 import os
 import tempfile
+import logging
+import time
+
 import numpy as np
 import qutip as qtp
 
 from .hamiltonian import RWAHamiltonianGenerator
+
+logger = logging.getLogger(__name__)
 
 DriveDef = Dict[Union[int, str], Dict[str, Any]]
 
@@ -18,7 +23,8 @@ def run_pulse_sim(
     e_ops: Optional[Sequence[Any]] = None,
     options: Optional[qtp.solver.Options] = None,
     progress_bar: Optional[qtp.ui.progressbar.BaseProgressBar] = None,
-    save_result_to: Optional[str] = None
+    save_result_to: Optional[str] = None,
+    log_level: int = logging.WARNING
 ) -> qtp.solver.Result:
     """Run a pulse simulation.
 
@@ -39,8 +45,12 @@ def run_pulse_sim(
         save_result_to: File name (without the extension) to save the simulation result to.
 
     Returns:
-        Result of running `qutip.sesolve`.
+        states: Stack of simulated states.
+        tlist: Array of time points.
     """
+    original_log_level = logger.level
+    logger.setLevel(log_level)
+    
     ## Collect kwargs passed directly to sesolve
     
     kwargs = {'e_ops': e_ops, 'options': options, 'progress_bar': progress_bar}
@@ -53,28 +63,50 @@ def run_pulse_sim(
     # yield the arrays upon calling array_hamiltonian().
     hgen = RWAHamiltonianGenerator(qubits, params, num_sim_levels, compile_hint=(not force_array))
     
+    logger.info('Instantiated a Hamiltonian generator for %d qubits and %d levels', len(qubits), num_sim_levels)
+    logger.info('Number of interaction terms: %d', len(hgen._hint))
+    
     for key, value in drive_def.items():
         if key == 'args':
             kwargs['args'] = value
             continue
             
+        logger.info('Adding a drive with frequency %f and envelope %s', value['frequency'], value['amplitude'])
+
         hgen.add_drive(key, frequency=value['frequency'], amplitude=value['amplitude'])
+        
+    logger.info('Number of drive terms: %d', len(hgen._hdrive))
 
     if isinstance(tlist, tuple):
         tlist = hgen.make_tlist(*tlist)
+        
+    logger.info('Using %d time points from %.3e to %.3e', tlist.shape[0], tlist[0], tlist[-1])
 
     if force_array or hgen.need_tlist:
         hamiltonian = hgen.array_generate(tlist)
     else:
         hamiltonian = hgen.generate()
-            
+        
+    logger.info('Hamiltonian with %d terms generated. Starting simulation..', len(hamiltonian))
+    
+    start = time.time()
+
     cwd = os.getcwd()
     with tempfile.TemporaryDirectory() as tempdir:
         os.chdir(tempdir)
         result = qtp.sesolve(hamiltonian, psi0, tlist, **kwargs)
         os.chdir(cwd)
+        
+    stop = time.time()
+        
+    logger.info('Done in %f seconds.', stop - start)
 
     if save_result_to:
+        logger.info('Saving the simulation result to %s.qu', save_result_to)
         qtp.fileio.qsave(result, save_result_to)
         
-    return result
+    logger.setLevel(original_log_level)
+    
+    states = np.stack(list(state.full() for state in result.states))
+
+    return states, tlist

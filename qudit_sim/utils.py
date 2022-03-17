@@ -1,17 +1,9 @@
-from typing import Callable, Union
+from typing import Callable, Union, Any
 import numpy as np
-try:
-    import jax.numpy as jnp
-except ImportError:
-    array_type = np.ndarray
-else:
-    array_type = Union[np.ndarray, jnp.DeviceArray]
-    
-from .paulis import 
     
 def matrix_ufunc(
     op: Callable,
-    mat: array_type,
+    mat: Any,
     hermitian: bool = False,
     with_diagonals: bool = False,
     npmod=np
