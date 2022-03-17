@@ -1,3 +1,7 @@
+"""Pulse simulation and Hamiltonian extraction"""
+
+__version__ = "1.0"
+
 __all__ = []
 
 from .pulse_sim import run_pulse_sim
