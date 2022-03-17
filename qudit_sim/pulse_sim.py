@@ -27,6 +27,21 @@ def run_pulse_sim(
     log_level: int = logging.WARNING
 ) -> qtp.solver.Result:
     """Run a pulse simulation.
+    
+    Sets up an RWAHamiltonianGenerator object from the given parameters, determine the time points for the simulation
+    if necessary, and run `qutip.sesolve`.
+    
+    ** Implementation notes (why we return the states+tlist instead of the result object itself) **
+    When the coefficients of the time-dependent Hamiltonian are compiled (preferred
+    method), QuTiP creates a transient python module with file name generated from the code hash, PID, and the current time.
+    When running multiple simulations in parallel this is not strictly safe, and so we enclose `sesolve` in a context with
+    a temporary directory in this function. The transient module is then deleted at the end of execution, but that in turn
+    causes an error when this function is called in a subprocess and if we try to return the QuTiP result object directly
+    through e.g. multiprocessing.Pipe. Somehow the result object tries to carry with it something defined in the transient
+    module, which would therefore need to be pickled together with the returned object. But the transient module file is
+    gone by the time the parent process receives the result from the pipe.
+    So, the solution was to just return the states and the time points, which are plain numpy objects. We can have an option
+    flag to make the function return the result object, if desired.
 
     Args:
         qubits: List of qudits to include in the Hamiltonian.

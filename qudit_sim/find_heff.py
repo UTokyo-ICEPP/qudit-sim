@@ -152,7 +152,7 @@ def find_heff(
         heff_coeffs = np.stack(heff_coeffs)
     
     else:
-        result = run_pulse_sim(
+        time_evolution, tlist = run_pulse_sim(
             qubits,
             params,
             drive_def,
@@ -160,9 +160,6 @@ def find_heff(
             tlist=tlist_tuple,
             save_result_to=save_result_to,
             log_level=log_level)
-        
-        time_evolution = np.stack(list(state.full() for state in result.states))
-        tlist = result.times
         
         if save_result_to:
             with h5py.File(f'{save_result_to}.h5', 'w') as out:
