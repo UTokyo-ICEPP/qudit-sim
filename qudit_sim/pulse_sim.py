@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 DriveDef = Dict[Union[int, str], Dict[str, Any]]
 
 def run_pulse_sim(
-    qubits: Sequence[int],
+    qubits: Union[Sequence[int], int],
     params: Dict[str, Any],
     drive_def: Dict,
     psi0: qtp.Qobj = qtp.basis(2, 0),
@@ -24,14 +24,15 @@ def run_pulse_sim(
     options: Optional[qtp.solver.Options] = None,
     progress_bar: Optional[qtp.ui.progressbar.BaseProgressBar] = None,
     save_result_to: Optional[str] = None,
+    return_result: bool = False,
     log_level: int = logging.WARNING
-) -> qtp.solver.Result:
+) -> Union[Tuple[np.ndarray, np.ndarray], qtp.solver.Result]:
     """Run a pulse simulation.
     
     Sets up an RWAHamiltonianGenerator object from the given parameters, determine the time points for the simulation
     if necessary, and run `qutip.sesolve`.
     
-    ** Implementation notes (why we return the states+tlist instead of the result object itself) **
+    ** Implementation notes (why we return the states+tlist by default instead of the result object itself) **
     When the coefficients of the time-dependent Hamiltonian are compiled (preferred
     method), QuTiP creates a transient python module with file name generated from the code hash, PID, and the current time.
     When running multiple simulations in parallel this is not strictly safe, and so we enclose `sesolve` in a context with
@@ -40,8 +41,7 @@ def run_pulse_sim(
     through e.g. multiprocessing.Pipe. Somehow the result object tries to carry with it something defined in the transient
     module, which would therefore need to be pickled together with the returned object. But the transient module file is
     gone by the time the parent process receives the result from the pipe.
-    So, the solution was to just return the states and the time points, which are plain numpy objects. We can have an option
-    flag to make the function return the result object, if desired.
+    So, the solution was to just return the states and the time points, which are plain numpy objects.
 
     Args:
         qubits: List of qudits to include in the Hamiltonian.
@@ -65,6 +65,9 @@ def run_pulse_sim(
     """
     original_log_level = logger.level
     logger.setLevel(log_level)
+    
+    if isinstance(qubits, int):
+        qubits = (qubits,)
     
     ## Collect kwargs passed directly to sesolve
     
@@ -122,6 +125,8 @@ def run_pulse_sim(
         
     logger.setLevel(original_log_level)
     
-    states = np.stack(list(state.full() for state in result.states))
-
-    return states, tlist
+    if return_result:
+        return result
+    else:
+        states = np.stack(list(state.full() for state in result.states))
+        return states, tlist

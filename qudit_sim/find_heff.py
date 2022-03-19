@@ -22,7 +22,7 @@ from .parallel import parallel_map
 logger = logging.getLogger(__name__)
 
 def find_heff(
-    qubits: Sequence[int],
+    qubits: Union[Sequence[int], int],
     params: Dict[str, Any],
     drive_def: Union[List[DriveDef], DriveDef],
     num_sim_levels: int = 2,

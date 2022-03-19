@@ -382,7 +382,8 @@ class RWAHamiltonianGenerator:
     ) -> np.ndarray:
         """Generate a list of time points using the maximum frequency in the Hamiltonian.
         
-        Raises an exception when the maximum frequency is 0 (i.e. single-qubit simulation with resonant drive).
+        When the maximum frequency is 0 (i.e. single-qubit simulation with resonant drive), return the time
+        range from 0 to 2pi/sqrt(tr(Hstat . Hstat) / 2^nq).
     
         Args:
             points_per_cycle: Number of points per cycle at the highest frequency.
@@ -392,6 +393,8 @@ class RWAHamiltonianGenerator:
             Array of time points.
         """
         if self.max_frequency == 0.:
-            raise RuntimeError('Cannot determine the maximum time for simulation')
-            
-        return np.linspace(0., 2. * np.pi / self.max_frequency * num_cycles, points_per_cycle * num_cycles)
+            hstat = self._static_term.full()
+            amp2 = np.trace(hstat @ hstat).real / (2 ** len(self.qubit_index_mapping))
+            return np.linspace(0., 2. * np.pi / np.sqrt(amp2), points_per_cycle * num_cycles)
+        else:
+            return np.linspace(0., 2. * np.pi / self.max_frequency * num_cycles, points_per_cycle * num_cycles)
