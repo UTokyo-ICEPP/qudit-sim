@@ -1,21 +1,13 @@
-from typing import Any, Dict, List, Tuple, Sequence, Optional, Union, Callable
+from typing import Any, Dict, List, Sequence, Optional, Union
 import os
-import sys
-import time
-import string
-import collections
 import logging
-from multiprocessing import Process, cpu_count
-from functools import partial
 logging.basicConfig(level=logging.INFO)
 
 import numpy as np
-import scipy
 import h5py
 import qutip as qtp
 
-from .paulis import (get_num_paulis, make_generalized_paulis, make_prod_basis,
-                    unravel_basis_index, get_l0_projection, truncate_coefficients)
+from .paulis import truncate_coefficients
 from .pulse_sim import run_pulse_sim, DriveDef
 from .parallel import parallel_map
 
@@ -33,7 +25,7 @@ def find_heff(
     save_result_to: Optional[str] = None,
     sim_num_cpus: int = 0,
     ext_num_cpus: int = 0,
-    jax_devices: Optional[List] = None,
+    jax_devices: Optional[List[int]] = None,
     log_level: int = logging.WARNING
 ) -> np.ndarray:
     """Run a pulse simulation with constant drives and extract the Pauli components of the effective Hamiltonian.

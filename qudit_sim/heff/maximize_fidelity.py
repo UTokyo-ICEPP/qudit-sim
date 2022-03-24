@@ -10,7 +10,6 @@ import optax
 import h5py
 
 from ..paulis import make_generalized_paulis, make_prod_basis
-from ..utils import matrix_ufunc
 from .iterative_fit import iterative_fit
 from .common import get_ilogus_and_valid_it, heff_fidelity
 

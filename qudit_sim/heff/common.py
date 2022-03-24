@@ -9,8 +9,7 @@ else:
     array_type = Union[np.ndarray, jnp.DeviceArray]
 
 from ..utils import matrix_ufunc
-from ..paulis import (get_num_paulis, make_generalized_paulis,
-                      make_prod_basis, get_l0_projection)
+from ..paulis import get_num_paulis, make_generalized_paulis, make_prod_basis
 
 def get_ilogus_and_valid_it(unitaries):
     ## Compute ilog(U(t))

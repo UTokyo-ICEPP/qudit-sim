@@ -18,7 +18,6 @@ else:
     import jax.scipy.optimize
 
 from ..paulis import make_generalized_paulis, make_prod_basis
-from ..utils import matrix_ufunc
 from .common import get_ilogus_and_valid_it, make_ueff
 
 def iterative_fit(

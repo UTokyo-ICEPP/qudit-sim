@@ -94,3 +94,17 @@ class Drag(Gaussian):
         dgauss = -(t - self.center) / np.square(self.sigma) * gauss
 
         return gauss + 1.j * self.beta * dgauss
+
+    
+class Sequence(Pulse):
+    def __init__(self, pulses):
+        self.pulses = sorted(pulses, key=lambda p: p.start)
+        assert all((self.pulses[i].end <= self.pulses[i + 1].start) for i in range(len(pulses) - 1))
+        
+        self.funclist = [p._call for p in self.pulses]
+        
+        super().__init__(self.pulses[0].start, self.pulses[-1].end - self.pulses[0].start)
+        
+    def _call(self, t, args):
+        condlist = [((t >= p.start) & (t < p.end)) for p in self.pulses]
+        return np.piecewise(t, condlist, self.funclist, args)

@@ -35,12 +35,13 @@ __all__ += [
     'get_generator_coefficients'
 ]
 
-from .pulse import Gaussian, GaussianSquare, Drag
+from .pulse import Gaussian, GaussianSquare, Drag, Sequence
 
 __all__ += [
     'Gaussian',
     'GaussianSquare',
-    'Drag'
+    'Drag',
+    'Sequence'
 ]
 
 from .find_heff import find_heff
