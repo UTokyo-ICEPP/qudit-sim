@@ -19,7 +19,7 @@ class Pulse:
         zero = np.array(0., dtype=np.complex128)
         fval = np.asarray(self._call(t, args), dtype=np.complex128)
         return np.select(
-            [np.less(np.less_equal(self.start, t), self.end)],
+            [(t >= self.start) & (t < self.end)],
             [fval], default=zero)
         
 
@@ -72,7 +72,7 @@ class GaussianSquare(Pulse):
         t1 = self.start + self.gauss_width / 2.
         t2 = t1 + self.width
         return np.piecewise(t,
-            [t < t1, np.less(np.less_equal(t1, t), t2), t >= t2],
+            [t < t1, (t >= t1) & (t < t2), t >= t2],
             [self.gauss_left._call, self.amp, self.gauss_right._call],
             args)
 

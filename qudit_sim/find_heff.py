@@ -182,11 +182,11 @@ def find_heff(
         heff_coeffs_trunc = truncate_coefficients(heff_coeffs, num_sim_levels, comp_dim, num_qubits)
         
         if save_result_to:
-            for idef, heff_coeffs in enumerate(heff_coeffs_list):
+            for idef in range(len(drive_def)):
                 filename = os.path.join(save_result_to, f'heff_{idef}')
                 with h5py.File(f'{filename}.h5', 'a') as out:
                     if num_sim_levels != comp_dim:
-                        out.create_dataset('heff_coeffs_original', data=heff_coeffs[idef])
+                        out.create_dataset('heff_coeffs_original', data=heff_coeffs_list[idef])
                     out.create_dataset('heff_coeffs', data=heff_coeffs_trunc[idef])
     
     else:
