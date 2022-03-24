@@ -12,7 +12,7 @@ import h5py
 from ..paulis import make_generalized_paulis, make_prod_basis
 from ..utils import matrix_ufunc
 from .iterative_fit import iterative_fit
-from .common import get_ilogus_and_valid_it, heff_fidelity, truncate_heff
+from .common import get_ilogus_and_valid_it, heff_fidelity
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,6 @@ def maximize_fidelity(
     tlist: np.ndarray,
     num_qubits: int = 1,
     num_sim_levels: int = 2,
-    comp_dim: int = 2,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
     jax_device_id: Optional[int] = None,
@@ -34,7 +33,6 @@ def maximize_fidelity(
     original_log_level = logger.level
     logger.setLevel(log_level)
     
-    assert comp_dim <= num_sim_levels, 'Number of levels in simulation cannot be less than computational dimension'
     matrix_dim = num_sim_levels ** num_qubits
     assert time_evolution.shape == (tlist.shape[0], matrix_dim, matrix_dim), 'Inconsistent input shape'
     
@@ -69,7 +67,6 @@ def maximize_fidelity(
                 tlist,
                 num_qubits=num_qubits,
                 num_sim_levels=num_sim_levels,
-                comp_dim=num_sim_levels,
                 log_level=log_level,
                 jax_device_id=jax_device_id,
                 **kwargs).reshape(-1)[1:]
@@ -155,14 +152,11 @@ def maximize_fidelity(
     if save_result_to:
         final_fidelity = np.concatenate(([1.], heff_fidelity(time_evolution, heff_coeffs, basis, tlist[1:], num_qubits)))
         with h5py.File(f'{save_result_to}.h5', 'a') as out:
-            out.create_dataset('heff_coeffs', data=heff_coeffs)
             out.create_dataset('final_fidelity', data=final_fidelity)
             if optimizer != 'minuit':
                 out.create_dataset('coeffs', data=coeff_values[:num_updates])
                 out.create_dataset('loss', data=loss_values[:num_updates])
                 out.create_dataset('grad', data=grad_values[:num_updates])
-        
-    heff_coeffs = truncate_heff(heff_coeffs, num_sim_levels, comp_dim, num_qubits)
         
     logger.setLevel(original_log_level)
     

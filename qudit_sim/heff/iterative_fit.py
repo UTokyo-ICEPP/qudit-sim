@@ -19,14 +19,13 @@ else:
 
 from ..paulis import make_generalized_paulis, make_prod_basis
 from ..utils import matrix_ufunc
-from .common import get_ilogus_and_valid_it, make_ueff, truncate_heff
+from .common import get_ilogus_and_valid_it, make_ueff
 
 def iterative_fit(
     time_evolution: np.ndarray,
     tlist: np.ndarray,
     num_qubits: int = 1,
     num_sim_levels: int = 2,
-    comp_dim: int = 2,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
     max_com: float = 20.,
@@ -50,7 +49,7 @@ def iterative_fit(
     original_log_level = logging.getLogger().level
     logging.getLogger().setLevel(log_level)
     
-    assert comp_dim <= num_sim_levels, 'Number of levels in simulation cannot be less than computational dimension'
+   
     matrix_dim = num_sim_levels ** num_qubits
     assert time_evolution.shape == (tlist.shape[0], matrix_dim, matrix_dim), 'Inconsistent input shape'
     
@@ -80,7 +79,7 @@ def iterative_fit(
                 out.create_dataset('ilogvs', shape=(max_iterations, tsize, time_evolution.shape[-1]), dtype='f')
                 out.create_dataset('ilogu_coeffs', shape=(max_iterations, tsize, basis_size), dtype='f')
                 out.create_dataset('last_valid_it', shape=(max_iterations,), dtype='i')
-                out.create_dataset('heff_coeffs', shape=(max_iterations, basis_size), dtype='f')
+                out.create_dataset('iter_heff', shape=(max_iterations, basis_size), dtype='f')
                 out.create_dataset('coeffs', shape=(max_iterations, basis_size), dtype='f')
                 out.create_dataset('fit_success', shape=(max_iterations, basis_size), dtype='i')
                 out.create_dataset('com', shape=(max_iterations, basis_size), dtype='f')
@@ -179,7 +178,7 @@ def iterative_fit(
                     out['coeffs'][iloop] = coeffs
                     out['fit_success'][iloop] = success
                     out['com'][iloop] = com
-                    out['heff_coeffs'][iloop] = heff_coeffs
+                    out['iter_heff'][iloop] = heff_coeffs
                     
             elif iloop == 0:
                 with h5py.File(f'{save_result_to}.h5', 'a') as out:
@@ -210,8 +209,6 @@ def iterative_fit(
         os.unlink(f'{save_result_to}_iter.h5')
 
     heff_coeffs = np.concatenate(([0.], heff_coeffs)).reshape(basis.shape[:-2])
-
-    heff_coeffs = truncate_heff(heff_coeffs, num_sim_levels, comp_dim, num_qubits)
         
     logging.getLogger().setLevel(original_log_level)
 

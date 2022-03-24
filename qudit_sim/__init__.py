@@ -10,7 +10,7 @@ __all__ += [
     'run_pulse_sim'
 ]
 
-from .hamiltonian_utils import (ScaledExpression, ComplexExpression)
+from .hamiltonian_utils import ScaledExpression, ComplexExpression
 from .hamiltonian import RWAHamiltonianGenerator
 
 __all__ += [
@@ -20,7 +20,7 @@ __all__ += [
 ]
 
 from .paulis import (get_num_paulis, make_generalized_paulis, make_prod_basis,
-                     get_l0_projection, unravel_basis_index,
+                     get_l0_projection, truncate_coefficients, unravel_basis_index,
                      pauli_labels, prod_basis_labels, get_generator_coefficients)
 
 __all__ += [
@@ -28,10 +28,19 @@ __all__ += [
     'make_generalized_paulis',
     'make_prod_basis',
     'get_l0_projection',
+    'truncate_coefficients',
     'unravel_basis_index',
     'pauli_labels',
     'prod_basis_labels',
     'get_generator_coefficients'
+]
+
+from .pulse import Gaussian, GaussianSquare, Drag
+
+__all__ += [
+    'Gaussian',
+    'GaussianSquare',
+    'Drag'
 ]
 
 from .find_heff import find_heff

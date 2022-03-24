@@ -82,7 +82,7 @@ def run_pulse_sim(
     hgen = RWAHamiltonianGenerator(qubits, params, num_sim_levels, compile_hint=(not force_array))
     
     logger.info('Instantiated a Hamiltonian generator for %d qubits and %d levels', len(qubits), num_sim_levels)
-    logger.info('Number of interaction terms: %d', len(hgen._hint))
+    logger.info('Number of interaction terms: %d', len(hgen.hint))
     
     for key, value in drive_def.items():
         if key == 'args':
@@ -93,7 +93,7 @@ def run_pulse_sim(
 
         hgen.add_drive(key, frequency=value['frequency'], amplitude=value['amplitude'])
         
-    logger.info('Number of drive terms: %d', len(hgen._hdrive))
+    logger.info('Number of drive terms: %d', len(hgen.hdrive))
 
     if isinstance(tlist, tuple):
         tlist = hgen.make_tlist(*tlist)

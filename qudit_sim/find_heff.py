@@ -15,7 +15,7 @@ import h5py
 import qutip as qtp
 
 from .paulis import (get_num_paulis, make_generalized_paulis, make_prod_basis,
-                    unravel_basis_index, get_l0_projection)
+                    unravel_basis_index, get_l0_projection, truncate_coefficients)
 from .pulse_sim import run_pulse_sim, DriveDef
 from .parallel import parallel_map
 
@@ -26,7 +26,7 @@ def find_heff(
     params: Dict[str, Any],
     drive_def: Union[List[DriveDef], DriveDef],
     num_sim_levels: int = 2,
-    num_cycles: int = 400,
+    num_cycles: int = 100,
     comp_dim: int = 2,
     method: str = 'maximize_fidelity',
     extraction_params: Optional[Dict] = None,
@@ -70,6 +70,8 @@ def find_heff(
     original_log_level = logger.level
     logger.setLevel(log_level)
     
+    assert comp_dim <= num_sim_levels, 'Number of levels in simulation cannot be less than computational dimension'
+    
     if isinstance(qubits, int):
         qubits = (qubits,)
         
@@ -96,9 +98,21 @@ def find_heff(
     tlist_tuple = (10, num_cycles)
     
     if isinstance(drive_def, list):
+        if save_result_to:
+            if not (os.path.exists(save_result_to) and os.path.isdir(save_result_to)):
+                os.makedirs(save_result_to)
+                
+            kwarg_keys = 'save_result_to'
+            kwarg_values = list(os.path.join(save_result_to, f'sim_{i}') for i in range(len(drive_def)))
+        else:
+            kwarg_keys = None
+            kwarg_values = None
+        
         results = parallel_map(
             run_pulse_sim,
-            mapped_args=drive_def,
+            args=drive_def,
+            kwarg_keys=kwarg_keys,
+            kwarg_values=kwarg_values,
             arg_position=2,
             common_args=(qubits, params),
             common_kwargs={'psi0': psi0, 'tlist': tlist_tuple, 'log_level': log_level},
@@ -119,8 +133,9 @@ def find_heff(
 
         jax_device_iter = iter(jax_devices)
             
-        mapped_args = []
-        mapped_kwargs = []
+        args = []
+        kwarg_keys = ('jax_device_id',)
+        kwarg_values = []
         for time_evolution, tlist in results:
             try:
                 jax_device_id = next(jax_device_iter)
@@ -128,28 +143,51 @@ def find_heff(
                 jax_device_iter = iter(jax_devices)
                 jax_device_id = next(jax_device_iter)
             
-            mapped_args.append((time_evolution, tlist))
-            mapped_kwargs.append({'jax_device_id': jax_device_id})
+            args.append((time_evolution, tlist))
+            kwarg_values.append((jax_device_id,))
             
         common_kwargs = {
             'num_qubits': num_qubits,
             'num_sim_levels': num_sim_levels,
-            'comp_dim': comp_dim,
             'log_level': log_level
         }
         common_kwargs.update(extraction_params)
         
-        heff_coeffs = parallel_map(
+        if save_result_to:
+            kwarg_keys += ('save_result_to',)
+            
+            for idef in range(len(drive_def)):
+                filename = os.path.join(save_result_to, f'heff_{idef}')
+                kwarg_values[idef] += (filename,)
+                
+                with h5py.File(f'{filename}.h5', 'w') as out:
+                    out.create_dataset('num_qubits', data=num_qubits)
+                    out.create_dataset('num_sim_levels', data=num_sim_levels)
+                    out.create_dataset('comp_dim', data=comp_dim)
+                    out.create_dataset('time_evolution', data=results[idef][0])
+                    out.create_dataset('tlist', data=results[idef][1])
+        
+        heff_coeffs_list = parallel_map(
             extraction_fn,
-            mapped_args=mapped_args,
-            mapped_kwargs=mapped_kwargs,
+            args=args,
+            kwarg_keys=kwarg_keys,
+            kwarg_values=kwarg_values,
             common_kwargs=common_kwargs,
             num_cpus=ext_num_cpus,
             log_level=log_level,
             thread_based=True
         )
         
-        heff_coeffs = np.stack(heff_coeffs)
+        heff_coeffs = np.stack(heff_coeffs_list)
+        heff_coeffs_trunc = truncate_coefficients(heff_coeffs, num_sim_levels, comp_dim, num_qubits)
+        
+        if save_result_to:
+            for idef, heff_coeffs in enumerate(heff_coeffs_list):
+                filename = os.path.join(save_result_to, f'heff_{idef}')
+                with h5py.File(f'{filename}.h5', 'a') as out:
+                    if num_sim_levels != comp_dim:
+                        out.create_dataset('heff_coeffs_original', data=heff_coeffs[idef])
+                    out.create_dataset('heff_coeffs', data=heff_coeffs_trunc[idef])
     
     else:
         time_evolution, tlist = run_pulse_sim(
@@ -174,11 +212,18 @@ def find_heff(
             tlist,
             num_qubits=num_qubits,
             num_sim_levels=num_sim_levels,
-            comp_dim=comp_dim,
             save_result_to=save_result_to,
             log_level=log_level,
             **extraction_params)
-
+        
+        heff_coeffs_trunc = truncate_coefficients(heff_coeffs, num_sim_levels, comp_dim, num_qubits)
+        
+        if save_result_to:
+            with h5py.File(f'{save_result_to}.h5', 'a') as out:
+                if num_sim_levels != comp_dim:
+                    out.create_dataset('heff_coeffs_original', data=heff_coeffs)
+                out.create_dataset('heff_coeffs', data=heff_coeffs_trunc)
+                
     logger.setLevel(original_log_level)
     
-    return heff_coeffs
+    return heff_coeffs_trunc

@@ -76,7 +76,7 @@ def get_l0_projection(reduced_dim: int, original_dim: int) -> np.ndarray:
         original_dim: Matrix dimension of the full space.
         
     Returns:
-        Coefficient vector v(m, n) such that v(m, n) . paulis(n) = lambda_0(m).
+        Coefficient vector v(m, n) such that v(m, n)[:] . paulis(n)[:] = lambda_0(m).
     """
     assert reduced_dim <= original_dim
     
@@ -91,8 +91,46 @@ def get_l0_projection(reduced_dim: int, original_dim: int) -> np.ndarray:
         coeffs_l0 *= np.sqrt(dim - 1)
         coeffs_l0[dim ** 2 - 1] = 1.
         coeffs_l0 /= np.sqrt(dim)
-        
+       
     return coeffs_l0
+
+
+def truncate_coefficients(
+    coeffs: np.ndarray,
+    original_dim: int,
+    reduced_dim: int,
+    num_qubits: Optional[int] = None
+) -> np.ndarray:
+    """Truncate a Pauli coefficient array into a reduced set of Pauli operators.
+    
+    When the matrix dimensions are truncated, the diagonal matrices in the higher dimension are projected
+    onto the identity in the lower dimension.
+    """
+    assert reduced_dim <= original_dim
+
+    coeffs = coeffs.copy()
+    
+    if reduced_dim == original_dim:
+        return coeffs
+
+    # Coefficient for lambda_0 projection
+    l0_projection = get_l0_projection(reduced_dim, original_dim)
+    
+    if num_qubits is None:
+        num_qubits = len(coeffs.shape)
+
+    ## Allow additional dimensions of coeffs
+    num_pre_dims = len(coeffs.shape) - num_qubits
+    pre_slices = (slice(None),) * num_pre_dims
+
+    for iq in range(num_qubits):
+        # For each qubit, set the coefficient at index 0 to projection . coeffs
+        indices = tuple(0 if i == iq else slice(None) for i in range(num_qubits))
+        coeffs[pre_slices + indices] = np.tensordot(coeffs, l0_projection, (num_pre_dims + iq, 0))
+
+    num_reduced_paulis = get_num_paulis(reduced_dim)
+    slices = (slice(num_reduced_paulis),) * num_qubits
+    return coeffs[pre_slices + slices]
     
 
 def make_prod_basis(

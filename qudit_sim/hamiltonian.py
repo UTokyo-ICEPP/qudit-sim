@@ -181,9 +181,9 @@ class RWAHamiltonianGenerator:
         
         ## Lists of Hamiltonian terms
         
-        self._hdrive = list()
-        self._hint = list()
-        self._static_term = qtp.Qobj()
+        self.hdrive = list()
+        self.hint = list()
+        self.hstatic = qtp.Qobj()
 
         # Does this represent an array-based Hamiltonian?
         self._need_tlist = False
@@ -222,11 +222,11 @@ class RWAHamiltonianGenerator:
                         freq = freq_diff + D1 * l1 - D2 * l2
 
                         if compile_hint:
-                            self._hint.append([h_x, f'cos({freq}*t)'])
-                            self._hint.append([h_y, f'sin({freq}*t)'])
+                            self.hint.append([h_x, f'cos({freq}*t)'])
+                            self.hint.append([h_y, f'sin({freq}*t)'])
                         else:
-                            self._hint.append([h_x, cos_freq(freq)])
-                            self._hint.append([h_y, sin_freq(freq)])
+                            self.hint.append([h_x, cos_freq(freq)])
+                            self.hint.append([h_y, sin_freq(freq)])
                         
                         self._max_frequency_int = max(self._max_frequency_int, abs(freq))
                         
@@ -322,19 +322,19 @@ class RWAHamiltonianGenerator:
                             continue
 
                         if amp.expression is None:
-                            self._static_term += h * amp.scale
+                            self.hstatic += h * amp.scale
                         else:
-                            self._hdrive.append([h * amp.scale, amp.expression])
+                            self.hdrive.append([h * amp.scale, amp.expression])
 
                     else:
                         if amp:
-                            self._hdrive.append([h, amp])
+                            self.hdrive.append([h, amp])
                         
                 self._max_frequency_drive = max(self._max_frequency_drive, abs(detuning))
                 
     def clear_drive(self) -> None:
         """Reset all drive-related attributes."""
-        self._hdrive = list()
+        self.hdrive = list()
         self._max_frequency_drive = 0.
         self._need_tlist = False
         
@@ -344,12 +344,12 @@ class RWAHamiltonianGenerator:
         if self._need_tlist:
             raise RuntimeError('This Hamiltonian must be instantiated with array_hamiltonian()')
         
-        if self._static_term == qtp.Qobj():
-            return self._hint + self._hdrive
+        if self.hstatic == qtp.Qobj():
+            return self.hint + self.hdrive
         else:
             # The static term does not have to be the first element (nor does it have to be a single term, actually)
             # but qutip recommends following this convention
-            return [self._static_term] + self._hint + self._hdrive
+            return [self.hstatic] + self.hint + self.hdrive
 
     def array_generate(
         self,
@@ -364,10 +364,10 @@ class RWAHamiltonianGenerator:
         """
         hamiltonian = []
         
-        if self._static_term != qtp.Qobj():
-            hamiltonian.append(self._static_term)
+        if self.hstatic != qtp.Qobj():
+            hamiltonian.append(self.hstatic)
             
-        for h, f in self._hint + self._hdrive:
+        for h, f in self.hint + self.hdrive:
             if callable(f):
                 hamiltonian.append([h, f(tlist, args)])
             else:
@@ -393,8 +393,8 @@ class RWAHamiltonianGenerator:
             Array of time points.
         """
         if self.max_frequency == 0.:
-            hstat = self._static_term.full()
+            hstat = self.hstatic.full()
             amp2 = np.trace(hstat @ hstat).real / (2 ** len(self.qubit_index_mapping))
-            return np.linspace(0., 2. * np.pi / np.sqrt(amp2), points_per_cycle * num_cycles)
+            return np.linspace(0., 2. * np.pi / np.sqrt(amp2) * num_cycles, points_per_cycle * num_cycles)
         else:
             return np.linspace(0., 2. * np.pi / self.max_frequency * num_cycles, points_per_cycle * num_cycles)

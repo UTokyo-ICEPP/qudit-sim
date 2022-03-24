@@ -1,5 +1,10 @@
 from typing import Callable, Union, Any
+import sys
+import tempfile
 import numpy as np
+import h5py
+
+SAVE_ERRORS = True
     
 def matrix_ufunc(
     op: Callable,
@@ -21,10 +26,22 @@ def matrix_ufunc(
     Returns:
         An array corresponding to `op(mat)`. If `diagonals==True`, another array corresponding to `op(eigvals)`.
     """
-    if hermitian:
-        eigvals, eigcols = npmod.linalg.eigh(mat)
-    else:
-        eigvals, eigcols = npmod.linalg.eig(mat)
+    try:
+        if hermitian:
+            eigvals, eigcols = npmod.linalg.eigh(mat)
+        else:
+            eigvals, eigcols = npmod.linalg.eig(mat)
+    except:
+        if SAVE_ERRORS:
+            with tempfile.NamedTemporaryFile(suffix='.h5', delete=False) as tmpf:
+                pass
+
+            with h5py.File(tmpf.name, 'w') as out:
+                out.create_dataset('matrices', data=mat)
+                
+            sys.stderr.write(f'Error in eigendecomposition. Matrix saved at {tmpf.name}\n')
+            
+        raise
         
     eigrows = npmod.conjugate(npmod.moveaxis(eigcols, -2, -1))
 

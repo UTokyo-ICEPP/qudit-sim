@@ -1,13 +1,22 @@
 from typing import Optional
 import numpy as np
 import h5py
+import scipy.optimize as sciopt
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+from matplotlib.markers import MarkerStyle
 
 from ..paulis import (get_num_paulis, make_generalized_paulis, make_prod_basis,
                       prod_basis_labels, unravel_basis_index, get_l0_projection)
 from ..utils import matrix_ufunc
 from .common import make_ueff
+
+GHz = 1.e+9
+MHz = 1.e+6
+kHz = 1.e+3
+Hz = 1.
+
+twopi = 2. * np.pi
 
 def heff_expr(
     coefficients: np.ndarray,
@@ -32,16 +41,12 @@ def heff_expr(
     num_qubits = len(coefficients.shape)
     labels = prod_basis_labels(coefficients.shape[0], num_qubits, symbol=symbol)
         
-    maxval = np.amax(np.abs(coefficients))
-    for base, unit in [(1.e+9, 'GHz'), (1.e+6, 'MHz'), (1.e+3, 'kHz'), (1., 'Hz')]:
-        norm = 2. * np.pi * base
-        if maxval > norm:
-            if threshold is None:
-                threshold = norm * 1.e-2
-            break
-            
+    scale, unit = _find_scale(np.amax(np.abs(coefficients)))
     if threshold is None:
-        raise RuntimeError(f'Passed coefficients with maxabs = {maxval}')
+        threshold = scale * 1.e-2
+        
+    coefficients /= scale
+    threshold /= scale
             
     expr = ''
     
@@ -56,19 +61,19 @@ def heff_expr(
             expr += ' + '
             
         if len(coefficients.shape) == 1:
-            expr += f'{abs(coeff) / norm:.3f}{labels[index]}'
+            expr += f'{abs(coeff):.3f}{labels[index]}'
         else:
             if len(coefficients.shape) == 2:
                 denom = '2'
             else:
                 denom = '2^{%d}' % (len(coefficients.shape) - 1)
                 
-            expr += f'{abs(coeff) / norm:.3f}' + (r'\frac{%s}{%s}' % (labels[index], denom))
+            expr += f'{abs(coeff):.3f}' + (r'\frac{%s}{%s}' % (labels[index], denom))
         
-    return (r'\frac{H_{\mathrm{eff}}}{2 \pi \mathrm{%s}} = ' % unit) + expr
+    return r'\frac{H_{\mathrm{eff}}}{2 \pi \mathrm{' + unit + '}} = ' + expr
 
 
-def coeffs_graph(
+def coeffs_bar(
     coefficients: np.ndarray,
     symbol: Optional[str] = None,
     threshold: Optional[float] = None,
@@ -77,39 +82,46 @@ def coeffs_graph(
     
     num_qubits = len(coefficients.shape)
     labels = prod_basis_labels(coefficients.shape[0], num_qubits, symbol=symbol)
-        
-    maxval = np.amax(np.abs(coefficients))
-    for base, unit in [(1.e+9, 'GHz'), (1.e+6, 'MHz'), (1.e+3, 'kHz'), (1., 'Hz')]:
-        norm = 2. * np.pi * base
-        if maxval > norm:
-            if threshold is None:
-                threshold = norm * 1.e-2
-            break
-            
-    if threshold is None:
-        raise RuntimeError(f'Passed coefficients with maxabs = {maxval}')
     
+    maxval = np.amax(np.abs(coefficients))
+    
+    # Negative threshold specified -> relative to max
+    if threshold < 0.:
+        threshold *= -maxval
+        
+    scale, unit = _find_scale(maxval)
+    if threshold is None:
+        threshold = scale * 1.e-2
+        
+    coefficients /= scale
+    threshold /= scale
+            
     if ignore_identity:
         coefficients = coefficients.copy()
         coefficients.reshape(-1)[0] = 0.
-        
-    # Negative threshold specified -> relative to max
-    if threshold < 0.:
-        threshold = np.amax(np.abs(coefficients)) * (-threshold)
         
     flat_indices = np.argsort(-np.abs(coefficients.reshape(-1)))
     nterms = np.count_nonzero(np.abs(coefficients) > threshold)
     indices = np.unravel_index(flat_indices[:nterms], coefficients.shape)
     
     fig, ax = plt.subplots(1, 1)
-    ax.bar(np.arange(nterms), coefficients[indices] / norm)
+    ax.bar(np.arange(nterms), coefficients[indices])
     
     xticks = np.char.add(np.char.add('$', labels), '$')
         
     ax.set_xticks(np.arange(nterms), labels=xticks[indices])
-    ax.set_ylabel(r'$\nu/(2\pi{' + unit + '})$')
+    ax.set_ylabel(r'$\nu/(2\pi\mathrm{' + unit + '})$')
     
     return fig
+
+
+def _find_scale(val):
+    for base, unit in [(GHz, 'GHz'), (MHz, 'MHz'), (kHz, 'kHz'), (Hz, 'Hz')]:
+        scale = twopi * base
+        if val > scale:
+            return scale, unit
+        
+    raise RuntimeError(f'Could not find a proper scale for value {val}')
 
 
 def inspect_iterative_fit(
@@ -367,3 +379,124 @@ def _plot_ilogu_coeffs(axes, coeffs_data, threshold, tlist, num_sim_levels, comp
                 spine.set(linewidth=2.)
 
     return ibases
+
+
+def plot_amplitude_scan(amplitudes, coefficients, threshold=None, max_poly_order=4):
+    num_qubits = len(coefficients.shape) - 1 # first dimension: amplitudes
+    comp_dim = coefficients.shape[1]
+    num_paulis = get_num_paulis(comp_dim)
+
+    if num_qubits > 1:
+        nv = np.ceil(np.sqrt(num_paulis)).astype(int)
+        nh = np.ceil(num_paulis / nh).astype(int)
+        fig, axes = plt.subplots(nv, nh, figsize=(16, 12))
+        
+        prefixes = pauli_labels(num_paulis)
+        
+        exprs = []
+        for ip in range(num_paulis):
+            ax = axes[np.unravel_index(ip, axes.shape)]
+            exprs += _plot_amplitude_scan_on(ax, amplitudes, coefficients[:, ip],
+                                          threshold, max_poly_order, prefix=prefixes[ip])
+    else:
+        fig, axes = plt.subplots(1, 1)
+        exprs = _plot_amplitude_scan_on(axes, amplitudes, coefficients, threshold, max_poly_order)
+        
+    return fig, exprs
+        
+        
+def _plot_amplitude_scan_on(ax, amplitudes, coefficients, threshold, max_poly_order, prefix=''):
+    num_qubits = len(coefficients.shape) - 1 # first dimension: amplitudes
+    comp_dim = coefficients.shape[1]
+    num_paulis = get_num_paulis(comp_dim)
+    
+    basis_labels = prod_basis_labels(num_paulis, num_qubits)
+    
+    filled_markers = MarkerStyle.filled_markers
+    num_markers = len(filled_markers)
+    
+    num_amps = amplitudes.shape[0]
+    amp_scale, amp_unit = _find_scale(np.amax(np.abs(amplitudes)))
+    amps_norm = amplitudes / amp_scale
+    amps_norm_fine = np.linspace(amps_norm[0], amps_norm[-1], 100)
+    
+    scale, unit = _find_scale(np.amax(np.abs(coefficients)))
+    if threshold is None:
+        threshold = scale * 0.1
+    coeffs_norm = coefficients / scale
+    threshold /= scale
+    
+    exprs = []
+    
+    ymax = 0.
+    ymin = 0.
+
+    imarker = 0
+    
+    for index in np.ndindex(coeffs_norm.shape[1:]):
+        coeffs = coeffs_norm[(slice(None),) + index]
+        if np.all(np.abs(coeffs)) < threshold:
+            continue
+            
+        if np.any(np.abs(coeffs) > 5.):
+            plot_scale = 0.5
+            label = f'{prefix}{basis_labels[index]}' + r' ($\times 0.5$)'
+        else:
+            plot_scale = 1.
+            label = f'{prefix}{basis_labels[index]}'
+            
+        ymax = max(ymax, np.amax(coeffs * plot_scale))
+        ymin = min(ymin, np.amin(coeffs * plot_scale))
+            
+        even = np.sum(coeffs[:num_amps] * coeffs[-num_amps:]) > 0.
+        
+        if even:
+            curve = _poly_even
+            p0 = np.zeros(max_poly_order // 2 + 1)
+        else:
+            curve = _poly_odd
+            p0 = np.zeros((max_poly_order + 1) // 2)
+        
+        popt, _ = sciopt.curve_fit(curve, amps_norm, coeffs, p0=p0)
+        
+        pathcol = ax.scatter(amps_norm, coeffs * plot_scale, marker=filled_markers[imarker % num_markers], label=label)
+        ax.plot(amps_norm_fine, curve(amps_norm_fine, *popt) * plot_scale, color=pathcol.get_edgecolor())
+        
+        expr = r'\frac{\nu_{' + prefix + basis_labels[index] + r'}}{2\pi\mathrm{' + unit + '}} = '
+
+        power = 0 if even else 1
+        terms = []
+        for p in popt:
+            if power == 0:
+                terms.append(f'{p:.2f}')
+            elif power == 1:
+                terms.append(f'{p:.2f}' + r'\left(\frac{A}{2\pi\mathrm{' + amp_unit + r'}}\right)' + f'^{power}')
+                pass
+            else:
+                terms.append(f'{p:+.2f}' + r'\left(\frac{A}{2\pi\mathrm{' + amp_unit + r'}}\right)' + f'^{power}')
+            power += 2
+            
+        expr += ' + '.join(terms)
+        
+        exprs.append(expr)
+        imarker += 1
+
+    ax.set_ylim(ymin * 1.5, ymax * 1.2)
+    ax.set_xlabel(r'Drive amplitude ($2\pi{' + amp_unit+ '}$)')
+    ax.set_ylabel(r'$\nu/2\pi{MHz}$')
+    ax.legend(bbox_to_anchor=(1.03, 1.));
+
+    return exprs
+
+
+def _poly_even(x, *args):
+    value = args[0]
+    for iarg, arg in enumerate(args[1:]):
+        value += arg * np.power(x, 2 * (iarg + 1))
+    return value
+
+def _poly_odd(x, *args):
+    value = 0.
+    for iarg, arg in enumerate(args):
+        value += arg * np.power(x, 2 * iarg + 1)
+    return value
