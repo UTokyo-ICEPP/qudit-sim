@@ -7,9 +7,10 @@ import numpy as np
 import h5py
 import qutip as qtp
 
-from .paulis import extract_coefficients, truncate_coefficients
+from .paulis import extract_coefficients, truncate_coefficients, prod_basis_labels
 from .pulse_sim import run_pulse_sim, DriveDef
 from .parallel import parallel_map
+from .utils import matrix_ufunc
 
 logger = logging.getLogger(__name__)
 
@@ -136,3 +137,21 @@ def _get_drive_duration(ddef):
         duration = max(duration, drive_end)
 
     return duration
+
+
+def gate_expr(
+    coefficients: np.ndarray,
+    symbol: Optional[str] = None,
+    threshold: Optional[float] = 0.01
+) -> str:
+    num_qubits = len(coefficients.shape)
+    labels = prod_basis_labels(coefficients.shape[0], num_qubits, symbol=symbol)
+
+    exponent = ''
+    
+    for index in np.ndindex(coefficients.shape):
+        coeff = coefficients[index]
+        if abs(coeff) > threshold:
+            exponent += f'{coeff:+.3f}{labels[index]}'
+        
+    return r'\exp \left[-i \left( ' + exponent + r' \right)\right]'

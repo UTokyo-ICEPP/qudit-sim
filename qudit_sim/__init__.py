@@ -51,6 +51,13 @@ __all__ += [
     'find_heff'
 ]
 
+from .gate import identify_gate, gate_expr
+
+__all__ += [
+    'identify_gate',
+    'gate_expr'
+]
+
 from .utils import matrix_ufunc
 
 __all__ += [
