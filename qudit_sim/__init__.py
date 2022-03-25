@@ -28,6 +28,7 @@ __all__ += [
     'get_num_paulis',
     'make_generalized_paulis',
     'make_prod_basis',
+    'extract_coefficients',
     'get_l0_projection',
     'truncate_coefficients',
     'unravel_basis_index',
