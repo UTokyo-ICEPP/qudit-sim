@@ -125,7 +125,7 @@ def _find_scale(val):
     raise RuntimeError(f'Could not find a proper scale for value {val}')
 
 
-def inspect_iterative_fit(
+def inspect_leastsq_minimization(
     filename: str,
     threshold: float = 0.01
 ) -> list:
@@ -229,7 +229,7 @@ def inspect_iterative_fit(
     return figures
 
 
-def inspect_maximize_fidelity(
+def inspect_fidelity_maximization(
     filename: str,
     threshold: float = 0.01
 ):

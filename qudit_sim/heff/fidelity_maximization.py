@@ -10,12 +10,12 @@ import optax
 import h5py
 
 from ..paulis import make_generalized_paulis, make_prod_basis, extract_coefficients
-from .iterative_fit import iterative_fit
+from .leastsq_minimization import leastsq_minimization
 from .common import get_ilogus_and_valid_it, heff_fidelity
 
 logger = logging.getLogger(__name__)
 
-def maximize_fidelity(
+def fidelity_maximization(
     time_evolution: np.ndarray,
     tlist: np.ndarray,
     num_qubits: int = 1,
@@ -57,10 +57,10 @@ def maximize_fidelity(
             ilogu_coeffs = extract_coefficients(ilogus, num_sim_levels, num_qubits)
             init = ilogu_coeffs[last_valid_it - 1].reshape(-1)[1:] / tlist[last_valid_it - 1]
 
-        elif init == 'iterative_fit':
+        elif init == 'leastsq':
             logger.info('Performing iterative fit to estimate the initial parameter values')
             
-            init = iterative_fit(
+            init = leastsq_minimization(
                 time_evolution,
                 tlist,
                 num_qubits=num_qubits,

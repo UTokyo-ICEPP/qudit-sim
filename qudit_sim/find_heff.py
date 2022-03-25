@@ -20,7 +20,7 @@ def find_heff(
     num_sim_levels: int = 2,
     num_cycles: int = 100,
     comp_dim: int = 2,
-    method: str = 'maximize_fidelity',
+    method: str = 'fidelity',
     extraction_params: Optional[Dict] = None,
     save_result_to: Optional[str] = None,
     sim_num_cpus: int = 0,
@@ -42,9 +42,11 @@ def find_heff(
         drive_def: Drive definition or a list thereof. See the docstring of `hamiltonian.RWAHamiltonianGenerator`
             for details. Argument `'amplitude'` for each channel must be a float or a constant expression string.
         num_sim_levels: Number of oscillator levels in the simulation.
-        num_cycles: Duration of the square pulse, in units of cycles in the highest frequency appearing in the Hamiltonian.
+        num_cycles: Duration of the square pulse, in units of cycles in the highest frequency appearing in the
+            Hamiltonian.
         comp_dim: Dimensionality of the computational space.
-        method: Name of the function to use for Pauli coefficient extraction.
+        method: Name of the function to use for Pauli coefficient extraction. Currently possible values are
+            'fidelity' and 'leastsq'.
         extraction_params: Optional keyword arguments to pass to the extraction function.
         save_result_to: File name (without the extension) to save the simulation and extraction results to.
             Simulation result will not be saved when a list is passed as `drive_def`.
@@ -71,12 +73,12 @@ def find_heff(
     
     ## Extraction function and parameters
     
-    if method == 'iterative_fit':
-        from .heff import iterative_fit
-        extraction_fn = iterative_fit
-    elif method == 'maximize_fidelity':
-        from .heff import maximize_fidelity
-        extraction_fn = maximize_fidelity
+    if method == 'leastsq':
+        from .heff import leastsq_minimization
+        extraction_fn = leastsq_minimization
+    elif method == 'fidelity':
+        from .heff import fidelity_maximization
+        extraction_fn = fidelity_maximization
         
     if extraction_params is None:
         extraction_params = dict()

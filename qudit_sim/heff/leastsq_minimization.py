@@ -20,7 +20,7 @@ else:
 from ..paulis import make_generalized_paulis, make_prod_basis
 from .common import get_ilogus_and_valid_it, make_ueff
 
-def iterative_fit(
+def leastsq_minimization(
     time_evolution: np.ndarray,
     tlist: np.ndarray,
     num_qubits: int = 1,
