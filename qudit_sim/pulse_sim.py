@@ -3,6 +3,7 @@ import os
 import tempfile
 import logging
 import time
+import collections
 
 import numpy as np
 import qutip as qtp
@@ -12,6 +13,8 @@ from .hamiltonian import RWAHamiltonianGenerator
 logger = logging.getLogger(__name__)
 
 DriveDef = Dict[Union[int, str], Dict[str, Any]]
+
+PulseSimResult = collections.namedtuple('PulseSimResult', ['times', 'expect', 'states'])
 
 def run_pulse_sim(
     qubits: Union[Sequence[int], int],
@@ -26,13 +29,13 @@ def run_pulse_sim(
     save_result_to: Optional[str] = None,
     return_result: bool = False,
     log_level: int = logging.WARNING
-) -> Union[Tuple[np.ndarray, np.ndarray], qtp.solver.Result]:
+) -> PulseSimResult:
     """Run a pulse simulation.
     
     Sets up an RWAHamiltonianGenerator object from the given parameters, determine the time points for the simulation
     if necessary, and run `qutip.sesolve`.
     
-    ** Implementation notes (why we return the states+tlist by default instead of the result object itself) **
+    ** Implementation notes (why we return an original object instead of the QuTiP result) **
     When the coefficients of the time-dependent Hamiltonian are compiled (preferred
     method), QuTiP creates a transient python module with file name generated from the code hash, PID, and the current time.
     When running multiple simulations in parallel this is not strictly safe, and so we enclose `sesolve` in a context with
@@ -41,7 +44,7 @@ def run_pulse_sim(
     through e.g. multiprocessing.Pipe. Somehow the result object tries to carry with it something defined in the transient
     module, which would therefore need to be pickled together with the returned object. But the transient module file is
     gone by the time the parent process receives the result from the pipe.
-    So, the solution was to just return the states and the time points, which are plain numpy objects.
+    So, the solution was to just return a "sanitized" object, consisting of plain ndarrays.
 
     Args:
         qubits: List of qudits to include in the Hamiltonian.
@@ -60,8 +63,7 @@ def run_pulse_sim(
         save_result_to: File name (without the extension) to save the simulation result to.
 
     Returns:
-        states: Stack of simulated states.
-        tlist: Array of time points.
+        Result of the pulse simulation.
     """
     original_log_level = logger.level
     logger.setLevel(log_level)
@@ -112,7 +114,7 @@ def run_pulse_sim(
     cwd = os.getcwd()
     with tempfile.TemporaryDirectory() as tempdir:
         os.chdir(tempdir)
-        result = qtp.sesolve(hamiltonian, psi0, tlist, **kwargs)
+        qtp_result = qtp.sesolve(hamiltonian, psi0, tlist, **kwargs)
         os.chdir(cwd)
         
     stop = time.time()
@@ -121,12 +123,13 @@ def run_pulse_sim(
 
     if save_result_to:
         logger.info('Saving the simulation result to %s.qu', save_result_to)
-        qtp.fileio.qsave(result, save_result_to)
+        qtp.fileio.qsave(qtp_result, save_result_to)
         
     logger.setLevel(original_log_level)
     
-    if return_result:
-        return result
+    if qtp_result.states:
+        states = np.stack(list(state.full() for state in qtp_result.states))
     else:
-        states = np.stack(list(state.full() for state in result.states))
-        return states, tlist
+        states = None
+    
+    return PulseSimResult(times=qtp_result.times, expect=qtp_result.expect, states=states)

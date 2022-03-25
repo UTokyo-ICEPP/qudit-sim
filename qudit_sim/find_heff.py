@@ -128,14 +128,14 @@ def find_heff(
         args = []
         kwarg_keys = ('jax_device_id',)
         kwarg_values = []
-        for time_evolution, tlist in results:
+        for result in results:
             try:
                 jax_device_id = next(jax_device_iter)
             except StopIteration:
                 jax_device_iter = iter(jax_devices)
                 jax_device_id = next(jax_device_iter)
             
-            args.append((time_evolution, tlist))
+            args.append((result.states, result.times))
             kwarg_values.append((jax_device_id,))
             
         common_kwargs = {
@@ -148,7 +148,7 @@ def find_heff(
         if save_result_to:
             kwarg_keys += ('save_result_to',)
             
-            for idef in range(len(drive_def)):
+            for idef, result in enumerate(results):
                 filename = os.path.join(save_result_to, f'heff_{idef}')
                 kwarg_values[idef] += (filename,)
                 
@@ -156,8 +156,8 @@ def find_heff(
                     out.create_dataset('num_qubits', data=num_qubits)
                     out.create_dataset('num_sim_levels', data=num_sim_levels)
                     out.create_dataset('comp_dim', data=comp_dim)
-                    out.create_dataset('time_evolution', data=results[idef][0])
-                    out.create_dataset('tlist', data=results[idef][1])
+                    out.create_dataset('time_evolution', data=result.states)
+                    out.create_dataset('tlist', data=result.times)
         
         heff_coeffs_list = parallel_map(
             extraction_fn,
@@ -182,7 +182,7 @@ def find_heff(
                     out.create_dataset('heff_coeffs', data=heff_coeffs_trunc[idef])
     
     else:
-        time_evolution, tlist = run_pulse_sim(
+        result = run_pulse_sim(
             qubits,
             params,
             drive_def,
@@ -196,12 +196,12 @@ def find_heff(
                 out.create_dataset('num_qubits', data=num_qubits)
                 out.create_dataset('num_sim_levels', data=num_sim_levels)
                 out.create_dataset('comp_dim', data=comp_dim)
-                out.create_dataset('time_evolution', data=time_evolution)
-                out.create_dataset('tlist', data=tlist)
+                out.create_dataset('time_evolution', data=result.states)
+                out.create_dataset('tlist', data=result.times)
 
         heff_coeffs = extraction_fn(
-            time_evolution,
-            tlist,
+            result.states,
+            result.times,
             num_qubits=num_qubits,
             num_sim_levels=num_sim_levels,
             save_result_to=save_result_to,

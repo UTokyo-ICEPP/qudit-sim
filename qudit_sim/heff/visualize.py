@@ -7,7 +7,8 @@ import matplotlib.pyplot as plt
 from matplotlib.markers import MarkerStyle
 
 from ..paulis import (get_num_paulis, make_generalized_paulis, make_prod_basis,
-                      prod_basis_labels, unravel_basis_index, get_l0_projection)
+                      prod_basis_labels, extract_coefficients,
+                      unravel_basis_index, get_l0_projection)
 from ..utils import matrix_ufunc
 from .common import make_ueff
 
@@ -252,19 +253,18 @@ def inspect_maximize_fidelity(
     basis = make_prod_basis(paulis, num_qubits)
     # Flattened list of basis operators excluding the identity operator
     basis_list = basis.reshape(-1, *basis.shape[-2:])[1:]
-    basis_size = basis_list.shape[0]
    
     tscale = 1.e+6
     tlist *= tscale
     heff_coeffs /= tscale
         
     ilogus = matrix_ufunc(lambda u: -np.angle(u), time_evolution)
-    ilogu_coeffs = np.tensordot(ilogus, basis_list, ((1, 2), (2, 1))).real / 2.
+    ilogu_coeffs = extract_coefficients(ilogus, num_sim_levels, num_qubits)
     
     ueff_dagger = make_ueff(heff_coeffs.reshape(-1)[1:], basis_list, tlist, num_qubits, phase_factor=1.)
-    u_ueffdag = np.matmul(time_evolution, ueff_dagger)
-    ilogu_ueffdags, ilogvs = matrix_ufunc(lambda u: -np.angle(u), u_ueffdag, with_diagonals=True)
-    ilogu_ueffdag_coeffs = np.tensordot(ilogu_ueffdags, basis_list, ((1, 2), (2, 1))).real / 2.
+    target = np.matmul(time_evolution, ueff_dagger)
+    ilogtargets, ilogvs = matrix_ufunc(lambda u: -np.angle(u), target, with_diagonals=True)
+    ilogtarget_coeffs = extract_coefficients(ilogtargets, num_sim_levels, num_qubits)
 
     figures = []
     
@@ -302,7 +302,7 @@ def inspect_maximize_fidelity(
         ax.plot(tlist, heff_coeffs[basis_index] * tlist)
     
     ## Second figure: subtracted unitaries
-    fig, axes = _make_figure(ilogu_ueffdag_coeffs, threshold)    
+    fig, axes = _make_figure(ilogtarget_coeffs, threshold)    
     figures.append(fig)
     fig.suptitle('Unitary-subtracted time evolution')
 
@@ -313,7 +313,7 @@ def inspect_maximize_fidelity(
     ax.plot(tlist, ilogvs)
 
     ## Second row and on: individual pauli coefficients
-    _plot_ilogu_coeffs(axes, ilogu_ueffdag_coeffs, threshold, tlist, num_sim_levels, comp_dim, num_qubits)
+    _plot_ilogu_coeffs(axes, ilogtarget_coeffs, threshold, tlist, num_sim_levels, comp_dim, num_qubits)
 
     return figures
 

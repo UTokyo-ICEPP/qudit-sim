@@ -68,6 +68,16 @@ def make_generalized_paulis(
     return paulis
 
 
+def extract_coefficients(
+    hermitian: np.ndarray,
+    dim: int,
+    num_qubits: int = 1
+) -> np.ndarray:
+    """Extract the Pauli coefficients"""
+    basis = make_prod_basis(make_generalized_paulis(dim), num_qubits)
+    return np.tensordot(hermitian, basis, ((-2, -1), (-1, -2))).real / 2.
+    
+    
 def get_l0_projection(reduced_dim: int, original_dim: int) -> np.ndarray:
     """Return the vector corresponding to lambda_0 in reduced_dim in the original_dim space.
     
@@ -197,11 +207,3 @@ def prod_basis_labels(num_paulis: int, num_qubits: int, symbol: Optional[str] = 
         out = np.char.add(np.repeat(out[..., None], num_paulis, axis=-1), labels)
         
     return out
-
-
-def get_generator_coefficients(unitaries: np.ndarray, dim: int, num_qubits: int):
-    paulis = make_generalized_paulis(dim)
-    basis = make_prod_basis(paulis, num_qubits)
-    generators = matrix_ufunc(lambda u: -np.angle(u), unitaries)
-    
-    return np.tensordot(generators, basis, ((-1, -2), (-2, -1))).real / 2.

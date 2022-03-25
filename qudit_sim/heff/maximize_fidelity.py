@@ -9,7 +9,7 @@ from iminuit import Minuit
 import optax
 import h5py
 
-from ..paulis import make_generalized_paulis, make_prod_basis
+from ..paulis import make_generalized_paulis, make_prod_basis, extract_coefficients
 from .iterative_fit import iterative_fit
 from .common import get_ilogus_and_valid_it, heff_fidelity
 
@@ -46,7 +46,6 @@ def maximize_fidelity(
     del paulis
     # Flattened list of basis operators excluding the identity operator
     basis_list = jax.device_put(basis.reshape(-1, *basis.shape[-2:])[1:], device=jax_device)
-    basis_size = basis_list.shape[0]
     
     ## Set the initial parameter values
     if isinstance(init, str):
@@ -55,8 +54,8 @@ def maximize_fidelity(
             if last_valid_it <= 1:
                 raise RuntimeError('Failed to obtain an initial estimate of the slopes')
                 
-            ilogu_coeffs = np.tensordot(ilogus, basis_list, ((1, 2), (2, 1))).real / 2.
-            init = ilogu_coeffs[last_valid_it - 1] / tlist[last_valid_it - 1]
+            ilogu_coeffs = extract_coefficients(ilogus, num_sim_levels, num_qubits)
+            init = ilogu_coeffs[last_valid_it - 1].reshape(-1)[1:] / tlist[last_valid_it - 1]
 
         elif init == 'iterative_fit':
             logger.info('Performing iterative fit to estimate the initial parameter values')
@@ -71,7 +70,7 @@ def maximize_fidelity(
                 **kwargs).reshape(-1)[1:]
             
         elif init == 'random':
-            init = (np.random.random(basis_size) * 2. - 1.) / tlist[-1]
+            init = (np.random.random(basis_list.shape) * 2. - 1.) / tlist[-1]
             
     initial = jax.device_put(init * tlist[-1], device=jax_device)
     

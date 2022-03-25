@@ -7,7 +7,7 @@ import numpy as np
 import h5py
 import qutip as qtp
 
-from .paulis import make_generalized_paulis, make_prod_basis, truncate_coefficients
+from .paulis import extract_coefficients, truncate_coefficients
 from .pulse_sim import run_pulse_sim, DriveDef
 from .parallel import parallel_map
 
@@ -69,42 +69,36 @@ def identify_gate(
             log_level=log_level
         )
 
-        unitary = np.empty((len(drive_def),) + psi0.shape, dtype=np.complex128)
-        for ires, (time_evolution, _) in enumerate(results):
-            unitary[ires] = time_evolution[-1]
+        unitary = np.stack(list(result.states[-1] for result in results))
 
     else:
         tlist = np.linspace(0., _get_drive_duration(drive_def), num_time_steps)
         
-        time_evolution, _ = run_pulse_sim(
+        result = run_pulse_sim(
             qubits,
             params,
             drive_def,
             psi0=psi0,
             tlist=tlist,
-            save_result_to=save_result_to,
+            #save_result_to=save_result_to,
             log_level=log_level)
         
-        unitary = time_evolution[-1]
+        unitary = result.states[-1]
         
     ilogu = matrix_ufunc(lambda u: -np.angle(u), unitary)
-    
-    paulis = make_generalized_paulis(num_sim_levels)
-    basis = make_prod_basis(paulis, num_qubits)
-    ilogu_coeffs = np.tensordot(ilogu, basis, ((-2, -1), (-1, -2))).real / 2.
-        
+    ilogu_coeffs = extract_coefficients(ilogu, num_sim_levels, num_qubits)
     ilogu_coeffs_trunc = truncate_coefficients(ilogu_coeffs, num_sim_levels, comp_dim, num_qubits)
 
     if save_result_to:
         if isinstance(drive_def, list):
-            for idef in range(len(drive_def)):
+            for idef, result in enumerate(results):
                 filename = os.path.join(save_result_to, f'heff_{idef}')
                 with h5py.File(f'{filename}.h5', 'w') as out:
                     out.create_dataset('num_qubits', data=num_qubits)
                     out.create_dataset('num_sim_levels', data=num_sim_levels)
                     out.create_dataset('comp_dim', data=comp_dim)
-                    out.create_dataset('unitary', data=unitary[idef])
-                    out.create_dataset('tlist', data=results[idef][1])
+                    out.create_dataset('time_evolution', data=result.states)
+                    out.create_dataset('tlist', data=result.times)
                     if num_sim_levels != comp_dim:
                         out.create_dataset('ilogu_coeffs_original', data=ilogu_coeffs[idef])
                     out.create_dataset('ilogu_coeffs', data=iogu_coeffs_trunc[idef])
@@ -114,12 +108,11 @@ def identify_gate(
                 out.create_dataset('num_qubits', data=num_qubits)
                 out.create_dataset('num_sim_levels', data=num_sim_levels)
                 out.create_dataset('comp_dim', data=comp_dim)
-                out.create_dataset('unitary', data=unitary)
-                out.create_dataset('tlist', data=tlist)
+                out.create_dataset('time_evolution', data=result.states)
+                out.create_dataset('tlist', data=result.times)
                 if num_sim_levels != comp_dim:
                     out.create_dataset('ilogu_coeffs_original', data=ilogu_coeffs)
-                out.create_dataset('ilogu_coeffs', data=iogu_coeffs_trunc)
-                out.create_dataset('heff_coeffs', data=heff_coeffs_trunc)
+                out.create_dataset('ilogu_coeffs', data=ilogu_coeffs_trunc)
                 
     logger.setLevel(original_log_level)
     
@@ -127,7 +120,7 @@ def identify_gate(
 
 def _get_drive_duration(ddef):
     duration = 0.
-    for key, value in ddef.values():
+    for key, value in ddef.items():
         if key == 'args':
             continue
 
