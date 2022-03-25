@@ -113,9 +113,11 @@ def run_pulse_sim(
 
     cwd = os.getcwd()
     with tempfile.TemporaryDirectory() as tempdir:
-        os.chdir(tempdir)
-        qtp_result = qtp.sesolve(hamiltonian, psi0, tlist, **kwargs)
-        os.chdir(cwd)
+        try:
+            os.chdir(tempdir)
+            qtp_result = qtp.sesolve(hamiltonian, psi0, tlist, **kwargs)
+        finally:
+            os.chdir(cwd)
         
     stop = time.time()
         

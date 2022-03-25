@@ -183,7 +183,7 @@ def inspect_leastsq_minimization(
     for iloop in range(num_loops):
         fig, axes = _make_figure(ilogu_coeffs[iloop], threshold)
         figures.append(fig)
-        fig.suptitle(f'Iteration {iloop} (last_valid_it {last_valid_it[iloop]})', fontsize=16)
+        fig.suptitle(f'Iteration {iloop} (last_valid_it {last_valid_it[iloop]})', fontsize=24)
         
         ## First row: global digest plots
         # log(cr) versus log(com)
@@ -235,12 +235,15 @@ def inspect_fidelity_maximization(
 ):
     
     with h5py.File(filename, 'r') as source:
-        num_qubits = source['num_qubits'][()]
-        num_sim_levels = source['num_sim_levels'][()]
-        comp_dim = source['comp_dim'][()]
+        num_qubits = int(source['num_qubits'][()])
+        num_sim_levels = int(source['num_sim_levels'][()])
+        comp_dim = int(source['comp_dim'][()])
         time_evolution = source['time_evolution'][()]
         tlist = source['tlist'][()]
-        heff_coeffs = source['heff_coeffs'][()]
+        if num_sim_levels != comp_dim:
+            heff_coeffs = source['heff_coeffs_original'][()]
+        else:
+            heff_coeffs = source['heff_coeffs'][()]
         final_fidelity = source['final_fidelity'][()]
         try:
             loss = source['loss'][()]
@@ -249,83 +252,99 @@ def inspect_fidelity_maximization(
             loss = None
             grad = None
     
-    paulis = make_generalized_paulis(num_sim_levels)
-    basis = make_prod_basis(paulis, num_qubits)
-    # Flattened list of basis operators excluding the identity operator
-    basis_list = basis.reshape(-1, *basis.shape[-2:])[1:]
-   
     tscale = 1.e+6
     tlist *= tscale
     heff_coeffs /= tscale
         
     ilogus = matrix_ufunc(lambda u: -np.angle(u), time_evolution)
     ilogu_coeffs = extract_coefficients(ilogus, num_sim_levels, num_qubits)
+    ilogu_coeffs = ilogu_coeffs.reshape(tlist.shape[0], -1)[:, 1:]
     
-    ueff_dagger = make_ueff(heff_coeffs.reshape(-1)[1:], basis_list, tlist, num_qubits, phase_factor=1.)
+    ueff_dagger = make_ueff(heff_coeffs, num_sim_levels, tlist, num_qubits, phase_factor=1.)
     target = np.matmul(time_evolution, ueff_dagger)
     ilogtargets, ilogvs = matrix_ufunc(lambda u: -np.angle(u), target, with_diagonals=True)
     ilogtarget_coeffs = extract_coefficients(ilogtargets, num_sim_levels, num_qubits)
+    ilogtarget_coeffs = ilogtarget_coeffs.reshape(tlist.shape[0], -1)[:, 1:]
 
     figures = []
     
     ## First figure: original time evolution and Heff
     fig, axes = _make_figure(ilogu_coeffs, threshold)
     figures.append(fig)
-    fig.suptitle(r'Original time evolution vs $H_{eff}$')
-    
-    ## First row: global digest plots
-    # fidelity
-    ax = axes[0, 0]
-    ax.set_xlabel(r'$t ({\mu}s)$')
-    ax.set_ylabel('fidelity')
-    ax.plot(tlist, final_fidelity)
-
-    if loss is not None:
-        ax = axes[0, 1]
-        ax.set_xlabel('steps')
-        ax.set_ylabel('loss')
-        ax.plot(loss)
-
-        ax = axes[0, 2]
-        ax.set_xlabel('steps')
-        ax.set_ylabel('max(abs(grad))')
-        ax.plot(np.amax(np.abs(grad), axis=1))
+    fig.suptitle(r'Original time evolution vs $H_{eff}$', fontsize=24)
         
     ## Second row and on: individual pauli coefficients
     ibases = _plot_ilogu_coeffs(axes, ilogu_coeffs, threshold, tlist, num_sim_levels, comp_dim, num_qubits)
     
-    iax = np.ravel_multi_index((1, 1), axes.shape)
+    coeff_line = axes[0, 0].get_lines()[0]
+    
+    ## Add lines with slope=coeff for terms above threshold
+    iax = 1
     for ibase in ibases:
         ax = axes.reshape(-1)[iax]
         iax += 1
         basis_index = unravel_basis_index(ibase + 1, num_sim_levels, num_qubits)
-        ax.plot(tlist, heff_coeffs[basis_index] * tlist)
-    
-    ## Second figure: subtracted unitaries
-    fig, axes = _make_figure(ilogtarget_coeffs, threshold)    
+        fit_line, = ax.plot(tlist, heff_coeffs[basis_index] * tlist)
+        
+    fig.legend((coeff_line, fit_line), ('ilogU(t) coefficient', '$H_{eff}t$ coefficient'), 'upper right')
+        
+    ## Second figure: fit digest plots
+    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
     figures.append(fig)
-    fig.suptitle('Unitary-subtracted time evolution')
-
-    ## First row: global digest plots
-    ax = axes[0, 0]
+    fig.suptitle('Fit metrics', fontsize=24)
+    
+    # fidelity
+    ax = axes[0]
+    ax.set_title('Final fidelity')
     ax.set_xlabel(r'$t ({\mu}s)$')
-    ax.set_ylabel(r'$ilog(U(t)U_{eff}^{\dagger}(t))$ eigenphases')
+    ax.set_ylabel('fidelity')
+    ax.plot(tlist, final_fidelity)
+    
+    # eigenphases of target matrices
+    ax = axes[1]
+    ax.set_title('Final target matrix eigenphases')
+    ax.set_xlabel(r'$t ({\mu}s)$')
+    ax.set_ylabel(r'$U(t)U_{eff}^{\dagger}(t)$ eigenphases')
     ax.plot(tlist, ilogvs)
 
-    ## Second row and on: individual pauli coefficients
+    ## Intermediate data is not available if minuit is used
+    if loss is not None:
+        ax = axes[2]
+        ax.set_title('Loss evolution')
+        ax.set_xlabel('steps')
+        ax.set_ylabel('loss')
+        ax.plot(loss)
+
+        ax = axes[3]
+        ax.set_title('Gradient evolution')
+        ax.set_xlabel('steps')
+        ax.set_ylabel('max(abs(grad))')
+        ax.plot(np.amax(np.abs(grad), axis=1))
+        
+
+    ## Third figure: subtracted unitaries
+    fig, axes = _make_figure(ilogtarget_coeffs, threshold)    
+    figures.append(fig)
+    fig.suptitle('Unitary-subtracted time evolution', fontsize=24)
+
+    ## Plot individual pauli coefficients
     _plot_ilogu_coeffs(axes, ilogtarget_coeffs, threshold, tlist, num_sim_levels, comp_dim, num_qubits)
+
+    for fig in figures:
+        fig.tight_layout()
 
     return figures
 
 
-def _make_figure(coeffs_data, threshold):
+def _make_figure(coeffs_data, threshold, nxmin=4, nxmax=12, extra_row=0):
     num_axes = np.count_nonzero(np.amax(np.abs(coeffs_data), axis=0) > threshold)
     
     nx = np.floor(np.sqrt(num_axes + 1)).astype(int)
-    nx = min(nx, 12)
-    ny = np.ceil((num_axes + 1) / nx).astype(int) + 1
+    nx = max(nx, nxmin)
+    nx = min(nx, nxmax)
+    ny = np.ceil((num_axes + 1) / nx).astype(int) + extra_row
 
-    return plt.subplots(ny, nx, figsize=(nx * 3, ny * 3))
+    return plt.subplots(ny, nx, figsize=(nx * 4, ny * 4))
 
 
 def _plot_ilogu_coeffs(axes, coeffs_data, threshold, tlist, num_sim_levels, comp_dim, num_qubits):
@@ -350,7 +369,7 @@ def _plot_ilogu_coeffs(axes, coeffs_data, threshold, tlist, num_sim_levels, comp
         l0_coeffs = np.matmul(coeffs_data, l0_projection[1:])
 
         # lambda 0 projection onto computational subspace
-        ax = axes[1, 0]
+        ax = axes[0, 0]
         ax.set_title(f'${labels.reshape(-1)[0]}$ (projected)')
         ax.set_xlabel(r'$t ({\mu}s)$')
         ax.plot(tlist, l0_coeffs)
@@ -358,7 +377,7 @@ def _plot_ilogu_coeffs(axes, coeffs_data, threshold, tlist, num_sim_levels, comp
         
     ibases = []
 
-    iax = np.ravel_multi_index((1, 1), axes.shape)
+    iax = 1
     for ibase in range(basis_size):
         if np.amax(np.abs(coeffs_data[:, ibase])) < threshold:
             continue

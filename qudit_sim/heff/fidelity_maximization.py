@@ -5,7 +5,6 @@ from functools import partial
 import numpy as np
 import jax
 import jax.numpy as jnp
-from iminuit import Minuit
 import optax
 import h5py
 
@@ -85,6 +84,8 @@ def fidelity_maximization(
         return 1. - 1. / (tlist_norm.shape[0] + 1) - jnp.mean(fidelity)
     
     if optimizer == 'minuit':
+        from iminuit import Minuit
+        
         loss_fn = jax.jit(lambda c: _loss_fn(time_evolution, c, basis_list, num_qubits, tlist_norm),
                           device=jax_device)
         grad = jax.jit(jax.grad(loss_fn), device=jax_device)
