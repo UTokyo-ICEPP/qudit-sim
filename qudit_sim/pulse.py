@@ -42,10 +42,10 @@ class Gaussian(Pulse):
             
             x = (self.end - self.start) * 0.5 / self.sigma
             self.offset = np.exp(-np.square(x) * 0.5)
-            self.amp = amp / (1. - self.offset)
+            self.amp = np.asarray(amp / (1. - self.offset), dtype=np.complex128)
 
         else:
-            self.amp = amp
+            self.amp = np.asarray(amp, dtype=np.complex128)
             self.offset = 0.
             
     def _call(self, t, args):
@@ -66,7 +66,8 @@ class GaussianSquare(Pulse):
         self.gauss_right = Gaussian(start + width, self.gauss_width, amp=amp, sigma=sigma,
                                    center=None, zero_ends=zero_ends)
 
-        self.amp = amp
+        self.amp = np.asarray(amp, dtype=np.complex128)
+        self.width = width
 
     def _call(self, t, args):
         t1 = self.start + self.gauss_width / 2.

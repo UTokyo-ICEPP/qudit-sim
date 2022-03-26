@@ -27,7 +27,6 @@ def run_pulse_sim(
     options: Optional[qtp.solver.Options] = None,
     progress_bar: Optional[qtp.ui.progressbar.BaseProgressBar] = None,
     save_result_to: Optional[str] = None,
-    return_result: bool = False,
     log_level: int = logging.WARNING
 ) -> PulseSimResult:
     """Run a pulse simulation.
