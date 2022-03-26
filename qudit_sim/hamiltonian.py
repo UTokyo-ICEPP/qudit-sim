@@ -217,9 +217,11 @@ class RWAHamiltonianGenerator:
                         op = [qtp.qeye(num_levels)] * num_qubits
                         op[iq1] = c1
                         op[iq2] = c2.dag()
+                        freq = freq_diff + D1 * l1 - D2 * l2
+
+                        # Evaluating cos & sin are faster than exp
                         h_x = J * (qtp.tensor(op).dag() + qtp.tensor(op))
                         h_y = J * 1.j * (qtp.tensor(op).dag() - qtp.tensor(op))
-                        freq = freq_diff + D1 * l1 - D2 * l2
 
                         if compile_hint:
                             self.hint.append([h_x, f'cos({freq}*t)'])
@@ -264,6 +266,8 @@ class RWAHamiltonianGenerator:
             elif isinstance(amplitude, np.ndarray):
                 drive_amp = amplitude
                 self._need_tlist = True
+            elif callable(amplitude):
+                drive_amp = ComplexFunction(amplitude, None)
             else:
                 if not isinstance(amplitude, tuple):
                     amplitude = (amplitude, 0.)

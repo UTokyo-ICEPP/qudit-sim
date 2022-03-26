@@ -301,18 +301,33 @@ def func_scale(f, s):
     else:
         return 0.
     
+def func_real(f):
+    return lambda t, args: f(t, args).real
+
+def func_imag(f):
+    return lambda t, args: f(t, args).imag
+    
 class ComplexFunction:
     """A pair of callables (signature (t, args)->float) representing a complex-valued function.
     """
     def __init__(
         self,
         real: Union[Callable, float],
-        imag: Union[Callable, float]
+        imag: Union[Callable, float, None]
     ) -> None:
-        """When `real` and/or `imag` are float, the value must be 0.
-        """
-        self.real = real
-        self.imag = imag
+        assert not (isinstance(real, float) and real != 0.), \
+            'When `real` and/or `imag` are float, the value must be 0.'
+        assert not (isinstance(imag, float) and imag != 0.), \
+            'When `real` and/or `imag` are float, the value must be 0.'
+        
+        if imag is None:
+            # This is going to be very inefficient because we'll be calling the same function twice
+            assert callable(real)
+            self.real = func_real(real)
+            self.imag = func_imag(real)
+        else:
+            self.real = real
+            self.imag = imag
             
     def __repr__(self) -> str:
         return f'ComplexFunction({self.real}, {self.imag})'

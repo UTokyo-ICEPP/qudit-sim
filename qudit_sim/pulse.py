@@ -50,7 +50,7 @@ class Gaussian(Pulse):
             
     def _call(self, t, args):
         x = (t - self.center) / self.sigma
-        return self.amp * (np.exp(-np.square(x) * 0.5) - self.offset)
+        return np.asarray(self.amp * (np.exp(-np.square(x) * 0.5) - self.offset), dtype=np.complex128)
             
 
 class GaussianSquare(Pulse):
@@ -72,9 +72,11 @@ class GaussianSquare(Pulse):
     def _call(self, t, args):
         t1 = self.start + self.gauss_width / 2.
         t2 = t1 + self.width
-        return np.piecewise(t,
-            [t < t1, (t >= t1) & (t < t2), t >= t2],
-            [self.gauss_left._call, self.amp, self.gauss_right._call],
+        # piecewise determines the output dtype from the first argument
+        tlist = np.asarray(t, dtype=np.complex128)
+        return np.piecewise(tlist,
+            [t < t1, t >= t2],
+            [self.gauss_left._call, self.gauss_right._call, self.amp],
             args)
 
     
@@ -108,4 +110,6 @@ class Sequence(Pulse):
         
     def _call(self, t, args):
         condlist = [((t >= p.start) & (t < p.end)) for p in self.pulses]
-        return np.piecewise(t, condlist, self.funclist, args)
+        # piecewise determines the output dtype from the first argument
+        tlist = np.asarray(t, dtype=np.complex128)
+        return np.piecewise(tlist, condlist, self.funclist, args)
