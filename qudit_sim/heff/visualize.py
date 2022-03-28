@@ -1,4 +1,5 @@
 from typing import Optional
+import enum
 import numpy as np
 import h5py
 import scipy.optimize as sciopt
@@ -12,17 +13,26 @@ from ..paulis import (get_num_paulis, make_generalized_paulis, make_prod_basis,
 from ..utils import matrix_ufunc
 from .common import make_ueff
 
-GHz = 1.e+9
-MHz = 1.e+6
-kHz = 1.e+3
-Hz = 1.
-
 twopi = 2. * np.pi
+
+class FrequencyScale(enum.Enum):
+    Hz = 0
+    kHz = 1
+    MHz = 2
+    GHz = 3
+
+frequency_values = np.array([1., 1.e+3, 1.e+6, 1.e+9])
+pulsatance_values = frequency_values * twopi
+frequency_units = ['Hz', 'kHz', 'MHz', 'GHz']
+pulsatance_units = ['rad/s', 'krad/s', 'Mrad/s', 'Grad/s']
+angular_frequency_units = []
+time_units = ['s', 'ms', 'us', 'ns']
 
 def heff_expr(
     coefficients: np.ndarray,
     symbol: Optional[str] = None,
-    threshold: Optional[float] = None
+    threshold: Optional[float] = None,
+    scale: Optional[FrequencyScale] = None
 ) -> str:
     """Generate a LaTeX expression of the effective Hamiltonian from the Pauli coefficients.
     
@@ -35,19 +45,26 @@ def heff_expr(
         heff: Array of Pauli coefficients returned by find_heff
         symbol: Symbol to use instead of :math:`\lambda` for the matrices.
         threshold: Ignore terms with absolute coefficients below this value.
+        scale: Manually set the scale.
         
     Returns:
         A LaTeX expression string for the effective Hamiltonian.
     """
+    coefficients = coefficients.copy()
+    
     num_qubits = len(coefficients.shape)
     labels = prod_basis_labels(coefficients.shape[0], num_qubits, symbol=symbol)
+
+    if scale is None:
+        scale = _find_scale(np.amax(np.abs(coefficients)))
         
-    scale, unit = _find_scale(np.amax(np.abs(coefficients)))
+    scale_omega = pulsatance_values[scale.value]
+    
     if threshold is None:
-        threshold = scale * 1.e-2
+        threshold = scale_omega * 1.e-2
         
-    coefficients /= scale
-    threshold /= scale
+    coefficients /= scale_omega
+    threshold /= scale_omega
             
     expr = ''
     
@@ -71,7 +88,7 @@ def heff_expr(
                 
             expr += f'{abs(coeff):.3f}' + (r'\frac{%s}{%s}' % (labels[index], denom))
         
-    return r'\frac{H_{\mathrm{eff}}}{2 \pi \mathrm{' + unit + '}} = ' + expr
+    return r'\frac{H_{\mathrm{eff}}}{\mathrm{' + pulsatance_units[scale.value] + '}} = ' + expr
 
 
 def coeffs_bar(
@@ -80,6 +97,8 @@ def coeffs_bar(
     threshold: Optional[float] = None,
     ignore_identity: bool = True
 ) -> mpl.figure.Figure:
+    
+    coefficients = coefficients.copy()
     
     num_qubits = len(coefficients.shape)
     labels = prod_basis_labels(coefficients.shape[0], num_qubits, symbol=symbol)
@@ -90,12 +109,13 @@ def coeffs_bar(
     if threshold < 0.:
         threshold *= -maxval
         
-    scale, unit = _find_scale(maxval)
+    scale = _find_scale(maxval)
+    scale_omega = pulsatance_values[scale.value]
     if threshold is None:
-        threshold = scale * 1.e-2
+        threshold = scale_omega * 1.e-2
         
-    coefficients /= scale
-    threshold /= scale
+    coefficients /= scale_omega
+    threshold /= scale_omega
             
     if ignore_identity:
         coefficients = coefficients.copy()
@@ -111,23 +131,24 @@ def coeffs_bar(
     xticks = np.char.add(np.char.add('$', labels), '$')
         
     ax.set_xticks(np.arange(nterms), labels=xticks[indices])
-    ax.set_ylabel(r'$\nu/(2\pi\mathrm{' + unit + '})$')
+    ax.set_ylabel(r'$\nu/(\mathrm{' + pulsatance_units[scale.value] + '})$')
     
     return fig
 
 
 def _find_scale(val):
-    for base, unit in [(GHz, 'GHz'), (MHz, 'MHz'), (kHz, 'kHz'), (Hz, 'Hz')]:
-        scale = twopi * base
-        if val > scale:
-            return scale, unit
+    for scale in reversed(FrequencyScale):
+        omega = pulsatance_values[scale.value]
+        if val > omega:
+            return scale
         
     raise RuntimeError(f'Could not find a proper scale for value {val}')
 
 
 def inspect_leastsq_minimization(
     filename: str,
-    threshold: float = 0.01
+    threshold: float = 0.01,
+    tscale: FrequencyScale = FrequencyScale.MHz
 ) -> list:
     
     with h5py.File(filename, 'r') as source:
@@ -149,10 +170,9 @@ def inspect_leastsq_minimization(
     num_paulis = get_num_paulis(num_sim_levels)
     basis_size = num_paulis ** num_qubits - 1
     
-    tscale = 1.e+6
-    tlist *= tscale
-    coeffs /= tscale
-    heff_coeffs /= tscale
+    tlist /= frequency_values[tscale.value]
+    coeffs *= frequency_values[tscale.value]
+    heff_coeffs *= frequency_values[tscale.value]
     
     num_loops = ilogu_coeffs.shape[0]
     
@@ -201,11 +221,11 @@ def inspect_leastsq_minimization(
 
         # ilogvs
         ax = axes[0, 1]
-        ax.set_xlabel('t (ns)')
+        ax.set_xlabel(f't ({time_units[tscale.value]})')
         ax.plot(tlist, np.sort(ilogvs[iloop], axis=1))
 
         ## Second row and on: individual pauli coefficients
-        ibases = _plot_ilogu_coeffs(axes, ilogu_coeffs[iloop], threshold, tlist, num_sim_levels, comp_dim, num_qubits)
+        ibases = _plot_ilogu_coeffs(axes, ilogu_coeffs[iloop], threshold, tlist, num_sim_levels, comp_dim, num_qubits, tscale)
         
         iax = np.ravel_multi_index((1, 1), axes.shape)
         for ibase in ibases:
@@ -231,7 +251,8 @@ def inspect_leastsq_minimization(
 
 def inspect_fidelity_maximization(
     filename: str,
-    threshold: float = 0.01
+    threshold: float = 0.01,
+    tscale: FrequencyScale = FrequencyScale.MHz
 ):
     
     with h5py.File(filename, 'r') as source:
@@ -252,9 +273,8 @@ def inspect_fidelity_maximization(
             loss = None
             grad = None
     
-    tscale = 1.e+6
-    tlist *= tscale
-    heff_coeffs /= tscale
+    tlist /= frequency_values[tscale.value]
+    heff_coeffs *= frequency_values[tscale.value]
         
     ilogus = matrix_ufunc(lambda u: -np.angle(u), time_evolution)
     ilogu_coeffs = extract_coefficients(ilogus, num_sim_levels, num_qubits)
@@ -274,7 +294,7 @@ def inspect_fidelity_maximization(
     fig.suptitle(r'Original time evolution vs $H_{eff}$', fontsize=24)
         
     ## Second row and on: individual pauli coefficients
-    ibases = _plot_ilogu_coeffs(axes, ilogu_coeffs, threshold, tlist, num_sim_levels, comp_dim, num_qubits)
+    ibases = _plot_ilogu_coeffs(axes, ilogu_coeffs, threshold, tlist, num_sim_levels, comp_dim, num_qubits, tscale)
     
     coeff_line = axes[0, 0].get_lines()[0]
     
@@ -296,14 +316,14 @@ def inspect_fidelity_maximization(
     # fidelity
     ax = axes[0]
     ax.set_title('Final fidelity')
-    ax.set_xlabel(r'$t ({\mu}s)$')
+    ax.set_xlabel(f't ({time_units[tscale.value]})')
     ax.set_ylabel('fidelity')
     ax.plot(tlist, final_fidelity)
     
     # eigenphases of target matrices
     ax = axes[1]
     ax.set_title('Final target matrix eigenphases')
-    ax.set_xlabel(r'$t ({\mu}s)$')
+    ax.set_xlabel(f't ({time_units[tscale.value]})')
     ax.set_ylabel(r'$U(t)U_{eff}^{\dagger}(t)$ eigenphases')
     ax.plot(tlist, ilogvs)
 
@@ -328,7 +348,7 @@ def inspect_fidelity_maximization(
     fig.suptitle('Unitary-subtracted time evolution', fontsize=24)
 
     ## Plot individual pauli coefficients
-    _plot_ilogu_coeffs(axes, ilogtarget_coeffs, threshold, tlist, num_sim_levels, comp_dim, num_qubits)
+    _plot_ilogu_coeffs(axes, ilogtarget_coeffs, threshold, tlist, num_sim_levels, comp_dim, num_qubits, tscale)
 
     for fig in figures:
         fig.tight_layout()
@@ -347,7 +367,7 @@ def _make_figure(coeffs_data, threshold, nxmin=4, nxmax=12, extra_row=0):
     return plt.subplots(ny, nx, figsize=(nx * 4, ny * 4))
 
 
-def _plot_ilogu_coeffs(axes, coeffs_data, threshold, tlist, num_sim_levels, comp_dim, num_qubits):
+def _plot_ilogu_coeffs(axes, coeffs_data, threshold, tlist, num_sim_levels, comp_dim, num_qubits, tscale):
     num_paulis = get_num_paulis(num_sim_levels)
     num_comp_paulis = get_num_paulis(comp_dim)
     basis_size = num_paulis ** num_qubits - 1
@@ -371,7 +391,8 @@ def _plot_ilogu_coeffs(axes, coeffs_data, threshold, tlist, num_sim_levels, comp
         # lambda 0 projection onto computational subspace
         ax = axes[0, 0]
         ax.set_title(f'${labels.reshape(-1)[0]}$ (projected)')
-        ax.set_xlabel(r'$t ({\mu}s)$')
+        ax.set_xlabel(f't ({time_units[tscale.value]})')
+        ax.set_ylabel('rad')
         ax.plot(tlist, l0_coeffs)
         ax.set_ylim(ymin, ymax)
         
@@ -389,7 +410,8 @@ def _plot_ilogu_coeffs(axes, coeffs_data, threshold, tlist, num_sim_levels, comp
         ax = axes.reshape(-1)[iax]
         iax += 1
         ax.set_title(f'${labels[basis_index]}$')
-        ax.set_xlabel(r'$t ({\mu}s)$')
+        ax.set_xlabel(f't ({time_units[tscale.value]})')
+        ax.set_ylabel('rad')
         ax.plot(tlist, coeffs_data[:, ibase])
         ax.set_ylim(ymin, ymax)
 
@@ -435,15 +457,17 @@ def _plot_amplitude_scan_on(ax, amplitudes, coefficients, threshold, max_poly_or
     num_markers = len(filled_markers)
     
     num_amps = amplitudes.shape[0]
-    amp_scale, amp_unit = _find_scale(np.amax(np.abs(amplitudes)))
-    amps_norm = amplitudes / amp_scale
+    amp_scale = _find_scale(np.amax(np.abs(amplitudes)))
+    amp_scale_omega = pulsatance_values[amp_scale.value]
+    amps_norm = amplitudes / amp_scale_omega
     amps_norm_fine = np.linspace(amps_norm[0], amps_norm[-1], 100)
     
-    scale, unit = _find_scale(np.amax(np.abs(coefficients)))
+    scale = _find_scale(np.amax(np.abs(coefficients)))
+    scale_omega = pulsatance_values[scale.value]
     if threshold is None:
-        threshold = scale * 0.1
-    coeffs_norm = coefficients / scale
-    threshold /= scale
+        threshold = scale_omega * 0.1
+    coeffs_norm = coefficients / scale_omega
+    threshold /= scale_omega
     
     exprs = []
     
@@ -481,7 +505,7 @@ def _plot_amplitude_scan_on(ax, amplitudes, coefficients, threshold, max_poly_or
         pathcol = ax.scatter(amps_norm, coeffs * plot_scale, marker=filled_markers[imarker % num_markers], label=label)
         ax.plot(amps_norm_fine, curve(amps_norm_fine, *popt) * plot_scale, color=pathcol.get_edgecolor())
         
-        expr = r'\frac{\nu_{' + prefix + basis_labels[index] + r'}}{2\pi\mathrm{' + unit + '}} = '
+        expr = r'\frac{\nu_{' + prefix + basis_labels[index] + r'}}{\mathrm{' + pulsatance_units[scale.value] + '}} = '
 
         power = 0 if even else 1
         terms = []
@@ -489,10 +513,10 @@ def _plot_amplitude_scan_on(ax, amplitudes, coefficients, threshold, max_poly_or
             if power == 0:
                 terms.append(f'{p:.2f}')
             elif power == 1:
-                terms.append(f'{p:.2f}' + r'\left(\frac{A}{2\pi\mathrm{' + amp_unit + r'}}\right)' + f'^{power}')
+                terms.append(f'{p:.2f}' + r'\left(\frac{A}{\mathrm{' + pulsatance_units[amp_scale.value] + r'}}\right)' + f'^{power}')
                 pass
             else:
-                terms.append(f'{p:+.2f}' + r'\left(\frac{A}{2\pi\mathrm{' + amp_unit + r'}}\right)' + f'^{power}')
+                terms.append(f'{p:+.2f}' + r'\left(\frac{A}{\mathrm{' + pulsatance_units[amp_scale.value] + r'}}\right)' + f'^{power}')
             power += 2
             
         expr += ' + '.join(terms)
@@ -501,8 +525,8 @@ def _plot_amplitude_scan_on(ax, amplitudes, coefficients, threshold, max_poly_or
         imarker += 1
 
     ax.set_ylim(ymin * 1.5, ymax * 1.2)
-    ax.set_xlabel(r'Drive amplitude ($2\pi{' + amp_unit+ '}$)')
-    ax.set_ylabel(r'$\nu/2\pi{MHz}$')
+    ax.set_xlabel(r'Drive amplitude (${' + pulsatance_units[amp_scale.value] + '}$)')
+    ax.set_ylabel(r'$\nu/{' + pulsatance_units[scale.value] + '}$')
     ax.legend(bbox_to_anchor=(1.03, 1.));
 
     return exprs
