@@ -3,18 +3,30 @@ import copy
 import numpy as np
 import qutip as qtp
 
-from .hamiltonian_utils import (ScaledExpression, ComplexExpression, ComplexFunction)
-
-DriveAmplitude = Union[Callable, ScaledExpression.InitArg]
-
-REL_FREQUENCY_EPSILON = 1.e-7
-    
 def cos_freq(freq):
     return lambda t, args: np.cos(freq * t)
 
 def sin_freq(freq):
     return lambda t, args: np.sin(freq * t)
 
+def exp_freq(freq):
+    def fun(t, args):
+        exponent = t * freq
+        return np.cos(exponent) + 1.j * np.sin(exponent)
+    
+    return fun
+
+def scaled_function(fun, scale):
+    return lambda t, args: scale * fun(t, args)
+
+def prod_function(fun1, fun2):
+    return lambda t, args: fun1(t, args) * fun2(t, args)
+
+def conj_function(fun):
+    return lambda t, args: fun(t, args).conjugate()
+
+
+REL_FREQUENCY_EPSILON = 1.e-7
     
 class RWAHamiltonianGenerator:
     r"""Rotating-wave approximation Hamiltonian in the qudit frame.
@@ -172,7 +184,7 @@ class RWAHamiltonianGenerator:
                 itrg = self.qubit_index_mapping[qtrg]
                 crosstalk_matrix[isrc, itrg] = factor
 
-        amps = np.array(list(params[f'omegad{ch}'] for ch in qubits)) / 2.
+        amps = np.array(list(params[f'omegad{ch}'] for ch in qubits), dtype=np.complex128) / 2.
         # Element [j,k]: \alpha_{jk} \frac{\Omega}{2} \exp (i \phi_{jk})
         self.drive_base = amps[:, None] * crosstalk_matrix
         
@@ -246,7 +258,8 @@ class RWAHamiltonianGenerator:
         self,
         qubit: int,
         frequency: float,
-        amplitude: Optional[Union[complex, np.ndarray, DriveAmplitude, Tuple[DriveAmplitude, DriveAmplitude]]] = None
+        amplitude: Union[float, complex, str, np.ndarray, Callable] = 1.+0.j,
+        real_amplitude: bool = False
     ) -> None:
         """Add a drive term.
         
@@ -254,42 +267,26 @@ class RWAHamiltonianGenerator:
             qubit: ID of the qubit to apply the drive to.
             frequency: Carrier frequency of the drive.
             amplitude: A constant drive amplitude or an envelope function.
+            real_amplitude: Set to True if `amplitude` is a str or a callable and is know to take
+                only real values.
         """
         ich = self.qubit_index_mapping[qubit]
         num_qubits = len(self.qubit_index_mapping)
         
-        if amplitude is None:
-            drive_amp = ComplexExpression(1., 0.)
-        else:
-            if isinstance(amplitude, complex):
-                drive_amp = ComplexExpression(amplitude.real, amplitude.imag)
-            elif isinstance(amplitude, np.ndarray):
-                drive_amp = amplitude
-                self._need_tlist = True
-            elif callable(amplitude):
-                drive_amp = ComplexFunction(amplitude, None)
-            else:
-                if not isinstance(amplitude, tuple):
-                    amplitude = (amplitude, 0.)
-                    
-                if callable(amplitude[0]):
-                    drive_amp = ComplexFunction(amplitude[0], amplitude[1])
-                else:
-                    drive_amp = ComplexExpression(amplitude[0], amplitude[1])
-            
         for iq in range(num_qubits):
             if self.drive_base[ich, iq] == 0.:
                 continue
+        
+            if isinstance(amplitude, (float, complex)):
+                envelope = amplitude * self.drive_base[ich, iq]
+            elif isinstance(amplitude, np.ndarray):
+                self._need_tlist = True
+                envelope = amplitude * self.drive_base[ich, iq]
+            elif isinstance(amplitude, str):
+                envelope = f'({self.drive_base[ich, iq]} * ({amplitude}))'
+            elif callable(amplitude):
+                envelope = scaled_function(amplitude, self.drive_base[ich, iq])
 
-            # Amplitude expressions for X (even) and Y (odd) terms
-            # Corresponds to R_j(t) := \alpha_{jk} \frac{\Omega_j}{2} r_j(t) \exp(i \phi_{jk})
-            envelope = drive_amp * self.drive_base[ich, iq]
-            if isinstance(envelope, ComplexExpression):
-                try:
-                    radial, phase = envelope.polar()
-                except ValueError:
-                    radial = None
-            
             # Define one Hamiltonian term per level
             for level in range(self.num_levels - 1):
                 # \omega_k + n \Delta_k
@@ -297,42 +294,72 @@ class RWAHamiltonianGenerator:
                 # \nu_j - \omega_k - n \Delta_k
                 detuning = frequency - level_frequency
                 
-                if abs(detuning) < REL_FREQUENCY_EPSILON * self.qubit_frequencies[iq]:
-                    level_drive = copy.deepcopy(envelope)
-                    
-                elif isinstance(envelope, ComplexExpression):
-                    if radial is not None:
-                        carrier_phase = f'{-detuning}*t{phase:+}'
-                        level_drive = ComplexExpression(f'cos({carrier_phase})', f'sin({carrier_phase})')
-                        level_drive *= radial
+                on_resonance = (abs(detuning) < REL_FREQUENCY_EPSILON * self.qubit_frequencies[iq])
+                
+                if isinstance(envelope, complex):
+                    if on_resonance:
+                        cr_drive = envelope
+                        an_drive = envelope.conjugate()
+                        is_real = envelope.imag == 0.
                     else:
-                        carrier = ComplexExpression(f'cos({-detuning}*t)', f'sin({-detuning}*t)')
-                        level_drive = carrier * envelope
-                        
-                elif isinstance(envelope, (ComplexFunction, np.ndarray)):
-                    carrier = ComplexFunction(cos_freq(-detuning), sin_freq(-detuning))
-                    level_drive = carrier * envelope
-                    
+                        cr_drive = f'{envelope} * (cos({detuning} * t) - 1.j * sin({detuning} * t))'
+                        an_drive = f'{envelope.conjugate()} * (cos({detuning} * t) + 1.j * sin({detuning} * t))'
+                elif isinstance(envelope, np.ndarray):
+                    if on_resonance:
+                        cr_drive = envelope
+                        an_drive = envelope.conjugate()
+                        is_real = np.all(envelope.imag == 0.)
+                    else:
+                        cr_drive = scaled_function(exp_freq(-detuning), envelope)
+                        an_drive = scaled_function(exp_freq(detuning), envelope.conjugate())
+                elif isinstance(envelope, str):
+                    if on_resonance:
+                        cr_drive = envelope
+                        an_drive = f'{envelope}.conjugate()'
+                        is_real = real_amplitude
+                    else:
+                        cr_drive = f'{envelope} * (cos({detuning} * t) - 1.j * sin({detuning} * t))'
+                        an_drive = f'{envelope}.conjugate() * (cos({detuning} * t) + 1.j * sin({detuning} * t))'
+                elif callable(envelope):
+                    if on_resonance:
+                        cr_drive = envelope
+                        an_drive = conj_function(envelope)
+                        is_real = real_amplitude
+                    else:
+                        cr_drive = prod_function(exp_freq(-detuning), envelope)
+                        an_drive = prod_function(exp_freq(detuning), conj_function(envelope))
+
                 qudit_ops = [qtp.qeye(self.num_levels)] * num_qubits
                 qudit_ops[iq] = (np.sqrt(level + 1) * qtp.basis(self.num_levels, level)
                     * qtp.basis(self.num_levels, level + 1).dag())
                 annihilator = qtp.tensor(qudit_ops)
-                h_x = annihilator.dag() + annihilator
-                h_y = 1.j * (annihilator.dag() - annihilator)
+                creator = annihilator.dag()
                 
-                for h, amp in zip((h_x, h_y), level_drive):
-                    if isinstance(level_drive, ComplexExpression):
-                        if amp.is_zero():
-                            continue
-
-                        if amp.expression is None:
-                            self.hstatic += h * amp.scale
+                if on_resonance:
+                    # If on resonance, we may be able to add this term to hstatic
+                    is_static = isinstance(envelope, complex)
+                    
+                    if isinstance(envelope, str):
+                        try:
+                            cr = eval(cr_drive)
+                            an = eval(an_drive)
+                        except:
+                            pass
                         else:
-                            self.hdrive.append([h * amp.scale, amp.expression])
-
-                    else:
-                        if amp:
-                            self.hdrive.append([h, amp])
+                            cr_drive = cr
+                            an_drive = an
+                            is_static = True
+                            
+                    if is_static:
+                        self.hstatic += cr_drive * creator + an_drive * annihilator
+                        continue
+                
+                # Append time-dependent terms
+                if on_resonance and is_real:
+                    self.hdrive.append([creator + annihilator, cr_drive])
+                else:
+                    self.hdrive.append([creator, cr_drive])
+                    self.hdrive.append([annihilator, an_drive])
                         
                 self._max_frequency_drive = max(self._max_frequency_drive, abs(detuning))
                 

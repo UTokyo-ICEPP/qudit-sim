@@ -87,7 +87,7 @@ def identify_gate(
         unitary = result.states[-1]
         
     ilogu = matrix_ufunc(lambda u: -np.angle(u), unitary)
-    ilogu_coeffs = extract_coefficients(ilogu, num_sim_levels, num_qubits)
+    ilogu_coeffs = extract_coefficients(ilogu, num_qubits)
     ilogu_coeffs_trunc = truncate_coefficients(ilogu_coeffs, num_sim_levels, comp_dim, num_qubits)
 
     if save_result_to:

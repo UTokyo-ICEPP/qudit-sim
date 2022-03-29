@@ -53,7 +53,7 @@ def fidelity_maximization(
             if last_valid_it <= 1:
                 raise RuntimeError('Failed to obtain an initial estimate of the slopes')
                 
-            ilogu_coeffs = extract_coefficients(ilogus, num_sim_levels, num_qubits)
+            ilogu_coeffs = extract_coefficients(ilogus, num_qubits)
             init = ilogu_coeffs[last_valid_it - 1].reshape(-1)[1:] / tlist[last_valid_it - 1]
 
         elif init == 'leastsq':

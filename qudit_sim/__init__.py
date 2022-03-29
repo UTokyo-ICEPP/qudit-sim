@@ -11,18 +11,16 @@ __all__ += [
     'run_pulse_sim'
 ]
 
-from .hamiltonian_utils import ScaledExpression, ComplexExpression
 from .hamiltonian import RWAHamiltonianGenerator
 
 __all__ += [
-    'ScaledExpression',
-    'ComplexExpression',
     'RWAHamiltonianGenerator'
 ]
 
 from .paulis import (get_num_paulis, make_generalized_paulis, make_prod_basis,
                      extract_coefficients, get_l0_projection, truncate_coefficients,
-                     unravel_basis_index, pauli_labels, prod_basis_labels)
+                     unravel_basis_index, pauli_labels, prod_basis_labels,
+                     matrix_symmetry, shift_phase)
 
 __all__ += [
     'get_num_paulis',
@@ -33,7 +31,9 @@ __all__ += [
     'truncate_coefficients',
     'unravel_basis_index',
     'pauli_labels',
-    'prod_basis_labels'
+    'prod_basis_labels',
+    'matrix_symmetry',
+    'shift_phase'
 ]
 
 from .pulse import Gaussian, GaussianSquare, Drag, Sequence

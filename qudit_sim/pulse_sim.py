@@ -3,6 +3,7 @@ import os
 import tempfile
 import logging
 import time
+import copy
 import collections
 
 import numpy as np
@@ -20,6 +21,7 @@ def run_pulse_sim(
     qubits: Union[Sequence[int], int],
     params: Dict[str, Any],
     drive_def: Dict,
+    phase_offsets: Optional[Dict[int, float]] = None,
     psi0: qtp.Qobj = qtp.basis(2, 0),
     tlist: Union[np.ndarray, Tuple[int, int]] = (10, 100),
     force_array: bool = False,
@@ -51,6 +53,8 @@ def run_pulse_sim(
         drive_def: Drive definition dict. Keys are qubit ids and values are dicts of format
             `{'frequency': frequency, 'amplitude': amplitude}`. Can optionally include a key `'args'` where the
             corresponding value is then passed to the `args` argument of `sesolve`.
+        phase_offsets: Model of phase offsets between the room temperature electronics and the qudit system. Drive
+            signal is sent to the qudits with the given offsets.
         psi0: Initial state Qobj.
         tlist: Time points to use in the simulation or a pair `(points_per_cycle, num_cycles)` where in the latter
             case the cycle of the fastest oscillating term in the Hamiltonian will be used.
@@ -77,6 +81,12 @@ def run_pulse_sim(
     ## Make the Hamiltonian
     
     num_sim_levels = psi0.dims[0][0]
+    
+    if phase_offsets is not None:
+        params = copy.deepcopy(params)
+        
+        for q, offset in phase_offsets.items():
+            params[f'omegad{q}'] *= np.exp(1.j * offset)
     
     # When using the array Hamiltonian, Hint terms should be kept as python functions which
     # yield the arrays upon calling array_hamiltonian().

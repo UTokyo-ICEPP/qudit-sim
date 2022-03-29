@@ -4,12 +4,18 @@ import numpy as np
 
 from .utils import matrix_ufunc
 
-def get_num_paulis(dim: int) -> int:
-    return dim ** 2
+def get_num_paulis(pauli_dim: int) -> int:
+    return pauli_dim ** 2
 
 
+def get_pauli_dim(num_paulis: int) -> int:
+    pauli_dim = np.sqrt(num_paulis)
+    assert abs(np.around(pauli_dim) - pauli_dim) < 1.e-9
+    return int(pauli_dim)
+
+    
 def make_generalized_paulis(
-    dim: int = 2,
+    pauli_dim: int = 2,
     matrix_dim: Optional[int] = None
 ) -> np.ndarray:
     """Return a list of generalized Pauli matrices of given dimension as a numpy array.
@@ -31,25 +37,25 @@ def make_generalized_paulis(
     \lambda^{(n)}_0 = \sqrt{\frac{2}{n}} I_n.
     
     Args:
-        dim: Dimension of the Pauli matrices.
-        matrix_dim: Dimension of the containing matrix, which may be greater than `dim`.
+        pauli_dim: Dimension of the Pauli matrices.
+        matrix_dim: Dimension of the containing matrix, which may be greater than `pauli_dim`.
         
     Returns:
         The full list of Pauli matrices as an array of dtype `complex128` and shape
-            `(dim ** 2, matrix_dim, matrix_dim)`.
+            `(pauli_dim ** 2, matrix_dim, matrix_dim)`.
     """
     
     if matrix_dim is None:
-        matrix_dim = dim
+        matrix_dim = pauli_dim
         
-    assert matrix_dim >= dim, 'Matrix dimension cannot be smaller than Pauli dimension'
+    assert matrix_dim >= pauli_dim, 'Matrix dimension cannot be smaller than Pauli dimension'
     
-    num_paulis = get_num_paulis(dim)
+    num_paulis = get_num_paulis(pauli_dim)
     
     paulis = np.zeros((num_paulis, matrix_dim, matrix_dim), dtype=np.complex128)
-    paulis[0, :dim, :dim] = np.diagflat(np.ones(dim))
+    paulis[0, :pauli_dim, :pauli_dim] = np.diagflat(np.ones(pauli_dim))
     ip = 1
-    for idim in range(1, dim):
+    for idim in range(1, pauli_dim):
         for irow in range(idim):
             paulis[ip, irow, idim] = 1.
             paulis[ip, idim, irow] = 1.
@@ -70,11 +76,11 @@ def make_generalized_paulis(
 
 def extract_coefficients(
     hermitian: np.ndarray,
-    dim: int,
     num_qubits: int = 1
 ) -> np.ndarray:
     """Extract the Pauli coefficients"""
-    basis = make_prod_basis(make_generalized_paulis(dim), num_qubits)
+    pauli_dim = np.around(np.power(hermitian.shape[-1], 1. / num_qubits)).astype(int)
+    basis = make_prod_basis(make_generalized_paulis(pauli_dim), num_qubits)
     return np.tensordot(hermitian, basis, ((-2, -1), (-1, -2))).real / 2.
     
     
@@ -178,12 +184,12 @@ def make_prod_basis(
 
 def unravel_basis_index(
     indices: Any,
-    dim: int,
+    pauli_dim: int,
     num_qubits: int
 ) -> np.ndarray:
     """Compute the index into prod_basis from a flat list index.
     """
-    num_paulis = get_num_paulis(dim)
+    num_paulis = get_num_paulis(pauli_dim)
     shape = [num_paulis] * num_qubits
     return np.unravel_index(indices, shape)
 
@@ -207,3 +213,46 @@ def prod_basis_labels(num_paulis: int, num_qubits: int, symbol: Optional[str] = 
         out = np.char.add(np.repeat(out[..., None], num_paulis, axis=-1), labels)
         
     return out
+
+
+def matrix_symmetry(pauli_dim: int):
+    num_paulis = get_num_paulis(pauli_dim)
+
+    symmetry = np.zeros(num_paulis, dtype=int)
+
+    ip = 1
+    for idim in range(1, pauli_dim):
+        for irow in range(idim):
+            symmetry[ip] = 1
+            ip += 1
+            symmetry[ip] = -1
+            ip += 1
+
+        ip += 1
+        
+    return symmetry
+
+
+def shift_phase(coeffs: np.ndarray, phase: float, dim: int = 0):
+    pauli_dim = get_pauli_dim(coeffs.shape[dim])
+    num_paulis = get_num_paulis(pauli_dim)
+
+    perm = list(range(len(coeffs.shape)))
+    perm.remove(dim)
+    perm.insert(0, dim)
+    
+    transposed = coeffs.transpose(*perm)
+    shifted = coeffs.copy().transpose(*perm)
+
+    symmetry = matrix_symmetry(pauli_dim)
+    sym_idx = np.asarray(symmetry == 1).nonzero()[0]
+    asym_idx = np.asarray(symmetry == -1).nonzero()[0]
+    
+    shifted[sym_idx] = np.cos(phase) * transposed[sym_idx] + np.sin(phase) * transposed[asym_idx]
+    shifted[asym_idx] = -np.sin(phase) * transposed[sym_idx] + np.cos(phase) * transposed[asym_idx]
+    
+    rperm = list(range(len(coeffs.shape)))
+    rperm.remove(0)
+    rperm.insert(dim, 0)
+
+    return shifted.transpose(*rperm)

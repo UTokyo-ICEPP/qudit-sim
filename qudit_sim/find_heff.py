@@ -7,7 +7,7 @@ import numpy as np
 import h5py
 import qutip as qtp
 
-from .paulis import truncate_coefficients
+from .paulis import truncate_coefficients, shift_phase
 from .pulse_sim import run_pulse_sim, DriveDef
 from .parallel import parallel_map
 
@@ -17,6 +17,7 @@ def find_heff(
     qubits: Union[Sequence[int], int],
     params: Dict[str, Any],
     drive_def: Union[List[DriveDef], DriveDef],
+    phase_offsets: Optional[Dict[int, float]] = None,
     num_sim_levels: int = 2,
     num_cycles: int = 100,
     comp_dim: int = 2,
@@ -41,6 +42,8 @@ def find_heff(
         params: Hamiltonian parameters. See the docstring of `hamiltonian.RWAHamiltonianGenerator` for details.
         drive_def: Drive definition or a list thereof. See the docstring of `hamiltonian.RWAHamiltonianGenerator`
             for details. Argument `'amplitude'` for each channel must be a float or a constant expression string.
+        phase_offsets: Model of phase offsets between the room temperature electronics and the qudit system. Drive
+            signal is sent to the qudits with the given offsets, which are subtracted from the effective Hamiltonian.
         num_sim_levels: Number of oscillator levels in the simulation.
         num_cycles: Duration of the square pulse, in units of cycles in the highest frequency appearing in the
             Hamiltonian.
@@ -91,6 +94,14 @@ def find_heff(
 
     tlist_tuple = (10, num_cycles)
     
+    if phase_offsets is not None:
+        phase_offset_array = np.zeros(num_qubits, dtype=np.float)
+        for iq, qubit in enumerate(qubits):
+            try:
+                phase_offset_array[iq] = phase_offsets[qubit]
+            except KeyError:
+                pass
+    
     if isinstance(drive_def, list):
         if save_result_to:
             if not (os.path.exists(save_result_to) and os.path.isdir(save_result_to)):
@@ -101,15 +112,20 @@ def find_heff(
         else:
             kwarg_keys = None
             kwarg_values = None
-        
+
+        common_args = (qubits, params)
+        common_kwargs = {'phase_offsets': phase_offsets, 'psi0': psi0,
+                         'tlist': tlist_tuple, 'force_array': True,
+                         'log_level': log_level}
+                
         results = parallel_map(
             run_pulse_sim,
             args=drive_def,
             kwarg_keys=kwarg_keys,
             kwarg_values=kwarg_values,
             arg_position=2,
-            common_args=(qubits, params),
-            common_kwargs={'psi0': psi0, 'tlist': tlist_tuple, 'log_level': log_level},
+            common_args=common_args,
+            common_kwargs=common_kwargs,
             num_cpus=sim_num_cpus,
             log_level=log_level
         )
@@ -160,6 +176,8 @@ def find_heff(
                     out.create_dataset('comp_dim', data=comp_dim)
                     out.create_dataset('time_evolution', data=result.states)
                     out.create_dataset('tlist', data=result.times)
+                    if phase_offsets is not None:
+                        out.create_dataset('phase_offsets', data=phase_offset_array)
         
         heff_coeffs_list = parallel_map(
             extraction_fn,
@@ -175,6 +193,10 @@ def find_heff(
         heff_coeffs = np.stack(heff_coeffs_list)
         heff_coeffs_trunc = truncate_coefficients(heff_coeffs, num_sim_levels, comp_dim, num_qubits)
         
+        if phase_offsets is not None:
+            for iq, offset in enumerate(phase_offset_array):
+                heff_coeffs_trunc = shift_phase(heff_coeffs_trunc, offset, dim=(iq + 1))
+        
         if save_result_to:
             for idef in range(len(drive_def)):
                 filename = os.path.join(save_result_to, f'heff_{idef}')
@@ -188,8 +210,10 @@ def find_heff(
             qubits,
             params,
             drive_def,
+            phase_offsets=phase_offsets,
             psi0=psi0,
             tlist=tlist_tuple,
+            force_array=True,
             save_result_to=save_result_to,
             log_level=log_level)
         
@@ -200,6 +224,8 @@ def find_heff(
                 out.create_dataset('comp_dim', data=comp_dim)
                 out.create_dataset('time_evolution', data=result.states)
                 out.create_dataset('tlist', data=result.times)
+                if phase_offsets is not None:
+                    out.create_dataset('phase_offsets', data=phase_offset_array)
 
         heff_coeffs = extraction_fn(
             result.states,
@@ -211,6 +237,10 @@ def find_heff(
             **extraction_params)
         
         heff_coeffs_trunc = truncate_coefficients(heff_coeffs, num_sim_levels, comp_dim, num_qubits)
+        
+        if phase_offsets is not None:
+            for iq, offset in enumerate(phase_offset_array):
+                heff_coeffs_trunc = shift_phase(heff_coeffs_trunc, offset, dim=iq)
         
         if save_result_to:
             with h5py.File(f'{save_result_to}.h5', 'a') as out:
