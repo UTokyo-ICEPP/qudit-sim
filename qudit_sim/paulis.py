@@ -195,21 +195,31 @@ def unravel_basis_index(
 
 
 def pauli_labels(num_paulis: int, symbol: Optional[str] = None):
-    if symbol is None:
+    if not symbol:
         if num_paulis == 4:
             labels = ['I', 'X', 'Y', 'Z']
-        else:
+        elif symbol is None:
             labels = list((r'\lambda_{%d}' % i) for i in range(num_paulis))
+        else:
+            labels = list(str(i) for i in range(num_paulis))
     else:
         labels = list((r'%s_{%d}' % (symbol, i)) for i in range(num_paulis))
         
     return np.array(labels)
 
 
-def prod_basis_labels(num_paulis: int, num_qubits: int, symbol: Optional[str] = None):
+def prod_basis_labels(
+    num_paulis: int,
+    num_qubits: int,
+    symbol: Optional[str] = None,
+    delimiter: str = ''
+) -> np.ndarray:
+    
     labels = pauli_labels(num_paulis, symbol=symbol)
     out = labels
     for _ in range(1, num_qubits):
+        if delimiter:
+            out += np.full_like(out, delimiter)
         out = np.char.add(np.repeat(out[..., None], num_paulis, axis=-1), labels)
         
     return out

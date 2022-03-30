@@ -58,9 +58,10 @@ __all__ += [
     'gate_expr'
 ]
 
-from .utils import matrix_ufunc
+from .utils import (FrequencyScale, matrix_ufunc)
 
 __all__ += [
+    'FrequencyScale',
     'matrix_ufunc'
 ]
 

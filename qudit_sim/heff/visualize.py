@@ -1,5 +1,4 @@
-from typing import Optional
-import enum
+from typing import Optional, Tuple, List
 import numpy as np
 import h5py
 import scipy.optimize as sciopt
@@ -11,23 +10,10 @@ from ..paulis import (get_num_paulis, get_pauli_dim,
                               make_generalized_paulis, make_prod_basis,
                               pauli_labels, prod_basis_labels, extract_coefficients,
                               unravel_basis_index, get_l0_projection)
-from ..utils import matrix_ufunc
+from ..utils import matrix_ufunc, FrequencyScale
 from .common import make_ueff
 
 twopi = 2. * np.pi
-
-class FrequencyScale(enum.Enum):
-    Hz = 0
-    kHz = 1
-    MHz = 2
-    GHz = 3
-
-frequency_values = np.array([1., 1.e+3, 1.e+6, 1.e+9])
-pulsatance_values = frequency_values * twopi
-frequency_units = ['Hz', 'kHz', 'MHz', 'GHz']
-pulsatance_units = ['rad/s', 'krad/s', 'Mrad/s', 'Grad/s']
-angular_frequency_units = []
-time_units = ['s', 'ms', 'us', 'ns']
 
 def heff_expr(
     coefficients: np.ndarray,
@@ -59,7 +45,7 @@ def heff_expr(
     if scale is None:
         scale = _find_scale(np.amax(np.abs(coefficients)))
         
-    scale_omega = pulsatance_values[scale.value]
+    scale_omega = scale.pulsatance_value
     
     if threshold is None:
         threshold = scale_omega * 1.e-2
@@ -89,7 +75,7 @@ def heff_expr(
                 
             expr += f'{abs(coeff):.3f}' + (r'\frac{%s}{%s}' % (labels[index], denom))
         
-    return r'\frac{H_{\mathrm{eff}}}{\mathrm{' + pulsatance_units[scale.value] + '}} = ' + expr
+    return r'\frac{H_{\mathrm{eff}}}{\mathrm{' + scale.frequency_unit + '}} = ' + expr
 
 
 def coeffs_bar(
@@ -107,14 +93,15 @@ def coeffs_bar(
     maxval = np.amax(np.abs(coefficients))
        
     scale = _find_scale(maxval)
-    scale_omega = pulsatance_values[scale.value]
+    scale_omega = scale.pulsatance_value
     if threshold is None:
         threshold = scale_omega * 1.e-2
         
     # Negative threshold specified -> relative to max
     if threshold < 0.:
         threshold *= -maxval
-        
+
+    # Dividing by omega -> now everything is in terms of frequency (not angular)
     coefficients /= scale_omega
     threshold /= scale_omega
             
@@ -132,15 +119,15 @@ def coeffs_bar(
     xticks = np.char.add(np.char.add('$', labels), '$')
         
     ax.set_xticks(np.arange(nterms), labels=xticks[indices])
-    ax.set_ylabel(r'$\nu/(\mathrm{' + pulsatance_units[scale.value] + '})$')
+    ax.set_ylabel(r'$\nu/(\mathrm{' + scale.frequency_unit + '})$')
     
     return fig
 
 
 def _find_scale(val):
     for scale in reversed(FrequencyScale):
-        omega = pulsatance_values[scale.value]
-        if val > omega:
+        omega = scale.pulsatance_value
+        if val > 0.1 * omega:
             return scale
         
     raise RuntimeError(f'Could not find a proper scale for value {val}')
@@ -171,9 +158,9 @@ def inspect_leastsq_minimization(
     num_paulis = get_num_paulis(num_sim_levels)
     basis_size = num_paulis ** num_qubits - 1
     
-    tlist /= frequency_values[tscale.value]
-    coeffs *= frequency_values[tscale.value]
-    heff_coeffs *= frequency_values[tscale.value]
+    tlist /= tscale.frequency_value
+    coeffs *= tscale.frequency_value
+    heff_coeffs *= tscale.frequency_value
     
     num_loops = ilogu_coeffs.shape[0]
     
@@ -222,7 +209,7 @@ def inspect_leastsq_minimization(
 
         # ilogvs
         ax = axes[0, 1]
-        ax.set_xlabel(f't ({time_units[tscale.value]})')
+        ax.set_xlabel(f't ({tscale.time_unit})')
         ax.plot(tlist, np.sort(ilogvs[iloop], axis=1))
 
         ## Second row and on: individual pauli coefficients
@@ -274,8 +261,8 @@ def inspect_fidelity_maximization(
             loss = None
             grad = None
     
-    tlist /= frequency_values[tscale.value]
-    heff_coeffs *= frequency_values[tscale.value]
+    tlist /= tscale.frequency_value
+    heff_coeffs *= tscale.frequency_value
         
     ilogus = matrix_ufunc(lambda u: -np.angle(u), time_evolution)
     ilogu_coeffs = extract_coefficients(ilogus, num_qubits)
@@ -317,14 +304,14 @@ def inspect_fidelity_maximization(
     # fidelity
     ax = axes[0]
     ax.set_title('Final fidelity')
-    ax.set_xlabel(f't ({time_units[tscale.value]})')
+    ax.set_xlabel(f't ({tscale.time_unit})')
     ax.set_ylabel('fidelity')
     ax.plot(tlist, final_fidelity)
     
     # eigenphases of target matrices
     ax = axes[1]
     ax.set_title('Final target matrix eigenphases')
-    ax.set_xlabel(f't ({time_units[tscale.value]})')
+    ax.set_xlabel(f't ({tscale.time_unit})')
     ax.set_ylabel(r'$U(t)U_{eff}^{\dagger}(t)$ eigenphases')
     ax.plot(tlist, ilogvs)
 
@@ -392,7 +379,7 @@ def _plot_ilogu_coeffs(axes, coeffs_data, threshold, tlist, num_sim_levels, comp
         # lambda 0 projection onto computational subspace
         ax = axes[0, 0]
         ax.set_title(f'${labels.reshape(-1)[0]}$ (projected)')
-        ax.set_xlabel(f't ({time_units[tscale.value]})')
+        ax.set_xlabel(f't ({tscale.time_unit})')
         ax.set_ylabel('rad')
         ax.plot(tlist, l0_coeffs)
         ax.set_ylim(ymin, ymax)
@@ -411,7 +398,7 @@ def _plot_ilogu_coeffs(axes, coeffs_data, threshold, tlist, num_sim_levels, comp
         ax = axes.reshape(-1)[iax]
         iax += 1
         ax.set_title(f'${labels[basis_index]}$')
-        ax.set_xlabel(f't ({time_units[tscale.value]})')
+        ax.set_xlabel(f't ({tscale.time_unit})')
         ax.set_ylabel('rad')
         ax.plot(tlist, coeffs_data[:, ibase])
         ax.set_ylim(ymin, ymax)
@@ -423,25 +410,37 @@ def _plot_ilogu_coeffs(axes, coeffs_data, threshold, tlist, num_sim_levels, comp
     return ibases
 
 
-def plot_amplitude_scan(amplitudes, coefficients, threshold=None, max_poly_order=4):
+def plot_amplitude_scan(
+    amplitudes: np.ndarray,
+    coefficients: np.ndarray,
+    threshold: Optional[float] = None,
+    amp_scale: Optional[FrequencyScale] = None,
+    coeff_scale: Optional[FrequencyScale] = None,
+    max_poly_order: int = 4
+) -> Tuple[mpl.figure.Figure, List[str], FrequencyScale]:
+    
     num_qubits = len(coefficients.shape) - 1 # first dimension: amplitudes
     comp_dim = get_pauli_dim(coefficients.shape[1])
     num_paulis = get_num_paulis(comp_dim)
-    
-    amp_scale = _find_scale(np.amax(np.abs(amplitudes)))
-    amp_scale_omega = pulsatance_values[amp_scale.value]
-    amps_norm = amplitudes / amp_scale_omega
-    amp_unit = pulsatance_units[amp_scale.value]
 
-    scale = _find_scale(np.amax(np.abs(coefficients)))
-    scale_omega = pulsatance_values[scale.value]
-    coeffs_norm = coefficients / scale_omega
-    coeff_unit = pulsatance_units[scale.value]
-
-    if threshold is None:
-        threshold = scale_omega * 0.1
+    if amp_scale is None:
+        amp_scale = _find_scale(np.amax(np.abs(amplitudes)))
         
-    threshold /= scale_omega
+    amp_scale_omega = amp_scale.pulsatance_value
+    amps_norm = amplitudes / amp_scale_omega
+
+    if coeff_scale is None:
+        coeff_scale = _find_scale(np.amax(np.abs(coefficients)))
+        
+    coeff_scale_omega = coeff_scale.pulsatance_value
+    coeffs_norm = coefficients / coeff_scale_omega
+    
+    if threshold is None:
+        threshold = coeff_scale_omega * 1.e-2
+        
+    threshold /= coeff_scale_omega
+    
+    # Amplitude, coeff, and threshold are all divided by omega and are in terms of frequency
     
     amax = np.amax(np.abs(coeffs_norm), axis=0)
     num_above_threshold = np.count_nonzero(amax > threshold)
@@ -455,31 +454,60 @@ def plot_amplitude_scan(amplitudes, coefficients, threshold=None, max_poly_order
         nh = np.ceil(num_plots / nv).astype(int)
         fig, axes = plt.subplots(nv, nh, figsize=(16, 12))
         
-        prefixes = pauli_labels(num_paulis)
+        prefixes = pauli_labels(num_paulis, symbol='')
         
-        exprs = []
+        expr_lines = []
+        iax = 0
+        ymin, ymax = 0., 0.
+
         for ip in range(num_paulis):
             if not has_passing_coeffs[ip]:
                 continue
 
-            ax = axes[np.unravel_index(ip, axes.shape)]
-            exprs += _plot_amplitude_scan_on(ax, amps_norm, coeffs_norm[:, ip],
-                                             threshold, amp_unit, coeff_unit,
-                                             max_poly_order, prefix=prefixes[ip])
+            ax = axes.reshape(-1)[iax]
+            expr_lines += _plot_amplitude_scan_on(ax, amps_norm, coeffs_norm[:, ip],
+                                                  threshold, max_poly_order, prefix=prefixes[ip])
+            
+            i, a = ax.get_ylim()
+            ymin = min(i, ymin)
+            ymax = max(a, ymax)
+            
+            iax += 1
+            
+        for ax in axes.reshape(-1):
+            ax.set_ylim(ymin, ymax)
+            
     else:
-        fig, axes = plt.subplots(1, 1)
-        exprs = _plot_amplitude_scan_on(axes, amps_norm, coeffs_norm, threshold,
-                                        amp_unit, coeff_unit, max_poly_order)
+        num_plots = 1
+        fig, axes = plt.subplots(1, 1, squeeze=False)
+        expr_lines = _plot_amplitude_scan_on(axes[0, 0], amps_norm, coeffs_norm, threshold,
+                                             max_poly_order)
         
-    return fig, exprs
+    nu = r'\nu'
+    nusub = lambda s: r'\nu_{' + s + '}'
+    frac = lambda n, d: r'\frac{' + n + '}{' + d + '}'
+    mathrm = lambda r: r'\mathrm{' + r + '}'
+    
+    for ax in axes.reshape(-1)[:num_plots]:
+        ax.set_xlabel(f'Drive amplitude (${amp_scale.frequency_unit}$)')
+        ax.set_ylabel(f'${nu}/{coeff_scale.frequency_unit}$')
+        
+    fig.tight_layout()
+    
+    exprs = []
+    for basis_label, rhs in expr_lines:
+        exprs.append(frac(nusub(basis_label), mathrm(coeff_scale.frequency_unit)) + ' = ' + rhs)
+        
+    return fig, exprs, amp_scale
         
 
-def _plot_amplitude_scan_on(ax, amps_norm, coeffs_norm, threshold, amp_unit, coeff_unit, max_poly_order, prefix=''):
+def _plot_amplitude_scan_on(ax, amps_norm, coeffs_norm, threshold, max_poly_order, prefix=''):
     num_qubits = len(coeffs_norm.shape) - 1 # first dimension: amplitudes
     comp_dim = get_pauli_dim(coeffs_norm.shape[1])
     num_paulis = get_num_paulis(comp_dim)
     
-    basis_labels = prod_basis_labels(num_paulis, num_qubits)
+    basis_labels = prod_basis_labels(num_paulis, num_qubits, symbol='',
+                                     delimiter=('' if comp_dim == 2 else ','))
     
     amps_norm_fine = np.linspace(amps_norm[0], amps_norm[-1], 100)
     num_amps = amps_norm.shape[0]
@@ -503,12 +531,21 @@ def _plot_amplitude_scan_on(ax, amps_norm, coeffs_norm, threshold, amp_unit, coe
         if amax[index] < threshold:
             continue
             
+        if comp_dim == 2:
+            label = prefix + basis_labels[index]
+        else:
+            if prefix:
+                label = f'{prefix},{basis_labels[index]}'
+            else:
+                label = basis_labels[index]
+                
+        plot_label = f'${label}$'
+            
         if amax[index] > 50. * min_max:
             plot_scale = 0.1
-            label = f'${prefix}{basis_labels[index]}$' + r' ($\times 0.1$)'
+            plot_label += r' ($\times 0.1$)'
         else:
             plot_scale = 1.
-            label = f'${prefix}{basis_labels[index]}$'
             
         ymax = max(ymax, np.amax(coeffs * plot_scale))
         ymin = min(ymin, np.amin(coeffs * plot_scale))
@@ -527,30 +564,40 @@ def _plot_amplitude_scan_on(ax, amps_norm, coeffs_norm, threshold, amp_unit, coe
         pathcol = ax.scatter(amps_norm, coeffs * plot_scale, marker=filled_markers[imarker % num_markers], label=label)
         ax.plot(amps_norm_fine, curve(amps_norm_fine, *popt) * plot_scale, color=pathcol.get_edgecolor())
         
-        expr = r'\frac{\nu_{' + prefix + basis_labels[index] + r'}}{\mathrm{' + coeff_unit + '}} = '
+        expr_rhs = ''
         
-        for p, power in zip(popt, range(0 if even else 1, 2 * len(popt), 2)):
+        for p, order in zip(popt, range(0 if even else 1, 2 * len(popt), 2)):
             pstr = f'{abs(p):.2e}'
             epos = pstr.index('e')
-            pexp = r'\left(' + pstr[:epos] + r' \times 10^{' + f'{int(pstr[epos + 1:])}' + r'}\right)'
+            power = int(pstr[epos + 1:])
+            if power == -1:
+                pexp = f'{abs(p):.3f}'
+            elif power == 0:
+                pexp = f'{abs(p):.2f}'
+            elif power == 1:
+                pexp = f'{abs(p):.1f}'
+            else:
+                pexp = r'\left(' + pstr[:epos] + r' \times 10^{' + f'{power}' + r'}\right)'
+                
             if p < 0.:
                 pexp = '-' + pexp
             
-            if power == 0:
-                expr += pexp
+            if order == 0:
+                expr_rhs += pexp
+            elif order == 1:
+                expr_rhs += pexp + 'A'
             else:
-                if power > 1 and p > 0.:
+                if p > 0.:
                     pexp = '+' + pexp
 
-                expr += pexp + r'\left(\frac{A}{\mathrm{' + amp_unit + r'}}\right)' + f'^{power}'
+                expr_rhs += pexp + f'A^{order}'
                     
-        exprs.append(expr)
+        exprs.append((label, expr_rhs))
+        
         imarker += 1
 
     ax.set_ylim(ymin * 1.5, ymax * 1.2)
-    ax.set_xlabel(r'Drive amplitude (${' + amp_unit + '}$)')
-    ax.set_ylabel(r'$\nu/{' + coeff_unit + '}$')
-    ax.legend(bbox_to_anchor=(1.03, 1.));
+    ax.legend()
 
     return exprs
 
