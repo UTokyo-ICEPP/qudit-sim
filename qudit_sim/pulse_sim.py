@@ -9,6 +9,7 @@ import collections
 import numpy as np
 import qutip as qtp
 
+from .paulis import make_generalized_paulis, make_prod_basis, extract_coefficients, shift_phase
 from .hamiltonian import RWAHamiltonianGenerator
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,8 @@ def run_pulse_sim(
             `{'frequency': frequency, 'amplitude': amplitude}`. Can optionally include a key `'args'` where the
             corresponding value is then passed to the `args` argument of `sesolve`.
         phase_offsets: Model of phase offsets between the room temperature electronics and the qudit system. Drive
-            signal is sent to the qudits with the given offsets.
+            signal is sent to the qudits with the given offsets. Expectation values of the observables specified in
+            e_ops will be phase-shifted accordingly.
         psi0: Initial state Qobj.
         tlist: Time points to use in the simulation or a pair `(points_per_cycle, num_cycles)` where in the latter
             case the cycle of the fastest oscillating term in the Hamiltonian will be used.
@@ -73,10 +75,9 @@ def run_pulse_sim(
     
     if isinstance(qubits, int):
         qubits = (qubits,)
-    
-    ## Collect kwargs passed directly to sesolve
-    
-    kwargs = {'e_ops': e_ops, 'options': options, 'progress_bar': progress_bar}
+        
+    num_qubits = len(qubits)
+    assert len(psi0.dims[0]) == num_qubits
     
     ## Make the Hamiltonian
     
@@ -87,13 +88,33 @@ def run_pulse_sim(
         
         for q, offset in phase_offsets.items():
             params[f'omegad{q}'] *= np.exp(1.j * offset)
+            
+        if e_ops is not None:
+            # Extract the Pauli coefficients of the given observables
+            e_ops_coefficients = list(extract_coefficients(op.full(), num_qubits) for op in e_ops)
+            
+            # Pass the Pauli products as observables instead to sesolve
+            e_ops = []
+            paulis = make_generalized_paulis(num_sim_levels)
+            pauli_objs = list(qtp.Qobj(inpt=p) for p in paulis)
+            for idx in np.ndindex((paulis.shape[0],) * num_qubits):
+                if idx == (0,) * num_qubits: # skip the identity
+                    continue
+                
+                e_ops.append(qtp.tensor([pauli_objs[i] for i in idx]))
+            
+    ## kwargs passed directly to sesolve
+    
+    kwargs = {'e_ops': e_ops, 'options': options, 'progress_bar': progress_bar}
     
     # When using the array Hamiltonian, Hint terms should be kept as python functions which
     # yield the arrays upon calling array_hamiltonian().
     hgen = RWAHamiltonianGenerator(qubits, params, num_sim_levels, compile_hint=(not force_array))
     
-    logger.info('Instantiated a Hamiltonian generator for %d qubits and %d levels', len(qubits), num_sim_levels)
+    logger.info('Instantiated a Hamiltonian generator for %d qubits and %d levels', num_qubits, num_sim_levels)
     logger.info('Number of interaction terms: %d', len(hgen.hint))
+    if e_ops is not None:
+        logger.info('Number of observables: %d', len(e_ops))
     
     for key, value in drive_def.items():
         if key == 'args':
@@ -136,11 +157,33 @@ def run_pulse_sim(
         logger.info('Saving the simulation result to %s.qu', save_result_to)
         qtp.fileio.qsave(qtp_result, save_result_to)
         
-    logger.setLevel(original_log_level)
-    
     if qtp_result.states:
         states = np.stack(list(state.full() for state in qtp_result.states))
     else:
         states = None
+        
+    if phase_offsets is not None and e_ops is not None:
+        # shape (num_prod_basis - 1, T)
+        basis_expect = np.stack(qtp_result.expect)
+
+        phase_offset_array = np.zeros(num_qubits, dtype=np.float)
+        for iq, qubit in enumerate(qubits):
+            try:
+                phase_offset_array[iq] = phase_offsets[qubit]
+            except KeyError:
+                pass
+            
+        expect = []
+        # shift the coefficient phases and combine it with the Pauli expectation values
+        for coeffs in e_ops_coefficients:
+            for iq, offset in enumerate(phase_offset_array):
+                coeffs = shift_phase(coeffs, -offset, dim=iq)
+                
+            expect.append(basis_expect.T @ coeffs.reshape(-1)[1:])
+
+    else:
+        expect = list(exp.copy() for exp in qtp_result.expect)
+        
+    logger.setLevel(original_log_level)
     
-    return PulseSimResult(times=qtp_result.times, expect=qtp_result.expect, states=states)
+    return PulseSimResult(times=tlist, expect=expect, states=states)
