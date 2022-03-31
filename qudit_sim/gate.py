@@ -18,6 +18,7 @@ def identify_gate(
     qubits: Union[Sequence[int], int],
     params: Dict[str, Any],
     drive_def: Union[List[DriveDef], DriveDef],
+    phase_offsets: Optional[Dict[int, float]] = None,
     num_sim_levels: int = 2,
     num_time_steps: int = 100,
     comp_dim: int = 2,
@@ -41,22 +42,37 @@ def identify_gate(
     
     psi0 = qtp.tensor([qtp.qeye(num_sim_levels)] * num_qubits)
     
+    if phase_offsets is not None:
+        phase_offset_array = np.zeros(num_qubits, dtype=np.float)
+        for iq, qubit in enumerate(qubits):
+            try:
+                phase_offset_array[iq] = phase_offsets[qubit]
+            except KeyError:
+                pass
+    
     logger.info('Running a pulse simulation for %d time steps', num_time_steps)
     
     if isinstance(drive_def, list):
+        num_jobs = len(drive_def)
+        
         kwarg_keys = ('tlist',)
-        kwarg_values = []
+        kwarg_values_tuple = ([],)
         
         for ddef in drive_def:
             tlist = np.linspace(0., _get_drive_duration(ddef), num_time_steps)
-            kwarg_values.append((tlist,))
-        
+            kwarg_values_tuple[0].append(tlist)
+            
         if save_result_to:
             if not (os.path.exists(save_result_to) and os.path.isdir(save_result_to)):
                 os.makedirs(save_result_to)
                 
             kwarg_keys += ('save_result_to',)
-            kwarg_values = list(v + (os.path.join(save_result_to, f'sim_{i}'),) for i, v in enumerate(kwarg_values))
+            kwarg_values_tuple +=  list(os.path.join(save_result_to, f'sim_{i}') for i in range(num_jobs))
+            
+        kwarg_values = list(tuple(t[i] for t in kwarg_values_tuple) for i in range(num_jobs))
+        
+        common_args = (qubits, params)
+        common_kwargs = {'phase_offsets': phase_offsets, 'psi0': psi0, 'log_level': log_level}
         
         results = parallel_map(
             run_pulse_sim,
@@ -64,8 +80,8 @@ def identify_gate(
             kwarg_keys=kwarg_keys,
             kwarg_values=kwarg_values,
             arg_position=2,
-            common_args=(qubits, params),
-            common_kwargs={'psi0': psi0, 'log_level': log_level},
+            common_args=common_args,
+            common_kwargs=common_kwargs,
             num_cpus=sim_num_cpus,
             log_level=log_level
         )
@@ -79,6 +95,7 @@ def identify_gate(
             qubits,
             params,
             drive_def,
+            phase_offsets=phase_offsets,
             psi0=psi0,
             tlist=tlist,
             #save_result_to=save_result_to,
@@ -89,6 +106,11 @@ def identify_gate(
     ilogu = matrix_ufunc(lambda u: -np.angle(u), unitary)
     ilogu_coeffs = extract_coefficients(ilogu, num_qubits)
     ilogu_coeffs_trunc = truncate_coefficients(ilogu_coeffs, num_sim_levels, comp_dim, num_qubits)
+    
+    if phase_offsets is not None:
+        for iq, offset in enumerate(phase_offset_array):
+            dim = iq + 1 if isinstance(drive_def, list) else iq
+            ilogu_coeffs_trunc = shift_phase(ilogu_coeffs_trunc, offset, dim=dim)
 
     if save_result_to:
         if isinstance(drive_def, list):
