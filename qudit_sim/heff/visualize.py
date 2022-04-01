@@ -80,7 +80,6 @@ def heff_expr(
 
 def coeffs_bar(
     coefficients: np.ndarray,
-    symbol: Optional[str] = None,
     threshold: Optional[float] = None,
     ignore_identity: bool = True
 ) -> mpl.figure.Figure:
@@ -88,7 +87,10 @@ def coeffs_bar(
     coefficients = coefficients.copy()
     
     num_qubits = len(coefficients.shape)
-    labels = prod_basis_labels(coefficients.shape[0], num_qubits, symbol=symbol)
+    num_paulis = coefficients.shape[0]
+    
+    labels = prod_basis_labels(num_paulis, num_qubits, symbol='',
+                               delimiter=('' if num_paulis == 4 else ','))
     
     maxval = np.amax(np.abs(coefficients))
        
@@ -116,6 +118,8 @@ def coeffs_bar(
     fig, ax = plt.subplots(1, 1)
     ax.bar(np.arange(nterms), coefficients[indices])
     
+    ax.axhline(0., color='black', linewidth=0.5)
+    
     xticks = np.char.add(np.char.add('$', labels), '$')
         
     ax.set_xticks(np.arange(nterms), labels=xticks[indices])
@@ -136,7 +140,9 @@ def _find_scale(val):
 def inspect_leastsq_minimization(
     filename: str,
     threshold: float = 0.01,
-    tscale: FrequencyScale = FrequencyScale.MHz
+    tscale: FrequencyScale = FrequencyScale.MHz,
+    align_ylim: bool = True,
+    basis_indices: Optional[List[Tuple]] = None
 ) -> list:
     
     with h5py.File(filename, 'r') as source:
@@ -158,9 +164,9 @@ def inspect_leastsq_minimization(
     num_paulis = get_num_paulis(num_sim_levels)
     basis_size = num_paulis ** num_qubits - 1
     
-    tlist /= tscale.frequency_value
-    coeffs *= tscale.frequency_value
-    heff_coeffs *= tscale.frequency_value
+    tlist *= tscale.frequency_value
+    coeffs /= tscale.frequency_value
+    heff_coeffs /= tscale.frequency_value
     
     num_loops = ilogu_coeffs.shape[0]
     
@@ -185,17 +191,29 @@ def inspect_leastsq_minimization(
     np.log10(com, out=log_com, where=(com > 0.))
     log_cr = np.ones_like(coeff_ratio) * np.amin(coeff_ratio, where=(coeff_ratio > 0.), initial=np.amax(coeff_ratio))
     np.log10(coeff_ratio, out=log_cr, where=(coeff_ratio > 0.))
-
+    
+    if basis_indices is not None:
+        tuple_of_indices = tuple(np.array(index[i] for index in basis_indices) for i in range(len(basis_indices[0])))
+        basis_indices = np.ravel_multi_index(tuple_of_indices, (num_paulis,) * num_qubits)
+        basis_indices = np.sort(basis_indices)
+        
     figures = []
     
     for iloop in range(num_loops):
-        fig, axes = _make_figure(ilogu_coeffs[iloop], threshold)
+        if basis_indices is None:
+            # Make a list of tuples from a tuple of arrays
+            indices_loop = np.nonzero(np.amax(np.abs(ilogu_coeffs[iloop]), axis=0) > threshold)[0] + 1
+            indices_loop = np.concatenate([np.array([0]), indices_loop])
+        else:
+            indices_loop = basis_indices
+        
+        fig, axes = _make_figure(len(indices_iter) + 2)
         figures.append(fig)
         fig.suptitle(f'Iteration {iloop} (last_valid_it {last_valid_it[iloop]})', fontsize=24)
         
         ## First row: global digest plots
         # log(cr) versus log(com)
-        ax = axes[0, 0]
+        ax = axes[0]
         
         ax.set_xlabel(r'$log_{10}(com)$')
         if iloop == 0:
@@ -208,26 +226,26 @@ def inspect_leastsq_minimization(
             ax.axhline(np.log10(min_coeff_ratio), color='red')
 
         # ilogvs
-        ax = axes[0, 1]
+        ax = axes[1]
         ax.set_xlabel(f't ({tscale.time_unit})')
         ax.plot(tlist, np.sort(ilogvs[iloop], axis=1))
-
-        ## Second row and on: individual pauli coefficients
-        ibases = _plot_ilogu_coeffs(axes, ilogu_coeffs[iloop], threshold, tlist, num_sim_levels, comp_dim, num_qubits, tscale)
         
-        iax = np.ravel_multi_index((1, 1), axes.shape)
-        for ibase in ibases:
-            ax = axes.reshape(-1)[iax]
-            iax += 1
+        ## individual pauli coefficients
+        _plot_ilogu_coeffs(axes[2:], coeffs, num_qubits, num_paulis, indices_loop, tlist, tscale, comp_dim)
+        
+        for iax, basis_index_flat in enumerate(indices_loop):
+            ax = axes[iax]
 
             ymin, ymax = ax.ylim()
+            
+            ibase = basis_index_flat - 1
             
             # Show cumul-over-max and coeff ratio values
             ax.text(tlist[10], ymin + (ymax - ymin) * 0.1, f'com {com[iloop, ibase]:.3f} cr {coeff_ratio[iloop, ibase]:.3f}')
         
             # Draw the fit line for successful fits
             if success[iloop, ibase]:
-                ax.plot(tlist, coeffs[iloop, ibase] * tlist)
+                ax.plot(tlist, coeffs[ibase] * tlist)
                 
             if selected[iloop, ibase]:
                 ax.tick_params(color='magenta', labelcolor='magenta')
@@ -240,8 +258,25 @@ def inspect_leastsq_minimization(
 def inspect_fidelity_maximization(
     filename: str,
     threshold: float = 0.01,
-    tscale: FrequencyScale = FrequencyScale.MHz
-):
+    tscale: FrequencyScale = FrequencyScale.MHz,
+    align_ylim: bool = False,
+    basis_indices: Optional[List[Tuple]] = None,
+    digest: bool = True
+) -> List[mpl.figure.Figure]:
+    """Plot the time evolution of Pauli coefficients before and after fidelity maximization.
+    
+    Args:
+        filename: Name of the HDF5 file containing the fit result.
+        threshold: Threshold for a Pauli component to be plotted, in radians. Ignored if
+            basis_indices is not None.
+        tscale: Scale for the time axis.
+        align_ylim: Whether to align the y axis limits for all plots.
+        basis_indices: List of Pauli components to plot.
+        digest: If True, a figure for fit information is included.
+        
+    Returns:
+        A list of two (three if digest=True) figures.
+    """
     
     with h5py.File(filename, 'r') as source:
         num_qubits = int(source['num_qubits'][()])
@@ -260,9 +295,11 @@ def inspect_fidelity_maximization(
         except KeyError:
             loss = None
             grad = None
+            
+    num_paulis = get_num_paulis(num_sim_levels)
     
-    tlist /= tscale.frequency_value
-    heff_coeffs *= tscale.frequency_value
+    tlist *= tscale.frequency_value
+    heff_coeffs /= tscale.frequency_value
         
     ilogus = matrix_ufunc(lambda u: -np.angle(u), time_evolution)
     ilogu_coeffs = extract_coefficients(ilogus, num_qubits)
@@ -273,70 +310,87 @@ def inspect_fidelity_maximization(
     ilogtargets, ilogvs = matrix_ufunc(lambda u: -np.angle(u), target, with_diagonals=True)
     ilogtarget_coeffs = extract_coefficients(ilogtargets, num_qubits)
     ilogtarget_coeffs = ilogtarget_coeffs.reshape(tlist.shape[0], -1)[:, 1:]
+    
+    if basis_indices is None:
+        # Make a list of tuples from a tuple of arrays
+        indices_ilogu = np.nonzero(np.amax(np.abs(ilogu_coeffs), axis=0) > threshold)[0] + 1
+        indices_ilogu = np.concatenate([np.array([0]), indices_ilogu])
+        indices_ilogtarget = np.nonzero(np.amax(np.abs(ilogtarget_coeffs), axis=0) > threshold)[0] + 1
+        indices_ilogtarget = np.concatenate([np.array([0]), indices_ilogtarget])
+    else:
+        tuple_of_indices = tuple([index[i] for index in basis_indices] for i in range(len(basis_indices[0])))
+        basis_indices = np.ravel_multi_index(tuple_of_indices, (num_paulis,) * num_qubits)
+        basis_indices = np.sort(basis_indices)
+        
+        indices_ilogu = basis_indices
+        indices_ilogtarget = basis_indices
 
     figures = []
     
     ## First figure: original time evolution and Heff
-    fig, axes = _make_figure(ilogu_coeffs, threshold)
+    fig, axes = _make_figure(len(indices_ilogu))
     figures.append(fig)
     fig.suptitle(r'Original time evolution vs $H_{eff}$', fontsize=24)
         
-    ## Second row and on: individual pauli coefficients
-    ibases = _plot_ilogu_coeffs(axes, ilogu_coeffs, threshold, tlist, num_sim_levels, comp_dim, num_qubits, tscale)
+    _plot_ilogu_coeffs(axes, ilogu_coeffs, num_qubits, num_paulis, indices_ilogu, tlist, tscale,
+                       comp_dim, align_ylim=align_ylim)
     
-    coeff_line = axes[0, 0].get_lines()[0]
+    coeff_line = axes[0].get_lines()[0]
     
     ## Add lines with slope=coeff for terms above threshold
-    iax = 1
-    for ibase in ibases:
-        ax = axes.reshape(-1)[iax]
-        iax += 1
-        basis_index = unravel_basis_index(ibase + 1, num_sim_levels, num_qubits)
+    for iax, basis_index_flat in enumerate(indices_ilogu):
+        ax = axes[iax]
+        basis_index = np.unravel_index(basis_index_flat, (num_paulis,) * num_qubits)
         fit_line, = ax.plot(tlist, heff_coeffs[basis_index] * tlist)
         
-    fig.legend((coeff_line, fit_line), ('ilogU(t) coefficient', '$H_{eff}t$ coefficient'), 'upper right')
-        
-    ## Second figure: fit digest plots
-    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
-    figures.append(fig)
-    fig.suptitle('Fit metrics', fontsize=24)
-    
-    # fidelity
-    ax = axes[0]
-    ax.set_title('Final fidelity')
-    ax.set_xlabel(f't ({tscale.time_unit})')
-    ax.set_ylabel('fidelity')
-    ax.plot(tlist, final_fidelity)
-    
-    # eigenphases of target matrices
-    ax = axes[1]
-    ax.set_title('Final target matrix eigenphases')
-    ax.set_xlabel(f't ({tscale.time_unit})')
-    ax.set_ylabel(r'$U(t)U_{eff}^{\dagger}(t)$ eigenphases')
-    ax.plot(tlist, ilogvs)
+    fig.legend((coeff_line, fit_line),
+               ('ilogU(t) coefficient', '$H_{eff}t$ coefficient'), 'upper right')
 
-    ## Intermediate data is not available if minuit is used
-    if loss is not None:
-        ax = axes[2]
-        ax.set_title('Loss evolution')
-        ax.set_xlabel('steps')
-        ax.set_ylabel('loss')
-        ax.plot(loss)
-
-        ax = axes[3]
-        ax.set_title('Gradient evolution')
-        ax.set_xlabel('steps')
-        ax.set_ylabel('max(abs(grad))')
-        ax.plot(np.amax(np.abs(grad), axis=1))
-        
-
-    ## Third figure: subtracted unitaries
-    fig, axes = _make_figure(ilogtarget_coeffs, threshold)    
+    ## Second figure: subtracted unitaries
+    fig, axes = _make_figure(len(indices_ilogtarget))
     figures.append(fig)
     fig.suptitle('Unitary-subtracted time evolution', fontsize=24)
 
     ## Plot individual pauli coefficients
-    _plot_ilogu_coeffs(axes, ilogtarget_coeffs, threshold, tlist, num_sim_levels, comp_dim, num_qubits, tscale)
+    _plot_ilogu_coeffs(axes, ilogtarget_coeffs, num_qubits, num_paulis, indices_ilogtarget, tlist, tscale,
+                       comp_dim, align_ylim=align_ylim)
+    
+    if digest:
+        ## Third figure: fit digest plots
+        fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+        figures.append(fig)
+        fig.suptitle('Fit metrics', fontsize=24)
+
+        # fidelity
+        ax = axes[0]
+        ax.set_title('Final fidelity')
+        ax.set_xlabel(f't ({tscale.time_unit})')
+        ax.set_ylabel('fidelity')
+        ax.plot(tlist, final_fidelity)
+        ax.axhline(1., color='black', linewidth=0.5)
+
+        # eigenphases of target matrices
+        ax = axes[1]
+        ax.set_title('Final target matrix eigenphases')
+        ax.set_xlabel(f't ({tscale.time_unit})')
+        ax.set_ylabel(r'$U(t)U_{eff}^{\dagger}(t)$ eigenphases')
+        ax.plot(tlist, ilogvs)
+
+        ## Intermediate data is not available if minuit is used
+        if loss is not None:
+            ax = axes[2]
+            ax.set_title('Loss evolution')
+            ax.set_xlabel('steps')
+            ax.set_ylabel('loss')
+            ax.plot(loss)
+            ax.axhline(0., color='black', linewidth=0.5)
+
+            ax = axes[3]
+            ax.set_title('Gradient evolution')
+            ax.set_xlabel('steps')
+            ax.set_ylabel('max(abs(grad))')
+            ax.plot(np.amax(np.abs(grad), axis=1))
+            ax.axhline(0., color='black', linewidth=0.5)
 
     for fig in figures:
         fig.tight_layout()
@@ -344,31 +398,29 @@ def inspect_fidelity_maximization(
     return figures
 
 
-def _make_figure(coeffs_data, threshold, nxmin=4, nxmax=12, extra_row=0):
-    num_axes = np.count_nonzero(np.amax(np.abs(coeffs_data), axis=0) > threshold)
-    
-    nx = np.floor(np.sqrt(num_axes + 1)).astype(int)
+def _make_figure(num_axes, nxmin=4, nxmax=12):
+    nx = np.floor(np.sqrt(num_axes)).astype(int)
     nx = max(nx, nxmin)
     nx = min(nx, nxmax)
-    ny = np.ceil((num_axes + 1) / nx).astype(int) + extra_row
+    ny = np.ceil(num_axes / nx).astype(int)
 
-    return plt.subplots(ny, nx, figsize=(nx * 4, ny * 4))
+    fig, axes = plt.subplots(ny, nx, figsize=(nx * 4, ny * 4))
+    return fig, axes.reshape(-1)
 
 
-def _plot_ilogu_coeffs(axes, coeffs_data, threshold, tlist, num_sim_levels, comp_dim, num_qubits, tscale):
-    num_paulis = get_num_paulis(num_sim_levels)
+def _plot_ilogu_coeffs(axes, coeffs_data, num_qubits, num_paulis, basis_indices_flat, tlist, tscale, comp_dim, align_ylim=False):
+    # coeffs_data: shape (T, num_basis - 1)
+    # basis_indices_flat
+    num_sim_levels = get_pauli_dim(num_paulis)
     num_comp_paulis = get_num_paulis(comp_dim)
-    basis_size = num_paulis ** num_qubits - 1
 
-    labels = prod_basis_labels(num_paulis, num_qubits)
-    
-    ymax = np.amax(coeffs_data)
-    ymin = np.amin(coeffs_data)
-    vrange = ymax - ymin
-    ymax += 0.2 * vrange
-    ymin -= 0.2 * vrange
+    basis_indices = np.unravel_index(basis_indices_flat, (num_paulis,) * num_qubits)
+    labels = prod_basis_labels(num_paulis, num_qubits)[basis_indices]
+    coeffs_data_selected = coeffs_data[:, basis_indices_flat - 1]
 
-    if comp_dim != num_sim_levels:
+    iax = 0
+
+    if basis_indices_flat[0] == 0:
         l0p = get_l0_projection(comp_dim, num_sim_levels)
         l0_projection = l0p
         for _ in range(num_qubits - 1):
@@ -377,37 +429,36 @@ def _plot_ilogu_coeffs(axes, coeffs_data, threshold, tlist, num_sim_levels, comp
         l0_coeffs = np.matmul(coeffs_data, l0_projection[1:])
 
         # lambda 0 projection onto computational subspace
-        ax = axes[0, 0]
-        ax.set_title(f'${labels.reshape(-1)[0]}$ (projected)')
-        ax.set_xlabel(f't ({tscale.time_unit})')
-        ax.set_ylabel('rad')
+        ax = axes[0]
+        ax.set_title(f'${labels[0]}$ (projected)')
         ax.plot(tlist, l0_coeffs)
-        ax.set_ylim(ymin, ymax)
         
-    ibases = []
-
-    iax = 1
-    for ibase in range(basis_size):
-        if np.amax(np.abs(coeffs_data[:, ibase])) < threshold:
-            continue
-            
-        ibases.append(ibase)
-
-        basis_index = unravel_basis_index(ibase + 1, num_sim_levels, num_qubits)
-
-        ax = axes.reshape(-1)[iax]
         iax += 1
-        ax.set_title(f'${labels[basis_index]}$')
-        ax.set_xlabel(f't ({tscale.time_unit})')
-        ax.set_ylabel('rad')
-        ax.plot(tlist, coeffs_data[:, ibase])
-        ax.set_ylim(ymin, ymax)
+        
+    while iax < basis_indices_flat.shape[0]:
+        ax = axes[iax]
 
-        if (np.array(basis_index) < num_comp_paulis).all():
+        ax.set_title(f'${labels[iax]}$')
+        ax.plot(tlist, coeffs_data_selected[:, iax])
+        
+        if (np.array([indices[iax] for indices in basis_indices]) < num_comp_paulis).all():
             for spine in ax.spines.values():
                 spine.set(linewidth=2.)
-
-    return ibases
+                
+        iax += 1
+    
+    ymax = np.amax(coeffs_data_selected)
+    ymin = np.amin(coeffs_data_selected)
+    vrange = ymax - ymin
+    ymax += 0.2 * vrange
+    ymin -= 0.2 * vrange
+                
+    for ax in axes.reshape(-1):
+        ax.axhline(0., color='black', linewidth=0.5)
+        if align_ylim:
+            ax.set_ylim(ymin, ymax)
+        ax.set_xlabel(f't ({tscale.time_unit})')
+        ax.set_ylabel('rad')
 
 
 def plot_amplitude_scan(
@@ -474,7 +525,7 @@ def plot_amplitude_scan(
             
             iax += 1
             
-        for ax in axes.reshape(-1):
+        for ax in axes.reshape(-1)[:num_plots]:
             ax.set_ylim(ymin, ymax)
             
     else:
@@ -489,6 +540,7 @@ def plot_amplitude_scan(
     mathrm = lambda r: r'\mathrm{' + r + '}'
     
     for ax in axes.reshape(-1)[:num_plots]:
+        ax.grid(True)
         ax.set_xlabel(f'Drive amplitude (${amp_scale.frequency_unit}$)')
         ax.set_ylabel(f'${nu}/{coeff_scale.frequency_unit}$')
         

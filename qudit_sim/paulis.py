@@ -219,7 +219,8 @@ def prod_basis_labels(
     out = labels
     for _ in range(1, num_qubits):
         if delimiter:
-            out += np.full_like(out, delimiter)
+            out = np.char.add(out, np.full_like(out, delimiter))
+
         out = np.char.add(np.repeat(out[..., None], num_paulis, axis=-1), labels)
         
     return out
