@@ -5,12 +5,14 @@ from functools import partial
 import numpy as np
 import jax
 import jax.numpy as jnp
+import jax.scipy.optimize as jsciopt
 import optax
 import h5py
 
 from ..paulis import make_generalized_paulis, make_prod_basis, extract_coefficients
+from ..utils import matrix_ufunc
 from .leastsq_minimization import leastsq_minimization
-from .common import get_ilogus_and_valid_it, heff_fidelity
+from .common import get_ilogus_and_valid_it, heff_fidelity, make_ueff
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,7 @@ def fidelity_maximization(
     jax_device_id: Optional[int] = None,
     optimizer: Union[optax.GradientTransformation, str] = optax.adam(0.05), 
     init: Union[str, np.ndarray] = 'slope_estimate',
+    residual_adjust: bool = True,
     max_updates: int = 10000,
     convergence: float = 1.e-4,
     **kwargs
@@ -100,8 +103,8 @@ def fidelity_maximization(
         logger.info('Done.')
         
         num_updates = minimizer.nfcn
-
-        heff_coeffs = np.concatenate(([0.], minimizer.values / tlist[-1])).reshape(basis.shape[:-2])
+        
+        copt = minimizer.values
         
     else:
         if save_result_to:
@@ -146,7 +149,37 @@ def fidelity_maximization(
 
         logger.info('Done after %d steps.', iup)
         
-        heff_coeffs = np.concatenate(([0.], params['c'] / tlist[-1])).reshape(basis.shape[:-2])
+        copt = params['c']
+        
+    if residual_adjust:
+        logger.info('Adjusting the coefficients from a linear fit to the residuals..')
+        
+        def fun(params, ydata):
+            return jnp.sum(jnp.square(tlist_norm * params[0] - ydata + params[1]))
+
+        @partial(jax.vmap, in_axes=(1, 0))
+        def fit_coeffs(ydata, c0):
+            res = jsciopt.minimize(fun, c0, args=(ydata,), method='BFGS')
+            return res.x[0], res.success
+
+        ueff_dagger = make_ueff(copt, basis_list, tlist_norm, num_qubits, phase_factor=1.)
+        target = jnp.matmul(time_evolution, ueff_dagger)
+
+        ilogtargets = matrix_ufunc(lambda u: -np.angle(u), target)
+        ilogtarget_coeffs = extract_coefficients(ilogtargets, num_qubits)
+        ilogtarget_coeffs = ilogtarget_coeffs.reshape(tlist_norm.shape[0], -1)[:, 1:]
+
+        ## Do a linear fit to each component
+        dopt, success = fit_coeffs(ilogtarget_coeffs, jax.device_put(np.zeros(copt.shape + (2,)), device=jax_device))
+        failed = np.logical_not(success)
+        if np.any(failed):
+            failed_indices = np.unravel_index(np.nonzero(failed)[0] + 1, basis.shape[:-2])
+            list_of_tuples = list(tuple(index[i] for index in failed_indices) for i in range(num_qubits))
+            logger.warning('Residual adjustment failed for components %s', list_of_tuples)
+            
+        copt += dopt
+            
+    heff_coeffs = np.concatenate(([0.], copt / tlist[-1])).reshape(basis.shape[:-2])
 
     if save_result_to:
         final_fidelity = np.concatenate(([1.], heff_fidelity(time_evolution, heff_coeffs, basis, tlist[1:], num_qubits)))
