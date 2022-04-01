@@ -171,11 +171,14 @@ def fidelity_maximization(
 
         ## Do a linear fit to each component
         dopt, success = fit_coeffs(ilogtarget_coeffs, jax.device_put(np.zeros(copt.shape + (2,)), device=jax_device))
+
         failed = np.logical_not(success)
         if np.any(failed):
             failed_indices = np.unravel_index(np.nonzero(failed)[0] + 1, basis.shape[:-2])
-            list_of_tuples = list(tuple(index[i] for index in failed_indices) for i in range(num_qubits))
-            logger.warning('Residual adjustment failed for components %s', list_of_tuples)
+            list_of_tuples = list(zip(*failed_indices))
+            residual_values_str = ', '.join(f'{idx_tuple}: {np.max(np.abs(ilogtarget_coeffs[:, idx]))}'
+                                           for idx_tuple, idx in zip(list_of_tuples, failed_indices))
+            logger.warning('Residual adjustment failed for components %s', residual_values_str)
             
         copt += dopt
             
