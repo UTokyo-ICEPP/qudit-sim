@@ -3,6 +3,8 @@ import copy
 import numpy as np
 import qutip as qtp
 
+from .pulse import Sequence
+
 def cos_freq(freq):
     return lambda t, args: np.cos(freq * t)
 
@@ -258,7 +260,8 @@ class RWAHamiltonianGenerator:
         self,
         qubit: int,
         frequency: float,
-        amplitude: Union[float, complex, str, np.ndarray, Callable] = 1.+0.j,
+        amplitude: Union[float, complex, str, np.ndarray, Callable, None] = 1.+0.j,
+        sequence: Optional[Sequence] = None,
         real_amplitude: bool = False
     ) -> None:
         """Add a drive term.
@@ -267,7 +270,7 @@ class RWAHamiltonianGenerator:
             qubit: ID of the qubit to apply the drive to.
             frequency: Carrier frequency of the drive.
             amplitude: A constant drive amplitude or an envelope function.
-            real_amplitude: Set to True if `amplitude` is a str or a callable and is know to take
+            real_amplitude: Set to True if `amplitude` is a str or a callable and is known to take
                 only real values.
         """
         ich = self.qubit_index_mapping[qubit]
@@ -276,58 +279,66 @@ class RWAHamiltonianGenerator:
         for iq in range(num_qubits):
             if self.drive_base[ich, iq] == 0.:
                 continue
-        
-            if isinstance(amplitude, (float, complex)):
-                envelope = amplitude * self.drive_base[ich, iq]
-            elif isinstance(amplitude, np.ndarray):
-                self._need_tlist = True
-                envelope = amplitude * self.drive_base[ich, iq]
-            elif isinstance(amplitude, str):
-                envelope = f'({self.drive_base[ich, iq]} * ({amplitude}))'
-            elif callable(amplitude):
-                envelope = scaled_function(amplitude, self.drive_base[ich, iq])
+                
+            if sequence is None:
+                if isinstance(amplitude, (float, complex)):
+                    envelope = amplitude * self.drive_base[ich, iq]
+                elif isinstance(amplitude, np.ndarray):
+                    self._need_tlist = True
+                    envelope = amplitude * self.drive_base[ich, iq]
+                elif isinstance(amplitude, str):
+                    envelope = f'({self.drive_base[ich, iq]} * ({amplitude}))'
+                elif callable(amplitude):
+                    envelope = scaled_function(amplitude, self.drive_base[ich, iq])
 
             # Define one Hamiltonian term per level
             for level in range(self.num_levels - 1):
                 # \omega_k + n \Delta_k
                 level_frequency = self.qubit_frequencies[iq] + level * self.anharmonicities[iq]
-                # \nu_j - \omega_k - n \Delta_k
-                detuning = frequency - level_frequency
                 
-                on_resonance = (abs(detuning) < REL_FREQUENCY_EPSILON * self.qubit_frequencies[iq])
-                
-                if isinstance(envelope, complex):
-                    if on_resonance:
-                        cr_drive = envelope
-                        an_drive = envelope.conjugate()
-                        is_real = envelope.imag == 0.
-                    else:
-                        cr_drive = f'{envelope} * (cos({detuning} * t) - 1.j * sin({detuning} * t))'
-                        an_drive = f'{envelope.conjugate()} * (cos({detuning} * t) + 1.j * sin({detuning} * t))'
-                elif isinstance(envelope, np.ndarray):
-                    if on_resonance:
-                        cr_drive = envelope
-                        an_drive = envelope.conjugate()
-                        is_real = np.all(envelope.imag == 0.)
-                    else:
-                        cr_drive = scaled_function(exp_freq(-detuning), envelope)
-                        an_drive = scaled_function(exp_freq(detuning), envelope.conjugate())
-                elif isinstance(envelope, str):
-                    if on_resonance:
-                        cr_drive = envelope
-                        an_drive = f'{envelope}.conjugate()'
-                        is_real = real_amplitude
-                    else:
-                        cr_drive = f'{envelope} * (cos({detuning} * t) - 1.j * sin({detuning} * t))'
-                        an_drive = f'{envelope}.conjugate() * (cos({detuning} * t) + 1.j * sin({detuning} * t))'
-                elif callable(envelope):
-                    if on_resonance:
-                        cr_drive = envelope
-                        an_drive = conj_function(envelope)
-                        is_real = real_amplitude
-                    else:
-                        cr_drive = prod_function(exp_freq(-detuning), envelope)
-                        an_drive = prod_function(exp_freq(detuning), conj_function(envelope))
+                if sequence is None:
+                    # \nu_j - \omega_k - n \Delta_k
+                    detuning = frequency - level_frequency
+
+                    on_resonance = (abs(detuning) < REL_FREQUENCY_EPSILON * self.qubit_frequencies[iq])
+
+                    if isinstance(envelope, complex):
+                        if on_resonance:
+                            cr_drive = envelope
+                            an_drive = envelope.conjugate()
+                            is_real = envelope.imag == 0.
+                        else:
+                            cr_drive = f'{envelope} * (cos({detuning} * t) - 1.j * sin({detuning} * t))'
+                            an_drive = f'{envelope.conjugate()} * (cos({detuning} * t) + 1.j * sin({detuning} * t))'
+                    elif isinstance(envelope, np.ndarray):
+                        if on_resonance:
+                            cr_drive = envelope
+                            an_drive = envelope.conjugate()
+                            is_real = np.all(envelope.imag == 0.)
+                        else:
+                            cr_drive = scaled_function(exp_freq(-detuning), envelope)
+                            an_drive = scaled_function(exp_freq(detuning), envelope.conjugate())
+                    elif isinstance(envelope, str):
+                        if on_resonance:
+                            cr_drive = envelope
+                            an_drive = f'{envelope}.conjugate()'
+                            is_real = real_amplitude
+                        else:
+                            cr_drive = f'{envelope} * (cos({detuning} * t) - 1.j * sin({detuning} * t))'
+                            an_drive = f'{envelope}.conjugate() * (cos({detuning} * t) + 1.j * sin({detuning} * t))'
+                    elif callable(envelope):
+                        if on_resonance:
+                            cr_drive = envelope
+                            an_drive = conj_function(envelope)
+                            is_real = real_amplitude
+                        else:
+                            cr_drive = prod_function(exp_freq(-detuning), envelope)
+                            an_drive = prod_function(exp_freq(detuning), conj_function(envelope))
+                            
+                else:
+                    cr_drive = sequence.generate_fn(frequency, level_frequency)
+                    an_drive = conj_function(cr_drive)
+                    on_resonance = False
 
                 qudit_ops = [qtp.qeye(self.num_levels)] * num_qubits
                 qudit_ops[iq] = (np.sqrt(level + 1) * qtp.basis(self.num_levels, level)
