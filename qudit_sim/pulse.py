@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 s = 1.
 ns = 1.e-9
 
-class Sequence(list):
+class PulseSequence(list):
     def generate_fn(self, initial_frequency, reference_frequency, reference_phase=0.):
         funclist = []
         timelist = []

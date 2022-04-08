@@ -3,7 +3,7 @@ import copy
 import numpy as np
 import qutip as qtp
 
-from .pulse import Sequence
+from .pulse import PulseSequence
 
 def cos_freq(freq):
     return lambda t, args: np.cos(freq * t)
@@ -261,7 +261,7 @@ class RWAHamiltonianGenerator:
         qubit: int,
         frequency: float,
         amplitude: Union[float, complex, str, np.ndarray, Callable, None] = 1.+0.j,
-        sequence: Optional[Sequence] = None,
+        sequence: Optional[PulseSequence] = None,
         real_amplitude: bool = False
     ) -> None:
         """Add a drive term.

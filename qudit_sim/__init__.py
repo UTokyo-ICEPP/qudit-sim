@@ -36,13 +36,13 @@ __all__ += [
     'shift_phase'
 ]
 
-from .pulse import Gaussian, GaussianSquare, Drag, Sequence
+from .pulse import Gaussian, GaussianSquare, Drag, PulseSequence
 
 __all__ += [
     'Gaussian',
     'GaussianSquare',
     'Drag',
-    'Sequence'
+    'PulseSequence'
 ]
 
 from .find_heff import find_heff

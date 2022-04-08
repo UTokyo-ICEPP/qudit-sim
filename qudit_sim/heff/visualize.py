@@ -495,6 +495,10 @@ def plot_amplitude_scan(
     
     amax = np.amax(np.abs(coeffs_norm), axis=0)
     num_above_threshold = np.count_nonzero(amax > threshold)
+    min_max = np.amin(np.where(amax > threshold, amax, np.amax(amax)))
+    
+    plot_mask = np.where(amax > threshold, 1, 0)
+    plot_mask = np.where(amax > 50. * min_max, 2, plot_mask)
 
     if num_qubits > 1 and num_above_threshold > 6:
         # Which Pauli components of the first qubit have plots to draw?
@@ -509,7 +513,6 @@ def plot_amplitude_scan(
         
         expr_lines = []
         iax = 0
-        ymin, ymax = 0., 0.
 
         for ip in range(num_paulis):
             if not has_passing_coeffs[ip]:
@@ -517,22 +520,20 @@ def plot_amplitude_scan(
 
             ax = axes.reshape(-1)[iax]
             expr_lines += _plot_amplitude_scan_on(ax, amps_norm, coeffs_norm[:, ip],
-                                                  threshold, max_poly_order, prefix=prefixes[ip])
-            
-            i, a = ax.get_ylim()
-            ymin = min(i, ymin)
-            ymax = max(a, ymax)
+                                                  plot_mask[ip], max_poly_order, prefix=prefixes[ip])
             
             iax += 1
-            
-        for ax in axes.reshape(-1)[:num_plots]:
-            ax.set_ylim(ymin, ymax)
             
     else:
         num_plots = 1
         fig, axes = plt.subplots(1, 1, squeeze=False)
-        expr_lines = _plot_amplitude_scan_on(axes[0, 0], amps_norm, coeffs_norm, threshold,
+        expr_lines = _plot_amplitude_scan_on(axes[0, 0], amps_norm, coeffs_norm, plot_mask,
                                              max_poly_order)
+
+    cmax = np.amax(coeffs_norm, axis=0)
+    cmin = np.amin(coeffs_norm, axis=0)
+    ymax = np.amax(np.where(plot_mask == 2, cmax * 0.1, cmax))
+    ymin = np.amin(np.where(plot_mask == 2, cmin * 0.1, cmin))        
         
     nu = r'\nu'
     nusub = lambda s: r'\nu_{' + s + '}'
@@ -540,6 +541,7 @@ def plot_amplitude_scan(
     mathrm = lambda r: r'\mathrm{' + r + '}'
     
     for ax in axes.reshape(-1)[:num_plots]:
+        ax.set_ylim(ymin * 1.2, ymax * 1.2)
         ax.grid(True)
         ax.set_xlabel(f'Drive amplitude (${amp_scale.frequency_unit}$)')
         ax.set_ylabel(f'${nu}/{coeff_scale.frequency_unit}$')
@@ -553,7 +555,7 @@ def plot_amplitude_scan(
     return fig, exprs, amp_scale
         
 
-def _plot_amplitude_scan_on(ax, amps_norm, coeffs_norm, threshold, max_poly_order, prefix=''):
+def _plot_amplitude_scan_on(ax, amps_norm, coeffs_norm, plot_mask, max_poly_order, prefix=''):
     num_qubits = len(coeffs_norm.shape) - 1 # first dimension: amplitudes
     comp_dim = get_pauli_dim(coeffs_norm.shape[1])
     num_paulis = get_num_paulis(comp_dim)
@@ -569,18 +571,10 @@ def _plot_amplitude_scan_on(ax, amps_norm, coeffs_norm, threshold, max_poly_orde
 
     exprs = []
     
-    ymax = 0.
-    ymin = 0.
-
     imarker = 0
     
-    amax = np.amax(np.abs(coeffs_norm), axis=0)
-    min_max = np.amin(np.where(amax > threshold, amax, np.amax(amax)))
-    
     for index in np.ndindex(coeffs_norm.shape[1:]):
-        coeffs = coeffs_norm[(slice(None),) + index]
-        
-        if amax[index] < threshold:
+        if plot_mask[index] == 0:
             continue
             
         if comp_dim == 2:
@@ -593,14 +587,13 @@ def _plot_amplitude_scan_on(ax, amps_norm, coeffs_norm, threshold, max_poly_orde
                 
         plot_label = f'${label}$'
             
-        if amax[index] > 50. * min_max:
+        if plot_mask[index] == 2:
             plot_scale = 0.1
             plot_label += r' ($\times 0.1$)'
         else:
             plot_scale = 1.
             
-        ymax = max(ymax, np.amax(coeffs * plot_scale))
-        ymin = min(ymin, np.amin(coeffs * plot_scale))
+        coeffs = coeffs_norm[(slice(None),) + index]
             
         even = np.sum(coeffs[:num_amps // 2] * coeffs[-num_amps // 2:]) > 0.
         
@@ -613,7 +606,7 @@ def _plot_amplitude_scan_on(ax, amps_norm, coeffs_norm, threshold, max_poly_orde
         
         popt, _ = sciopt.curve_fit(curve, amps_norm, coeffs, p0=p0)
         
-        pathcol = ax.scatter(amps_norm, coeffs * plot_scale, marker=filled_markers[imarker % num_markers], label=label)
+        pathcol = ax.scatter(amps_norm, coeffs * plot_scale, marker=filled_markers[imarker % num_markers], label=plot_label)
         ax.plot(amps_norm_fine, curve(amps_norm_fine, *popt) * plot_scale, color=pathcol.get_edgecolor())
         
         expr_rhs = ''
@@ -648,7 +641,6 @@ def _plot_amplitude_scan_on(ax, amps_norm, coeffs_norm, threshold, max_poly_orde
         
         imarker += 1
 
-    ax.set_ylim(ymin * 1.5, ymax * 1.2)
     ax.legend()
 
     return exprs
