@@ -21,7 +21,7 @@ class PulseSequence(list):
             detuning = frequency - reference_frequency
             offset = phase_offset - reference_phase
             def fun(t, args):
-                return np.exp(1.j * detuning * t + offset) * pulse(t - time, args)
+                return np.exp(-1.j * detuning * t + offset) * pulse(t - time, args)
             
             return fun
 
