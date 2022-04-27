@@ -9,8 +9,9 @@ import jax.scipy.optimize as jsciopt
 import optax
 import h5py
 
-from ..paulis import make_generalized_paulis, make_prod_basis, extract_coefficients
-from ..utils import matrix_ufunc
+import rqutils.paulis as paulis
+from rqutils.math import matrix_angle
+
 from .leastsq_minimization import leastsq_minimization
 from .common import get_ilogus_and_valid_it, heff_fidelity, compose_ueff
 
@@ -34,7 +35,8 @@ def fidelity_maximization(
     original_log_level = logger.level
     logger.setLevel(log_level)
     
-    matrix_dim = num_sim_levels ** num_qubits
+    pauli_dim = (num_sim_levels,) * num_qubits
+    matrix_dim = np.prod(pauli_dim)
     assert time_evolution.shape == (tlist.shape[0], matrix_dim, matrix_dim), 'Inconsistent input shape'
     
     if jax_device_id is None:
@@ -43,9 +45,7 @@ def fidelity_maximization(
         jax_device = jax.devices()[jax_device_id]
     
     ## Set up the Pauli product basis of the space of Hermitian operators
-    paulis = make_generalized_paulis(num_sim_levels)
-    basis = make_prod_basis(paulis, num_qubits)
-    del paulis
+    basis = paulis.paulis(pauli_dim)
     # Flattened list of basis operators excluding the identity operator
     basis_list = jax.device_put(basis.reshape(-1, *basis.shape[-2:])[1:], device=jax_device)
     
@@ -56,8 +56,8 @@ def fidelity_maximization(
             if last_valid_it <= 1:
                 raise RuntimeError('Failed to obtain an initial estimate of the slopes')
                 
-            ilogu_coeffs = extract_coefficients(ilogus, num_qubits)
-            init = ilogu_coeffs[last_valid_it - 1].reshape(-1)[1:] / tlist[last_valid_it - 1]
+            ilogu_compos = paulis.components(ilogus, dim=pauli_dim)
+            init = ilogu_compos[last_valid_it - 1].reshape(-1)[1:] / tlist[last_valid_it - 1]
 
         elif init == 'leastsq':
             logger.info('Performing iterative fit to estimate the initial parameter values')
@@ -82,8 +82,8 @@ def fidelity_maximization(
     
     ## Loss minimization (fidelity maximization)
     @partial(jax.jit, device=jax_device)
-    def _loss_fn(time_evolution, heff_coeffs_norm, basis_list, num_qubits, tlist_norm):
-        fidelity = heff_fidelity(time_evolution, heff_coeffs_norm, basis_list, tlist_norm, num_qubits, npmod=jnp)
+    def _loss_fn(time_evolution, heff_compos_norm, basis_list, num_qubits, tlist_norm):
+        fidelity = heff_fidelity(time_evolution, heff_compos_norm, basis_list, tlist_norm, num_qubits, npmod=jnp)
         return 1. - 1. / (tlist_norm.shape[0] + 1) - jnp.mean(fidelity)
     
     if optimizer == 'minuit':
@@ -108,7 +108,7 @@ def fidelity_maximization(
         
     else:
         if save_result_to:
-            coeff_values = np.zeros((max_updates, initial.shape[0]), dtype='f8')
+            compo_values = np.zeros((max_updates, initial.shape[0]), dtype='f8')
             loss_values = np.zeros(max_updates, dtype='f8')
             grad_values = np.zeros((max_updates, initial.shape[0]), dtype='f8')
             
@@ -132,7 +132,7 @@ def fidelity_maximization(
             new_params, opt_state, loss, gradient = step(params, opt_state)
 
             if save_result_to:
-                coeff_values[iup] = params['c'] / tlist[-1]
+                compo_values[iup] = params['c'] / tlist[-1]
                 loss_values[iup] = loss
                 grad_values[iup] = gradient['c']
                 
@@ -152,47 +152,47 @@ def fidelity_maximization(
         copt = params['c']
         
     if residual_adjust:
-        logger.info('Adjusting the coefficients from a linear fit to the residuals..')
+        logger.info('Adjusting the Pauli components obtained from a linear fit to the residuals..')
         
         def fun(params, ydata):
             return jnp.sum(jnp.square(tlist_norm * params[0] - ydata + params[1]))
 
         @partial(jax.vmap, in_axes=(1, 0))
-        def fit_coeffs(ydata, c0):
+        def fit_compos(ydata, c0):
             res = jsciopt.minimize(fun, c0, args=(ydata,), method='BFGS')
             return res.x[0], res.success
 
         ueff_dagger = compose_ueff(copt, basis_list, tlist_norm, phase_factor=1.)
         target = jnp.matmul(time_evolution, ueff_dagger)
 
-        ilogtargets = matrix_ufunc(lambda u: -np.angle(u), target)
-        ilogtarget_coeffs = extract_coefficients(ilogtargets, num_qubits)
-        ilogtarget_coeffs = ilogtarget_coeffs.reshape(tlist_norm.shape[0], -1)[:, 1:]
+        ilogtargets = -matrix_angle(target)
+        ilogtarget_compos = paulis.components(ilogtargets, dim=pauli_dim)
+        ilogtarget_compos = ilogtarget_compos.reshape(tlist_norm.shape[0], -1)[:, 1:]
 
         ## Do a linear fit to each component
-        dopt, success = fit_coeffs(ilogtarget_coeffs, jax.device_put(np.zeros(copt.shape + (2,)), device=jax_device))
+        dopt, success = fit_compos(ilogtarget_compos, jax.device_put(np.zeros(copt.shape + (2,)), device=jax_device))
 
         failed = np.logical_not(success)
         if np.any(failed):
             failed_indices = np.unravel_index(np.nonzero(failed)[0] + 1, basis.shape[:-2])
             list_of_tuples = list(zip(*failed_indices))
-            residual_values_str = ', '.join(f'{idx_tuple}: {np.max(np.abs(ilogtarget_coeffs[:, idx]))}'
+            residual_values_str = ', '.join(f'{idx_tuple}: {np.max(np.abs(ilogtarget_compos[:, idx]))}'
                                            for idx_tuple, idx in zip(list_of_tuples, failed_indices))
             logger.warning('Residual adjustment failed for components %s', residual_values_str)
             
         copt += dopt
             
-    heff_coeffs = np.concatenate(([0.], copt / tlist[-1])).reshape(basis.shape[:-2])
+    heff_compos = np.concatenate(([0.], copt / tlist[-1])).reshape(basis.shape[:-2])
 
     if save_result_to:
-        final_fidelity = np.concatenate(([1.], heff_fidelity(time_evolution, heff_coeffs, basis, tlist[1:], num_qubits)))
+        final_fidelity = np.concatenate(([1.], heff_fidelity(time_evolution, heff_compos, basis, tlist[1:], num_qubits)))
         with h5py.File(f'{save_result_to}.h5', 'a') as out:
             out.create_dataset('final_fidelity', data=final_fidelity)
             if optimizer != 'minuit':
-                out.create_dataset('coeffs', data=coeff_values[:num_updates])
+                out.create_dataset('compos', data=compo_values[:num_updates])
                 out.create_dataset('loss', data=loss_values[:num_updates])
                 out.create_dataset('grad', data=grad_values[:num_updates])
         
     logger.setLevel(original_log_level)
     
-    return heff_coeffs
+    return heff_compos

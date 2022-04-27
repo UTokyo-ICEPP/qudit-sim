@@ -17,7 +17,8 @@ else:
     import jax.numpy as jnp
     import jax.scipy.optimize
 
-from ..paulis import make_generalized_paulis, make_prod_basis
+import rqutils.paulis as paulis
+
 from .common import get_ilogus_and_valid_it, compose_ueff
 
 def leastsq_minimization(
@@ -28,7 +29,7 @@ def leastsq_minimization(
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
     max_com: float = 20.,
-    min_coeff_ratio: float = 0.005,
+    min_compo_ratio: float = 0.005,
     num_update_per_iteration: int = 0,
     max_iterations: int = 100,
     save_iterations: bool = False,
@@ -38,18 +39,18 @@ def leastsq_minimization(
     
     Args:
         max_com: Convergence condition.
-        min_coeff_ratio: Convergence condition.
-        num_update: Number of coefficients to update per iteration. If <= 0, all candidate coefficients are updated.
+        min_compo_ratio: Convergence condition.
+        num_update: Number of components to update per iteration. If <= 0, all candidate components are updated.
         max_iterations: Maximum number of fit & subtract iterations.
         
     Returns:
-        Pauli coefficients of the effective Hamiltonian.
+        Pauli components of the effective Hamiltonian.
     """
     original_log_level = logging.getLogger().level
     logging.getLogger().setLevel(log_level)
     
-   
-    matrix_dim = num_sim_levels ** num_qubits
+    pauli_dim = (num_sim_levels,) * num_qubits
+    matrix_dim = np.prod(pauli_dim)   
     assert time_evolution.shape == (tlist.shape[0], matrix_dim, matrix_dim), 'Inconsistent input shape'
     
     if use_jax:
@@ -59,9 +60,7 @@ def leastsq_minimization(
     tend = tlist[-1]
 
     ## Set up the Pauli product basis of the space of Hermitian operators
-    paulis = make_generalized_paulis(num_sim_levels)
-    basis = make_prod_basis(paulis, num_qubits)
-    del paulis
+    basis = paulis.paulis(pauli_dim)
     # Flattened list of basis operators excluding the identity operator
     basis_list = basis.reshape(-1, *basis.shape[-2:])[1:]
     basis_size = basis_list.shape[0]
@@ -72,13 +71,13 @@ def leastsq_minimization(
     if save_result_to and save_iterations:
         with h5py.File(f'{save_result_to}_iter.h5', 'w') as out:
             out.create_dataset('max_com', data=max_com)
-            out.create_dataset('min_coeff_ratio', data=min_coeff_ratio)
+            out.create_dataset('min_compo_ratio', data=min_compo_ratio)
             out.create_dataset('num_update_per_iteration', data=num_update_per_iteration)
             out.create_dataset('ilogvs', shape=(max_iterations, tsize, time_evolution.shape[-1]), dtype='f')
-            out.create_dataset('ilogu_coeffs', shape=(max_iterations, tsize, basis_size), dtype='f')
+            out.create_dataset('ilogu_compos', shape=(max_iterations, tsize, basis_size), dtype='f')
             out.create_dataset('last_valid_it', shape=(max_iterations,), dtype='i')
             out.create_dataset('iter_heff', shape=(max_iterations, basis_size), dtype='f')
-            out.create_dataset('coeffs', shape=(max_iterations, basis_size), dtype='f')
+            out.create_dataset('compos', shape=(max_iterations, basis_size), dtype='f')
             out.create_dataset('fit_success', shape=(max_iterations, basis_size), dtype='i')
             out.create_dataset('com', shape=(max_iterations, basis_size), dtype='f')
 
@@ -97,47 +96,47 @@ def leastsq_minimization(
         return npmod.sum(npmod.square(residual_masked))
 
     @partial(npmod.vectorize, signature='(t),(),(t)->(),()')
-    def fit_coeffs(ydata, x0, mask):
+    def fit_compos(ydata, x0, mask):
         # Using minimize instead of curve_fit because the latter is not available in jax
         res = sciopt.minimize(fun, npmod.array([x0]), args=(ydata, mask), method='BFGS')
         return res.x[0] / tend, res.success
     
-    def update_heff(ilogus, last_valid_it, heff_coeffs):
+    def update_heff(ilogus, last_valid_it, heff_compos):
         # Divide the trace by two to account for the normalization of the generalized Paulis
-        ilogu_coeffs = npmod.tensordot(ilogus, basis_list, ((1, 2), (2, 1))).real / 2.
+        ilogu_compos = npmod.tensordot(ilogus, basis_list, ((1, 2), (2, 1))).real / 2.
 
         ## Do a linear fit to each component
         mask = (npmod.arange(tsize) < last_valid_it).astype(float)
-        coeffs, success = fit_coeffs(ilogu_coeffs.T, ilogu_coeffs.T[:, last_valid_it - 1], mask[None, :])
+        compos, success = fit_compos(ilogu_compos.T, ilogu_compos.T[:, last_valid_it - 1], mask[None, :])
         
-        cumul = npmod.cumsum((tlist[:, None] * coeffs[None, :] - ilogu_coeffs) * mask[:, None], axis=0)
-        maxabs = npmod.amax(npmod.abs(ilogu_coeffs) * mask[:, None], axis=0)
+        cumul = npmod.cumsum((tlist[:, None] * compos[None, :] - ilogu_compos) * mask[:, None], axis=0)
+        maxabs = npmod.amax(npmod.abs(ilogu_compos) * mask[:, None], axis=0)
         com = npmod.amax(npmod.abs(cumul), axis=0) / maxabs
 
-        ## Update Heff with the best-fit coefficients
+        ## Update Heff with the best-fit components
         is_update_candidate = success & (com < max_com)
         # If we have successfully made ilogu small that the fit range is the entire tlist,
-        # also cut on the size of the coefficient (to avoid updating Heff with ~0 indefinitely)
-        coeff_nonnegligible = (npmod.abs(coeffs) > min_coeff_ratio * npmod.amax(npmod.abs(heff_coeffs)))
-        is_update_candidate &= coeff_nonnegligible | (last_valid_it != tsize)
+        # also cut on the size of the component (to avoid updating Heff with ~0 indefinitely)
+        compo_nonnegligible = (npmod.abs(compos) > min_compo_ratio * npmod.amax(npmod.abs(heff_compos)))
+        is_update_candidate &= compo_nonnegligible | (last_valid_it != tsize)
         
         num_candidates = npmod.min(npmod.array([num_update_per_iteration, npmod.count_nonzero(is_update_candidate)]))
 
-        ## Take the first n largest-coefficient candidates
-        update_indices = npmod.argsort(npmod.where(is_update_candidate, -npmod.abs(coeffs), 0.))
+        ## Take the first n largest-component candidates
+        update_indices = npmod.argsort(npmod.where(is_update_candidate, -npmod.abs(compos), 0.))
         
-        ## Update the output array taking the coefficient of the best-fit component
-        mask = (npmod.arange(coeffs.shape[0]) < num_candidates).astype(float)
-        coeffs_update = coeffs[update_indices] * mask
-        coeffs_update = coeffs_update[npmod.argsort(update_indices)]
+        ## Update the output array taking the component of the best-fit component
+        mask = (npmod.arange(compos.shape[0]) < num_candidates).astype(float)
+        compos_update = compos[update_indices] * mask
+        compos_update = compos_update[npmod.argsort(update_indices)]
         
         if save_result_to:
-            return heff_coeffs + coeffs_update, num_candidates > 0, ilogu_coeffs, coeffs, success, com
+            return heff_compos + compos_update, num_candidates > 0, ilogu_compos, compos, success, com
         else:
-            return heff_coeffs + coeffs_update, num_candidates > 0
+            return heff_compos + compos_update, num_candidates > 0
 
-    def update_unitaries(heff_coeffs):
-        ueff_dagger = compose_ueff(heff_coeffs, basis_list, tlist, phase_factor=1., npmod=jnp)
+    def update_unitaries(heff_compos):
+        ueff_dagger = compose_ueff(heff_compos, basis_list, tlist, phase_factor=1., npmod=jnp)
         return npmod.matmul(time_evolution, ueff_dagger)
     
     if use_jax:
@@ -150,7 +149,7 @@ def leastsq_minimization(
         update_unitaries = jax.jit(update_unitaries)
     
     ## Output array
-    heff_coeffs = npmod.zeros(basis_size)
+    heff_compos = npmod.zeros(basis_size)
 
     ## Iterative fit & subtract loop
     for iloop in range(max_iterations):
@@ -158,22 +157,22 @@ def leastsq_minimization(
         
         ilogus, ilogvs, last_valid_it = get_ilogus_and_valid_it(unitaries)
     
-        update_result = update_heff(ilogus, last_valid_it, heff_coeffs)
+        update_result = update_heff(ilogus, last_valid_it, heff_compos)
         
-        heff_coeffs, updated = update_result[:2]
+        heff_compos, updated = update_result[:2]
         
         ## Save the computation results
         if save_result_to and save_iterations:
-            ilogu_coeffs, coeffs, success, com = update_result[2:]
+            ilogu_compos, compos, success, com = update_result[2:]
 
             with h5py.File(f'{save_result_to}_iter.h5', 'a') as out:
                 out['ilogvs'][iloop] = ilogvs
                 out['last_valid_it'][iloop] = last_valid_it
-                out['ilogu_coeffs'][iloop] = ilogu_coeffs
-                out['coeffs'][iloop] = coeffs
+                out['ilogu_compos'][iloop] = ilogu_compos
+                out['compos'][iloop] = compos
                 out['fit_success'][iloop] = success
                 out['com'][iloop] = com
-                out['iter_heff'][iloop] = heff_coeffs
+                out['iter_heff'][iloop] = heff_compos
                     
         ## Break if there were no updates in this iteration
         if not updated:
@@ -181,7 +180,7 @@ def leastsq_minimization(
         
         ## Unitarily subtract the current Heff from the time evolution
         if iloop != max_iterations - 1:
-            unitaries = update_unitaries(heff_coeffs)
+            unitaries = update_unitaries(heff_compos)
             
     if save_result_to and save_iterations:
         with h5py.File(f'{save_result_to}_iter.h5', 'r') as source:
@@ -195,8 +194,8 @@ def leastsq_minimization(
 
         os.unlink(f'{save_result_to}_iter.h5')
 
-    heff_coeffs = np.concatenate(([0.], heff_coeffs)).reshape(basis.shape[:-2])
+    heff_compos = np.concatenate(([0.], heff_compos)).reshape(basis.shape[:-2])
         
     logging.getLogger().setLevel(original_log_level)
 
-    return heff_coeffs
+    return heff_compos
