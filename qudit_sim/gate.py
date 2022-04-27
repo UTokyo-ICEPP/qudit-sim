@@ -7,10 +7,12 @@ import numpy as np
 import h5py
 import qutip as qtp
 
-from .paulis import extract_coefficients, truncate_coefficients, prod_basis_labels
+from rqutils.paulis as paulis
+from rqutils.math import matrix_angle
+from rqutils.qprint import QPrintPauli
+
 from .pulse_sim import run_pulse_sim, DriveDef
 from .parallel import parallel_map
-from .utils import matrix_ufunc
 
 logger = logging.getLogger(__name__)
 
@@ -104,13 +106,13 @@ def identify_gate(
         unitary = result.states[-1]
         
     ilogu = matrix_ufunc(lambda u: -np.angle(u), unitary)
-    ilogu_coeffs = extract_coefficients(ilogu, num_qubits)
-    ilogu_coeffs_trunc = truncate_coefficients(ilogu_coeffs, num_sim_levels, comp_dim, num_qubits)
+    ilogu_compos = paulis.components(ilogu, (num_sim_levels,) * num_qubits)
+    ilogu_compos_trunc = paulis.truncate(ilogu_compos, (comp_dim,) * num_qubits)
     
     if phase_offsets is not None:
         for iq, offset in enumerate(phase_offset_array):
             dim = iq + 1 if isinstance(drive_def, list) else iq
-            ilogu_coeffs_trunc = shift_phase(ilogu_coeffs_trunc, offset, dim=dim)
+            ilogu_compos_trunc = shift_phase(ilogu_compos_trunc, offset, dim=dim)
 
     if save_result_to:
         if isinstance(drive_def, list):
@@ -123,8 +125,8 @@ def identify_gate(
                     out.create_dataset('time_evolution', data=result.states)
                     out.create_dataset('tlist', data=result.times)
                     if num_sim_levels != comp_dim:
-                        out.create_dataset('ilogu_coeffs_original', data=ilogu_coeffs[idef])
-                    out.create_dataset('ilogu_coeffs', data=iogu_coeffs_trunc[idef])
+                        out.create_dataset('ilogu_compos_original', data=ilogu_compos[idef])
+                    out.create_dataset('ilogu_compos', data=iogu_compos_trunc[idef])
                     
         else:
             with h5py.File(f'{save_result_to}.h5', 'w') as out:
@@ -134,12 +136,12 @@ def identify_gate(
                 out.create_dataset('time_evolution', data=result.states)
                 out.create_dataset('tlist', data=result.times)
                 if num_sim_levels != comp_dim:
-                    out.create_dataset('ilogu_coeffs_original', data=ilogu_coeffs)
-                out.create_dataset('ilogu_coeffs', data=ilogu_coeffs_trunc)
+                    out.create_dataset('ilogu_compos_original', data=ilogu_compos)
+                out.create_dataset('ilogu_compos', data=ilogu_compos_trunc)
                 
     logger.setLevel(original_log_level)
     
-    return ilogu_coeffs_trunc
+    return ilogu_compos_trunc
 
 def _get_drive_duration(ddef):
     duration = 0.
@@ -162,18 +164,9 @@ def _get_drive_duration(ddef):
 
 
 def gate_expr(
-    coefficients: np.ndarray,
+    components: np.ndarray,
     symbol: Optional[str] = None,
     threshold: Optional[float] = 0.01
 ) -> str:
-    num_qubits = len(coefficients.shape)
-    labels = prod_basis_labels(coefficients.shape[0], num_qubits, symbol=symbol)
-
-    exponent = ''
-    
-    for index in np.ndindex(coefficients.shape):
-        coeff = coefficients[index]
-        if abs(coeff) > threshold:
-            exponent += f'{coeff:+.3f}{labels[index]}'
-        
-    return r'\exp \left[-i \left( ' + exponent + r' \right)\right]'
+    hamiltonian = QPrintPauli(components, symbol=symbol, epsilon=threshold)
+    return fr'\exp\left[-i \left({hamiltonian}\right)\right]'

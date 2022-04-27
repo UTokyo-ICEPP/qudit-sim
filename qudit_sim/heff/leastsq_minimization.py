@@ -18,7 +18,7 @@ else:
     import jax.scipy.optimize
 
 from ..paulis import make_generalized_paulis, make_prod_basis
-from .common import get_ilogus_and_valid_it, make_ueff
+from .common import get_ilogus_and_valid_it, compose_ueff
 
 def leastsq_minimization(
     time_evolution: np.ndarray,
@@ -137,7 +137,7 @@ def leastsq_minimization(
             return heff_coeffs + coeffs_update, num_candidates > 0
 
     def update_unitaries(heff_coeffs):
-        ueff_dagger = make_ueff(heff_coeffs, basis_list, tlist, num_qubits, phase_factor=1., npmod=jnp)
+        ueff_dagger = compose_ueff(heff_coeffs, basis_list, tlist, phase_factor=1., npmod=jnp)
         return npmod.matmul(time_evolution, ueff_dagger)
     
     if use_jax:

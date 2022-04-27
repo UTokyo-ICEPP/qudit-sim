@@ -58,11 +58,10 @@ __all__ += [
     'gate_expr'
 ]
 
-from .utils import (FrequencyScale, matrix_ufunc)
+from .utils import FrequencyScale
 
 __all__ += [
-    'FrequencyScale',
-    'matrix_ufunc'
+    'FrequencyScale'
 ]
 
 from .parallel import parallel_map

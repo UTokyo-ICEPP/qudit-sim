@@ -7,7 +7,9 @@ import numpy as np
 import h5py
 import qutip as qtp
 
-from .paulis import truncate_coefficients, shift_phase
+import rqutils.paulis as paulis
+
+from .paulis import shift_phase
 from .pulse_sim import run_pulse_sim, DriveDef
 from .parallel import parallel_map
 
@@ -35,7 +37,7 @@ def find_heff(
     to the rotating-wave Hamiltonian :math:`H` at each time point. If an effective Hamiltonian 
     :math:`H_{\mathrm{eff}}` is to be found, the evolution should be approximatable with
     :math:`\exp(-i H_{\mathrm{eff}} t)`. This function takes the matrix-log of calculated :math:`U_H(t)`, extracts
-    the Pauli coefficients at each time point, and performs a linear fit to each coefficient as a function of time.
+    the Pauli components at each time point, and performs a linear fit to each component as a function of time.
 
     Args:
         qubits: List of qudits to include in the Hamiltonian.
@@ -48,20 +50,20 @@ def find_heff(
         num_cycles: Duration of the square pulse, in units of cycles in the highest frequency appearing in the
             Hamiltonian.
         comp_dim: Dimensionality of the computational space.
-        method: Name of the function to use for Pauli coefficient extraction. Currently possible values are
+        method: Name of the function to use for Pauli component extraction. Currently possible values are
             'fidelity' and 'leastsq'.
         extraction_params: Optional keyword arguments to pass to the extraction function.
         save_result_to: File name (without the extension) to save the simulation and extraction results to.
             Simulation result will not be saved when a list is passed as `drive_def`.
         sim_num_cpus: Number of threads to use for the pulse simulation when a list is passed as `drive_def`.
             If <=0, set to `multiprocessing.cpu_count()`.
-        ext_num_cpus: Number of threads to use for Pauli coefficient extraction when a list is passed as `drive_def`.
+        ext_num_cpus: Number of threads to use for Pauli component extraction when a list is passed as `drive_def`.
             If <=0, set to `multiprocessing.cpu_count()`. For extraction methods that use GPUs, the combination of
             `jax_devices` and this parameter controls how many processes will be run on each device.
         jax_devices: List of GPU ids (integers starting at 0) to use.
         
     Returns:
-        An array with the value at index `[i, j, ..]` corresponding to the coefficient of
+        An array with the value at index `[i, j, ..]` corresponding to the component of
             :math:`(\lambda_i \otimes \lambda_j \otimes \dots)/2^{n-1}` of the effective Hamiltonian.
     """
     original_log_level = logger.level
@@ -179,7 +181,7 @@ def find_heff(
                     if phase_offsets is not None:
                         out.create_dataset('phase_offsets', data=phase_offset_array)
         
-        heff_coeffs_list = parallel_map(
+        heff_compos_list = parallel_map(
             extraction_fn,
             args=args,
             kwarg_keys=kwarg_keys,
@@ -190,20 +192,20 @@ def find_heff(
             thread_based=True
         )
         
-        heff_coeffs = np.stack(heff_coeffs_list)
-        heff_coeffs_trunc = truncate_coefficients(heff_coeffs, num_sim_levels, comp_dim, num_qubits)
+        heff_compos = np.stack(heff_compos_list)
+        heff_compos_trunc = paulis.truncate(heff_compos, (comp_dim,) * num_qubits)
         
         if phase_offsets is not None:
             for iq, offset in enumerate(phase_offset_array):
-                heff_coeffs_trunc = shift_phase(heff_coeffs_trunc, offset, dim=(iq + 1))
+                heff_compos_trunc = shift_phase(heff_compos_trunc, offset, dim=(iq + 1))
         
         if save_result_to:
             for idef in range(len(drive_def)):
                 filename = os.path.join(save_result_to, f'heff_{idef}')
                 with h5py.File(f'{filename}.h5', 'a') as out:
                     if num_sim_levels != comp_dim:
-                        out.create_dataset('heff_coeffs_original', data=heff_coeffs_list[idef])
-                    out.create_dataset('heff_coeffs', data=heff_coeffs_trunc[idef])
+                        out.create_dataset('heff_compos_original', data=heff_compos_list[idef])
+                    out.create_dataset('heff_compos', data=heff_compos_trunc[idef])
     
     else:
         result = run_pulse_sim(
@@ -227,7 +229,7 @@ def find_heff(
                 if phase_offsets is not None:
                     out.create_dataset('phase_offsets', data=phase_offset_array)
 
-        heff_coeffs = extraction_fn(
+        heff_compos = extraction_fn(
             result.states,
             result.times,
             num_qubits=num_qubits,
@@ -236,18 +238,18 @@ def find_heff(
             log_level=log_level,
             **extraction_params)
         
-        heff_coeffs_trunc = truncate_coefficients(heff_coeffs, num_sim_levels, comp_dim, num_qubits)
+        heff_compos_trunc = paulis.truncate(heff_compos, (comp_dim,) * num_qubits)
         
         if phase_offsets is not None:
             for iq, offset in enumerate(phase_offset_array):
-                heff_coeffs_trunc = shift_phase(heff_coeffs_trunc, offset, dim=iq)
+                heff_compos_trunc = shift_phase(heff_compos_trunc, offset, dim=iq)
         
         if save_result_to:
             with h5py.File(f'{save_result_to}.h5', 'a') as out:
                 if num_sim_levels != comp_dim:
-                    out.create_dataset('heff_coeffs_original', data=heff_coeffs)
-                out.create_dataset('heff_coeffs', data=heff_coeffs_trunc)
+                    out.create_dataset('heff_compos_original', data=heff_compos)
+                out.create_dataset('heff_compos', data=heff_compos_trunc)
                 
     logger.setLevel(original_log_level)
     
-    return heff_coeffs_trunc
+    return heff_compos_trunc

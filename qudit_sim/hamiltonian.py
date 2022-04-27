@@ -4,8 +4,6 @@ from dataclasses import dataclass
 import numpy as np
 import qutip as qtp
 
-from .pulse import PulseSequence
-
 def cos_freq(freq):
     return lambda t, args: np.cos(freq * t)
 
@@ -19,7 +17,7 @@ def exp_freq(freq):
     
     return fun
 
-def scaled_function(fun, scale):
+def scaled_function(scale, fun):
     return lambda t, args: scale * fun(t, args)
 
 def prod_function(fun1, fun2):
@@ -32,21 +30,122 @@ def conj_function(fun):
 REL_FREQUENCY_EPSILON = 1.e-7
 
 @dataclass
+class Frame:
+    frequency: Optional[np.ndarray] = None
+    phase: Optional[np.ndarray] = None
+
+@dataclass
 class QuditParams:
     qid: int
     qubit_frequency: float
     anharmonicity: float
     drive_amplitude: float
-    frame: Optional[np.ndarray] = None
-    frame_phase: Optional[np.ndarray] = None
+    frame: Frame
 
+    
 @dataclass
 class DriveData:
     frequency: float
     amplitude: Union[float, complex, str, np.ndarray, Callable, None] = 1.+0.j
     sequence: Optional[PulseSequence] = None
     is_real: bool = False
+    
+    def generate_fn(frame, drive_base):
+        detuning = self.frequency - frame.frequency
 
+        is_resonant = (abs(detuning) < REL_FREQUENCY_EPSILON * frame.frequency)
+        
+        amplitude = self.amplitude
+        if isinstance(amplitude, str):
+            # If this is actually a static expression, convert to complex
+            try:
+                amplitude = eval(amplitude)
+            except:
+                pass
+            
+        if isinstance(amplitude, (float, complex)):
+            # static envelope
+            
+            envelope = amplitude * drive_base
+            
+            is_real = envelope.imag == 0.
+
+            if is_resonant:
+                fn_1 = envelope.real
+                if is_real:
+                    fn_2 = None
+                else:
+                    fn_2 = -envelope.imag
+            else:
+                fn_1 = f'{envelope.real} * cos({detuning} * t)'
+                fn_2 = f'{envelope.real} * sin({detuning} * t)'
+                if not is_real:
+                    fn_1 += f' + {envelope.imag} * sin({detuning} * t)'
+                    fn_2 += f' - {envelope.imag} * cos({detuning} * t)'
+                    
+            split = 'xy'
+            
+        else:
+            # dynamic envelope
+
+            if isinstance(amplitude, str):
+                envelope = f'({drive_base} * ({amplitude}))'
+
+                is_real = self.is_real
+
+                conj = f'{envelope}.conjugate()'
+                cos = f'cos({detuning} * t)'
+                sin = f'sin({detuning} * t)'
+                exp_n = f'(cos({detuning} * t) - 1.j * sin({detuning} * t))'
+                exp_p = f'(cos({detuning} * t) + 1.j * sin({detuning} * t))'
+                prod = lambda env, f: f'{env} * {f}'            
+
+            if isinstance(amplitude, np.ndarray):
+                envelope = amplitude * drive_base
+
+                is_real = np.all(envelope.imag == 0.)
+
+                conj = envelope.conjugate()
+                cos = cos_freq(detuning)
+                sin = sin_freq(detuning)
+                exp_n = exp_freq(-detuning)
+                exp_p = exp_freq(detuning)
+                prod = lambda env, f: scaled_function(env, f)
+
+            elif callable(amplitude):
+                envelope = scaled_function(drive_base, amplitude)
+
+                is_real = self.is_real
+
+                conj = conj_function(envelope)
+                cos = cos_freq(detuning)
+                sin = sin_freq(detuning)
+                exp_n = exp_freq(-detuning)
+                exp_p = exp_freq(detuning)
+                prod = lambda env, f: prod_function(env, f)
+                
+            if is_real:
+                if is_resonant:
+                    fn_1 = envelope
+                    fn_2 = None
+                else:
+                    fn_1 = prod(envelope, cos)
+                    fn_2 = prod(envelope, sin)
+                
+                split = 'xy'
+                
+            else:
+                if is_resonant:
+                    fn_1 = envelope
+                    fn_2 = conj
+                else:
+                    fn_1 = prod(envelope, exp_n)
+                    fn_2 = prod(conj, exp_p)
+                    
+                split = 'ca'
+
+        return split, fn_1, fn_2
+    
     
 class RWAHamiltonianGenerator:
     r"""Rotating-wave approximation Hamiltonian in the qudit frame.
@@ -212,13 +311,14 @@ class RWAHamiltonianGenerator:
         anharmonicity: float,
         drive_amplitude: float,
         index: Optional[int] = None,
-        frame: Optional[np.ndarray] = None,
+        frame_frequency: Optional[np.ndarray] = None,
         frame_phase: Optional[np.ndarray] = None,
     ) -> None:
         """Add a qudit to the system.
         """
         params = QuditParams(qid=qudit, qubit_frequency=qubit_frequency, anharmonicity=anharmonicity,
-                             drive_amplitude=drive_amplitude, frame=frame, frame_phase=frame_phase)
+                             drive_amplitude=drive_amplitude,
+                             frame=Frame(frequency=frame_frequency, phase=frame_phase))
 
         if index is None:
             self.qudit_params[qudit] = params
@@ -235,14 +335,11 @@ class RWAHamiltonianGenerator:
     def set_frame(
         self,
         qudit: int,
-        frame: Optional[np.ndarray] = None,
-        phase: Optional[np.ndarray] = None
+        frequency: Union[np.ndarray, None],
+        phase: Union[np.ndarray, None]
     ) -> None:
         """Set the rotating frame for the qudit."""
-        if frame is not None:
-            self.qudit_params[qudit].frame = frame.copy()
-        if phase is not None:
-            self.qudit_params[qudit].frame_phase = phase.copy()
+        self.qudit_params[qudit].frame = Frame(frequency=frequency, phase=phase)
             
     def add_coupling(self, q1: int, q2: int, value: float) -> None:
         self.coupling[frozenset({self.qudit_params[q1], self.qudit_params[q2]})] = value
@@ -274,7 +371,6 @@ class RWAHamiltonianGenerator:
     @property
     def max_frequency(self) -> float:
         """Return the maximum frequency appearing in this Hamiltonian."""
-        
         return max(self._max_frequency_int, self._max_frequency_drive)
     
     @property
@@ -283,64 +379,69 @@ class RWAHamiltonianGenerator:
 
     def generate(
         self,
-        compile_hint: bool = True
+        rwa: bool = True,
+        compile_hint: bool = True,
+        tlist: Optional[np.ndarray] = None,
+        args: Optional[Dict[str, Any]] = None
     ) -> List:
         """Return the list of Hamiltonian terms passable to qutip.sesolve.
         
         Args:
+            rwa: If True, apply the rotating-wave approximation.
             compile_hint: If True, interaction Hamiltonian terms are given as compilable strings.
+            tlist: If not None, all callable Hamiltonian coefficients are called with (tlist, args) and the resulting
+                arrays are instead passed to sesolve.
+            args: Arguments to the callable coefficients.
         
         Returns:
             A list of Hamiltonian terms that can be passed to qutip.sesolve.
         """
         
-        if self._need_tlist:
-            raise RuntimeError('This Hamiltonian must be instantiated with array_hamiltonian()')
+        if tlist is None and self._need_tlist:
+            raise RuntimeError('This Hamiltonian must be generated with a tlist')
         
-        if self.hstatic == qtp.Qobj():
-            return self.hint + self.hdrive
-        else:
-            # The static term does not have to be the first element (nor does it have to be a single term, actually)
-            # but qutip recommends following this convention
-            return [self.hstatic] + self.hint + self.hdrive
+        hstatic = self.generate_hdiag()
+        hint = self.generate_hint(compile_hint=compile_hint)
+        hdrive = self.generate_hdrive(rwa=rwa)
+        
+        if hint and isinstance(hint[0], qtp.Qobj):
+            hstatic += hint.pop(0)
+        if hdrive and isinstance(hdrive[0], qtp.Qobj):
+            hstatic += hdrive.pop(0)
 
-    def array_generate(
-        self,
-        tlist: np.ndarray,
-        args: Optional[Dict[str, Any]] = None
-    ) -> List:
-        """Return a list of Hamiltonian terms passable to qutip.sesolve.
-        
-        When at least one drive term is given in terms of an ndarray, the concrete Hamiltonian must be generated
-        through this function. When all time-dependent terms are string-based, the output is identical to what is
-        obtained from `generate()`.
-        """
         hamiltonian = []
         
-        if self.hstatic != qtp.Qobj():
-            hamiltonian.append(self.hstatic)
+        if hstatic != qtp.Qobj():
+            # The static term does not have to be the first element (nor does it have to be a single term, actually)
+            # but qutip recommends following this convention
+            hamiltonian.append(hstatic)
             
-        for h, f in self.hint + self.hdrive:
-            if callable(f):
-                hamiltonian.append([h, f(tlist, args)])
-            else:
-                hamiltonian.append([h, f])
-        
+        if tlist is not None:
+            for h, f in hint + hdrive:
+                if callable(f):
+                    hamiltonian.append([h, f(tlist, args)])
+                else:
+                    hamiltonian.append([h, f])
+                    
+        else:
+            hamiltonian.extend(hint)
+            hamiltonian.extend(hdrive)
+            
         return hamiltonian
-    
-    def _generate_hdiag(self) -> qtp.Qobj:
+        
+    def generate_hdiag(self) -> qtp.Qobj:
         hdiag = qtp.Qobj()
         
         num_qudits = len(self.qudit_params)
         
         for iq, params in enumerate(self.qudit_params.values()):
-            if params.frame is None:
+            if params.frame.frequency is None:
                 # qudit frame -> free Hamiltonian is null
                 continue
                 
             qudit_hfree = np.arange(self.num_levels) * (params.qubit_frequency - params.anharmonicity / 2.)
             qudit_hfree += np.square(np.arange(self.num_levels)) * params.anharmonicity / 2.
-            energy_offset = qudit_hfree - np.cumsum(np.concatenate((np.zeros(1), params.frame)))
+            energy_offset = qudit_hfree - np.cumsum(np.concatenate((np.zeros(1), params.frame.frequency)))
             qudit_op = qtp.Qobj(inpt=np.diag(energy_offset))
 
             ops = [qtp.qeye(self.num_levels)] * num_qudits
@@ -350,7 +451,7 @@ class RWAHamiltonianGenerator:
             
         return hdiag
     
-    def _generate_hint(self, compile_hint: bool = True) -> List:
+    def generate_hint(self, compile_hint: bool = True) -> List:
         """Generate the interaction Hamiltonian."""
         self._max_frequency_int = 0.
 
@@ -385,18 +486,17 @@ class RWAHamiltonianGenerator:
                 ops[iq2] = ann2
                 
                 op = qtp.tensor(ops)
+                frequency = 0.
                 
-                if p1.frame is None:
-                    # qudit frame
-                    frequency = p1.qubit_frequency + l1 * p1.anharmonicity
-                else:
-                    frequency = p1.frame[l1]
-                    
-                if p2.frame is None:
-                    frequency -= p2.qubit_frequency + l2 * p2.anharmonicity
-                else:
-                    frequency -= p2.frame[l2]
-                    
+                for params, level, sign in [(p1, l1, 1.), (p2, l2, -1.)]:
+                    if params.frame.phase is not None:
+                        op *= np.exp(sign * 1.j * params.frame.phase[level])
+                        
+                    if params.frame.frequency is None:
+                        frequency += sign * (params.qubit_frequency + level * params.anharmonicity)
+                    else:
+                        frequency += sign * params.frame.frequency[level]
+                        
                 if abs(frequency) < REL_FREQUENCY_EPSILON * (p1.qubit_frequency + p2.qubit_frequency) * 0.5:
                     hstatic += op + op.dag()
 
@@ -418,7 +518,7 @@ class RWAHamiltonianGenerator:
 
         return hint
 
-    def _generate_hdrive(self) -> List:
+    def generate_hdrive(self, rwa: bool = True) -> List:
         self._max_frequency_drive = 0.
         self._need_tlist = False
         
@@ -426,24 +526,7 @@ class RWAHamiltonianGenerator:
         hstatic = qtp.Qobj()
         
         num_qudits = len(self.qudit_params)
-        params_list = list(self.qudit_params.values())
         
-        # Element [j,k]: \alpha_{jk} \exp (i \phi_{jk})
-        crosstalk_matrix = np.eye(num_qudits, dtype=np.complex128)
-        
-        for isource, psource in enumerate(self.qudit_params.values()):
-            for itarget, ptarget in enumerate(self.qudit_params.values()):
-                try:
-                    factor = self.crosstalk[(psource, ptarget)]
-                except KeyError:
-                    pass
-                
-                crosstalk_matrix[isource, itarget] = factor
-            
-        amps = np.array(list(params[f'omegad{ch}'] for ch in qubits), dtype=np.complex128) / 2.
-        # Element [j,k]: \alpha_{jk} \frac{\Omega}{2} \exp (i \phi_{jk})
-        self.drive_base = amps[:, None] * crosstalk_matrix
-
         # Construct the Qobj for each qudit/level first
         qops = list()
 
@@ -456,11 +539,14 @@ class RWAHamiltonianGenerator:
 
                 op = qtp.tensor(ops)
                 
-                if params.frame is None:
+                if params.frame.phase is not None:
+                    op *= np.exp(1.j * params.frame.phase[level])
+                
+                if params.frame.frequency is None:
                     frame_frequency = params.qubit_frequency + level * params.anharmonicity
                 else:
-                    frame_frequency = params.frame[level]
-                
+                    frame_frequency = params.frame.frequency[level]
+
                 qops.append((params, op, frame_frequency))
 
         # Loop over the drive channels
@@ -468,100 +554,52 @@ class RWAHamiltonianGenerator:
             if isinstance(drive.amplitude, np.ndarray):
                 self._need_tlist = True
             
-            ich = params_list.index(ch_params)
-
-            drive_base = crosstalk_matrix[ich] * ch_params.drive_amplitude / 2.
-            
             # Loop over the driven operators
             for params, creation_op, frame_frequency in qops:
-                iq = params_list.index(params)
+                drive_base = ch_params.drive_amplitude / 2.
                 
-                if drive_base[iq] == 0.:
-                    continue
-                    
-                # Possible time dependence of the envelope implies that the Hamiltonian cannot be
-                # split into h_x and h_y -> need to give complex drives to the creation and annihilation
-                # operators instead
-                
-                is_static = False
-                is_real = False
+                if ch_params != params:
+                    try:
+                        drive_base *= self.crosstalk[(ch_params, params)]
+                    except KeyError:
+                        # This qudit gets no drive
+                        continue
+                        
+                # Hamiltonian term can be split in xy (static and/or real envelope) or creation/annihilation (otherwise)
                     
                 if drive.sequence is None:
-                    detuning = drive.frequency - frame_frequency
-
-                    on_resonance = (abs(detuning) < REL_FREQUENCY_EPSILON * params.qubit_frequency)
-
-                    if isinstance(drive.amplitude, (float, complex)):
-                        envelope = drive.amplitude * drive_base[iq]
-
-                        if on_resonance:
-                            cr_drive = envelope
-                            an_drive = envelope.conjugate()
-                            is_real = envelope.imag == 0.
-                            is_static = True
-                        else:
-                            cr_drive = f'{envelope} * (cos({detuning} * t) - 1.j * sin({detuning} * t))'
-                            an_drive = f'{envelope.conjugate()} * (cos({detuning} * t) + 1.j * sin({detuning} * t))'
-                            
-                    elif isinstance(drive.amplitude, np.ndarray):
-                        envelope = drive.amplitude * drive_base[iq]
-                        
-                        if on_resonance:
-                            cr_drive = envelope
-                            an_drive = envelope.conjugate()
-                            is_real = np.all(envelope.imag == 0.)
-                        else:
-                            cr_drive = scaled_function(exp_freq(-detuning), envelope)
-                            an_drive = scaled_function(exp_freq(detuning), envelope.conjugate())
-
-                    elif isinstance(drive.amplitude, str):
-                        envelope = f'({drive_base[iq]} * ({drive.amplitude}))'
-                        
-                        if on_resonance:
-                            cr_drive = envelope
-                            an_drive = f'{envelope}.conjugate()'
-                            is_real = drive.is_real
-                            try:
-                                cr = eval(cr_drive)
-                                an = eval(an_drive)
-                            except:
-                                pass
-                            else:
-                                cr_drive = cr
-                                an_drive = an
-                                is_static = True
-                        else:
-                            cr_drive = f'{envelope} * (cos({detuning} * t) - 1.j * sin({detuning} * t))'
-                            an_drive = f'{envelope}.conjugate() * (cos({detuning} * t) + 1.j * sin({detuning} * t))'
-                            
-                    elif callable(drive.amplitude):
-                        envelope = scaled_function(drive.amplitude, drive_base[iq])
-                        
-                        if on_resonance:
-                            cr_drive = envelope
-                            an_drive = conj_function(envelope)
-                            is_real = drive.is_real
-                        else:
-                            cr_drive = prod_function(exp_freq(-detuning), envelope)
-                            an_drive = prod_function(exp_freq(detuning), conj_function(envelope))
+                    split, fn_1, fn_2 = drive.generate_fn(frame_frequency, drive_base)
+                    term_max_frequency = abs(drive.frequency - frame_frequency)
                             
                 else:
-                    cr_drive = drive.sequence.generate_fn(drive.frequency, frame_frequency)
-                    an_drive = conj_function(cr_drive)
-                    on_resonance = False
+                    split, fn_1, fn_2, term_max_frequency = drive.sequence.generate_fn(frame_frequency, drive_base,
+                                                                                       initial_frequency=drive.frequency)
+                    
+                if split == 'xy':
+                    h_x = creation_op.dag() + creation_op
+                    h_y = 1.j * (creation_op.dag() - creation_op)
 
-                if is_static:
-                    hstatic += cr_drive * creation_op + an_drive * creation_op.dag()
+                    if isinstance(fn_1, (float, complex)):
+                        hstatic += fn_1 * h_x
+                        if fn_2 is not None:
+                            hstatic += fn_2 * h_y
 
-                elif is_real:
-                    self.hdrive.append([creation_op + creation_op.dag(), cr_drive])
+                    else:
+                        hdrive.append([h_x, fn_1])
+                        if fn_2 is not None:
+                            hdrive.append([h_y, fn_2])
+                            
                 else:
-                    self.hdrive.append([creation_op, cr_drive])
-                    self.hdrive.append([creation_op.dag(), an_drive])
+                    hdrive.append([creation_op, fn_1])
+                    hdrive.append([creation_op.dag(), fn_2])
                         
-                self._max_frequency_drive = max(self._max_frequency_drive, abs(drive.frequency - frame_frequency))
+                self._max_frequency_drive = max(self._max_frequency_drive, term_max_frequency)
                 
-                        
+        if hstatic != qtp.Qobj():
+            hdrive.insert(0, hstatic)
+                
+        return hdrive
+                
     def make_tlist(
         self,
         points_per_cycle: int,
@@ -580,8 +618,12 @@ class RWAHamiltonianGenerator:
             Array of time points.
         """
         if self.max_frequency == 0.:
-            hstat = self.hstatic.full()
-            amp2 = np.trace(hstat @ hstat).real / (2 ** len(self.qubit_index_mapping))
+            hamiltonian = self.generate()
+            if not hamiltonian:
+                raise RuntimeError('Cannot determine the tlist')
+
+            hstat = hamiltonian[0]
+            amp2 = np.trace(hstat @ hstat).real / (2 ** len(self.qudit_params))
             return np.linspace(0., 2. * np.pi / np.sqrt(amp2) * num_cycles, points_per_cycle * num_cycles)
         else:
             return np.linspace(0., 2. * np.pi / self.max_frequency * num_cycles, points_per_cycle * num_cycles)

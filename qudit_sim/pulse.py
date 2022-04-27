@@ -13,7 +13,13 @@ s = 1.
 ns = 1.e-9
 
 class PulseSequence(list):
-    def generate_fn(self, initial_frequency, reference_frequency, reference_phase=0.):
+    def generate_fn(self, reference_frequency, drive_base, initial_frequency=None, reference_phase=0.):
+        ## TODO RETURN split, fn_1, fn_2, max_frequency
+        ## split is xy if all pulses are real. In this case fn_1 is pulse * cos and fn_2 is pulse * sin
+        ## If further the frequency is constant and resonant with the frame, set fn_2 to None
+        ## Else split is ca and fn_1 is pulse * exp(-detuning * t), fn_2 is conjugate
+        ## Allow initial frequency to be None if the first instruction is SetFrequency
+        
         funclist = []
         timelist = []
         
@@ -21,7 +27,7 @@ class PulseSequence(list):
             detuning = frequency - reference_frequency
             offset = phase_offset - reference_phase
             def fun(t, args):
-                return np.exp(-1.j * detuning * t + offset) * pulse(t - time, args)
+                return drive_base * np.exp(-1.j * detuning * t + offset) * pulse(t - time, args)
             
             return fun
 

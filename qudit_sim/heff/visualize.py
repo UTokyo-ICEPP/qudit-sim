@@ -6,30 +6,29 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.markers import MarkerStyle
 
-from ..paulis import (get_num_paulis, get_pauli_dim,
-                              make_generalized_paulis, make_prod_basis,
-                              pauli_labels, prod_basis_labels, extract_coefficients,
-                              unravel_basis_index, get_l0_projection)
-from ..utils import matrix_ufunc, FrequencyScale
-from .common import make_ueff
+import rqutils.paulis as paulis
+from rqutils.math import matrix_exp, matrix_angle
+
+from ..utils import FrequencyScale
+from .common import make_heff_t
 
 twopi = 2. * np.pi
 
 def heff_expr(
-    coefficients: np.ndarray,
+    components: np.ndarray,
     symbol: Optional[str] = None,
     threshold: Optional[float] = None,
     scale: Optional[FrequencyScale] = None
 ) -> str:
-    """Generate a LaTeX expression of the effective Hamiltonian from the Pauli coefficients.
+    """Generate a LaTeX expression of the effective Hamiltonian from the Pauli components.
     
-    The dymamic range of the numerical values of the coefficients is set by the maximum absolute
-    value. For example, if the maximum absolute value is between 1.e+6 and 1.e+9, the coefficients
-    are expressed in MHz, with the minimum of 0.001 MHz. Pauli terms whose coefficients have
+    The dymamic range of the numerical values of the components is set by the maximum absolute
+    value. For example, if the maximum absolute value is between 1.e+6 and 1.e+9, the components
+    are expressed in MHz, with the minimum of 0.001 MHz. Pauli terms whose components have
     absolute values below the threshold are ommitted.
     
     Args:
-        heff: Array of Pauli coefficients returned by find_heff
+        heff: Array of Pauli components returned by find_heff
         symbol: Symbol to use instead of :math:`\lambda` for the matrices.
         threshold: Ignore terms with absolute coefficients below this value.
         scale: Manually set the scale.
@@ -37,62 +36,62 @@ def heff_expr(
     Returns:
         A LaTeX expression string for the effective Hamiltonian.
     """
-    coefficients = coefficients.copy()
+    components = components.copy()
     
-    num_qubits = len(coefficients.shape)
-    labels = prod_basis_labels(coefficients.shape[0], num_qubits, symbol=symbol)
+    num_qubits = len(components.shape)
+    labels = paulis.labels(np.around(np.sqrt(components.shape)).astype(int), symbol=symbol)
 
     if scale is None:
-        scale = _find_scale(np.amax(np.abs(coefficients)))
+        scale = _find_scale(np.amax(np.abs(components)))
         
     scale_omega = scale.pulsatance_value
     
     if threshold is None:
         threshold = scale_omega * 1.e-2
         
-    coefficients /= scale_omega
+    components /= scale_omega
     threshold /= scale_omega
             
     expr = ''
     
-    for index in np.ndindex(coefficients.shape):
-        coeff = coefficients[index]
-        if abs(coeff) < threshold:
+    for index in np.ndindex(components.shape):
+        compo = components[index]
+        if abs(compo) < threshold:
             continue
             
-        if coeff < 0.:
+        if compo < 0.:
             expr += ' - '
         elif expr:
             expr += ' + '
             
-        if len(coefficients.shape) == 1:
-            expr += f'{abs(coeff):.3f}{labels[index]}'
+        if len(components.shape) == 1:
+            expr += f'{abs(compo):.3f}{labels[index]}'
         else:
-            if len(coefficients.shape) == 2:
+            if len(components.shape) == 2:
                 denom = '2'
             else:
-                denom = '2^{%d}' % (len(coefficients.shape) - 1)
+                denom = '2^{%d}' % (len(components.shape) - 1)
                 
-            expr += f'{abs(coeff):.3f}' + (r'\frac{%s}{%s}' % (labels[index], denom))
+            expr += f'{abs(compo):.3f}' + (r'\frac{%s}{%s}' % (labels[index], denom))
         
     return r'\frac{H_{\mathrm{eff}}}{\mathrm{' + scale.frequency_unit + '}} = ' + expr
 
 
-def coeffs_bar(
-    coefficients: np.ndarray,
+def compos_bar(
+    components: np.ndarray,
     threshold: Optional[float] = None,
     ignore_identity: bool = True
 ) -> mpl.figure.Figure:
     
-    coefficients = coefficients.copy()
+    components = components.copy()
     
-    num_qubits = len(coefficients.shape)
-    num_paulis = coefficients.shape[0]
+    num_qubits = len(components.shape)
+    num_paulis = components.shape[0]
     
-    labels = prod_basis_labels(num_paulis, num_qubits, symbol='',
-                               delimiter=('' if num_paulis == 4 else ','))
+    labels = paulis.labels(np.around(np.sqrt(components.shape)).astype(int), symbol='',
+                           delimiter=('' if num_paulis == 4 else ','))
     
-    maxval = np.amax(np.abs(coefficients))
+    maxval = np.amax(np.abs(components))
        
     scale = _find_scale(maxval)
     scale_omega = scale.pulsatance_value
@@ -104,19 +103,19 @@ def coeffs_bar(
         threshold *= -maxval
 
     # Dividing by omega -> now everything is in terms of frequency (not angular)
-    coefficients /= scale_omega
+    components /= scale_omega
     threshold /= scale_omega
             
     if ignore_identity:
-        coefficients = coefficients.copy()
-        coefficients.reshape(-1)[0] = 0.
+        components = components.copy()
+        components.reshape(-1)[0] = 0.
         
-    flat_indices = np.argsort(-np.abs(coefficients.reshape(-1)))
-    nterms = np.count_nonzero(np.abs(coefficients) > threshold)
-    indices = np.unravel_index(flat_indices[:nterms], coefficients.shape)
+    flat_indices = np.argsort(-np.abs(components.reshape(-1)))
+    nterms = np.count_nonzero(np.abs(components) > threshold)
+    indices = np.unravel_index(flat_indices[:nterms], components.shape)
     
     fig, ax = plt.subplots(1, 1)
-    ax.bar(np.arange(nterms), coefficients[indices])
+    ax.bar(np.arange(nterms), components[indices])
     
     ax.axhline(0., color='black', linewidth=0.5)
     
@@ -152,16 +151,16 @@ def inspect_leastsq_minimization(
         tlist = source['tlist'][()]
         ilogvs = source['ilogvs'][()]
         max_com = source['max_com'][()]
-        min_coeff_ratio = source['min_coeff_ratio'][()]
+        min_compo_ratio = source['min_compo_ratio'][()]
         num_update_per_iteration = source['num_update_per_iteration'][()]
-        ilogu_coeffs = source['ilogu_coeffs'][()]
+        ilogu_compos = source['ilogu_compos'][()]
         last_valid_it = source['last_valid_it'][()]
-        heff_coeffs = source['heff_coeffs'][()]
-        coeffs = source['coeffs'][()]
+        heff_compos = source['heff_compos'][()]
+        compos = source['compos'][()]
         success = source['fit_success'][()]
         com = source['com'][()]
     
-    num_paulis = get_num_paulis(num_sim_levels)
+    num_paulis = num_sim_levels ** 2
     basis_size = num_paulis ** num_qubits - 1
     
     tlist *= tscale.frequency_value
@@ -223,15 +222,15 @@ def inspect_leastsq_minimization(
             ax.set_ylabel(r'$log_{10}(cr)$')
             ax.scatter(log_com[iloop], log_cr[iloop])
             ax.axvline(np.log10(max_com), color='red')
-            ax.axhline(np.log10(min_coeff_ratio), color='red')
+            ax.axhline(np.log10(min_compo_ratio), color='red')
 
         # ilogvs
         ax = axes[1]
         ax.set_xlabel(f't ({tscale.time_unit})')
         ax.plot(tlist, np.sort(ilogvs[iloop], axis=1))
         
-        ## individual pauli coefficients
-        _plot_ilogu_coeffs(axes[2:], coeffs, num_qubits, num_paulis, indices_loop, tlist, tscale, comp_dim)
+        ## individual pauli components
+        _plot_ilogu_compos(axes[2:], compos, num_qubits, num_paulis, indices_loop, tlist, tscale, comp_dim)
         
         for iax, basis_index_flat in enumerate(indices_loop):
             ax = axes[iax]
@@ -240,12 +239,12 @@ def inspect_leastsq_minimization(
             
             ibase = basis_index_flat - 1
             
-            # Show cumul-over-max and coeff ratio values
-            ax.text(tlist[10], ymin + (ymax - ymin) * 0.1, f'com {com[iloop, ibase]:.3f} cr {coeff_ratio[iloop, ibase]:.3f}')
+            # Show cumul-over-max and compo ratio values
+            ax.text(tlist[10], ymin + (ymax - ymin) * 0.1, f'com {com[iloop, ibase]:.3f} cr {compo_ratio[iloop, ibase]:.3f}')
         
             # Draw the fit line for successful fits
             if success[iloop, ibase]:
-                ax.plot(tlist, coeffs[ibase] * tlist)
+                ax.plot(tlist, compos[ibase] * tlist)
                 
             if selected[iloop, ibase]:
                 ax.tick_params(color='magenta', labelcolor='magenta')
@@ -263,7 +262,7 @@ def inspect_fidelity_maximization(
     basis_indices: Optional[List[Tuple]] = None,
     digest: bool = True
 ) -> List[mpl.figure.Figure]:
-    """Plot the time evolution of Pauli coefficients before and after fidelity maximization.
+    """Plot the time evolution of Pauli components before and after fidelity maximization.
     
     Args:
         filename: Name of the HDF5 file containing the fit result.
@@ -285,9 +284,9 @@ def inspect_fidelity_maximization(
         time_evolution = source['time_evolution'][()]
         tlist = source['tlist'][()]
         if num_sim_levels != comp_dim:
-            heff_coeffs = source['heff_coeffs_original'][()]
+            heff_compos = source['heff_compos_original'][()]
         else:
-            heff_coeffs = source['heff_coeffs'][()]
+            heff_compos = source['heff_compos'][()]
         final_fidelity = source['final_fidelity'][()]
         try:
             loss = source['loss'][()]
@@ -296,26 +295,30 @@ def inspect_fidelity_maximization(
             loss = None
             grad = None
             
-    num_paulis = get_num_paulis(num_sim_levels)
+    num_paulis = num_sim_levels ** 2
     
     tlist *= tscale.frequency_value
-    heff_coeffs /= tscale.frequency_value
+    heff_compos /= tscale.frequency_value
         
-    ilogus = matrix_ufunc(lambda u: -np.angle(u), time_evolution)
-    ilogu_coeffs = extract_coefficients(ilogus, num_qubits)
-    ilogu_coeffs = ilogu_coeffs.reshape(tlist.shape[0], -1)[:, 1:]
+    ilogus = -matrix_angle(time_evolution)
+    ilogu_compos = paulis.components(ilogus, (num_sim_levels,) * num_qubits)
+    ilogu_compos = ilogu_compos.reshape(tlist.shape[0], -1)[:, 1:]
     
-    ueff_dagger = make_ueff(heff_coeffs, num_sim_levels, tlist, num_qubits, phase_factor=1.)
+    heff = paulis.compose(heff_compos, (num_sim_levels,) * num_qubits)
+    heff_t = make_heff_t(heff, tlist)
+    ueff_dagger = matrix_exp(1.j * heff_t, hermitian=-1)
+
     target = np.matmul(time_evolution, ueff_dagger)
-    ilogtargets, ilogvs = matrix_ufunc(lambda u: -np.angle(u), target, with_diagonals=True)
-    ilogtarget_coeffs = extract_coefficients(ilogtargets, num_qubits)
-    ilogtarget_coeffs = ilogtarget_coeffs.reshape(tlist.shape[0], -1)[:, 1:]
+    ilogtargets, ilogvs = matrix_angle(target, with_diagonals=True)
+    ilogtargets *= -1.
+    ilogtarget_compos = paulis.components(ilogtargets, (num_sim_levels,) * num_qubits)
+    ilogtarget_compos = ilogtarget_compos.reshape(tlist.shape[0], -1)[:, 1:]
     
     if basis_indices is None:
         # Make a list of tuples from a tuple of arrays
-        indices_ilogu = np.nonzero(np.amax(np.abs(ilogu_coeffs), axis=0) > threshold)[0] + 1
+        indices_ilogu = np.nonzero(np.amax(np.abs(ilogu_compos), axis=0) > threshold)[0] + 1
         indices_ilogu = np.concatenate([np.array([0]), indices_ilogu])
-        indices_ilogtarget = np.nonzero(np.amax(np.abs(ilogtarget_coeffs), axis=0) > threshold)[0] + 1
+        indices_ilogtarget = np.nonzero(np.amax(np.abs(ilogtarget_compos), axis=0) > threshold)[0] + 1
         indices_ilogtarget = np.concatenate([np.array([0]), indices_ilogtarget])
     else:
         tuple_of_indices = tuple([index[i] for index in basis_indices] for i in range(len(basis_indices[0])))
@@ -332,27 +335,27 @@ def inspect_fidelity_maximization(
     figures.append(fig)
     fig.suptitle(r'Original time evolution vs $H_{eff}$', fontsize=24)
         
-    _plot_ilogu_coeffs(axes, ilogu_coeffs, num_qubits, num_paulis, indices_ilogu, tlist, tscale,
+    _plot_ilogu_compos(axes, ilogu_compos, num_qubits, num_paulis, indices_ilogu, tlist, tscale,
                        comp_dim, align_ylim=align_ylim)
     
-    coeff_line = axes[0].get_lines()[0]
+    compo_line = axes[0].get_lines()[0]
     
-    ## Add lines with slope=coeff for terms above threshold
+    ## Add lines with slope=compo for terms above threshold
     for iax, basis_index_flat in enumerate(indices_ilogu):
         ax = axes[iax]
         basis_index = np.unravel_index(basis_index_flat, (num_paulis,) * num_qubits)
-        fit_line, = ax.plot(tlist, heff_coeffs[basis_index] * tlist)
+        fit_line, = ax.plot(tlist, heff_compos[basis_index] * tlist)
         
-    fig.legend((coeff_line, fit_line),
-               ('ilogU(t) coefficient', '$H_{eff}t$ coefficient'), 'upper right')
+    fig.legend((compo_line, fit_line),
+               ('ilogU(t) component', '$H_{eff}t$ component'), 'upper right')
 
     ## Second figure: subtracted unitaries
     fig, axes = _make_figure(len(indices_ilogtarget))
     figures.append(fig)
     fig.suptitle('Unitary-subtracted time evolution', fontsize=24)
 
-    ## Plot individual pauli coefficients
-    _plot_ilogu_coeffs(axes, ilogtarget_coeffs, num_qubits, num_paulis, indices_ilogtarget, tlist, tscale,
+    ## Plot individual pauli components
+    _plot_ilogu_compos(axes, ilogtarget_compos, num_qubits, num_paulis, indices_ilogtarget, tlist, tscale,
                        comp_dim, align_ylim=align_ylim)
     
     if digest:
@@ -408,30 +411,30 @@ def _make_figure(num_axes, nxmin=4, nxmax=12):
     return fig, axes.reshape(-1)
 
 
-def _plot_ilogu_coeffs(axes, coeffs_data, num_qubits, num_paulis, basis_indices_flat, tlist, tscale, comp_dim, align_ylim=False):
-    # coeffs_data: shape (T, num_basis - 1)
+def _plot_ilogu_compos(axes, compos_data, num_qubits, num_paulis, basis_indices_flat, tlist, tscale, comp_dim, align_ylim=False):
+    # compos_data: shape (T, num_basis - 1)
     # basis_indices_flat
-    num_sim_levels = get_pauli_dim(num_paulis)
-    num_comp_paulis = get_num_paulis(comp_dim)
+    num_sim_levels = np.around(np.sqrt(num_paulis)).astype(int)
+    num_comp_paulis = comp_dim ** 2
 
     basis_indices = np.unravel_index(basis_indices_flat, (num_paulis,) * num_qubits)
-    labels = prod_basis_labels(num_paulis, num_qubits)[basis_indices]
-    coeffs_data_selected = coeffs_data[:, basis_indices_flat - 1]
+    labels = paulis.labels((num_sim_levels,) * num_qubits)[basis_indices]
+    compos_data_selected = compos_data[:, basis_indices_flat - 1]
 
     iax = 0
 
     if basis_indices_flat[0] == 0:
-        l0p = get_l0_projection(comp_dim, num_sim_levels)
+        l0p = paulis.l0_projector(comp_dim, num_sim_levels)
         l0_projection = l0p
         for _ in range(num_qubits - 1):
             l0_projection = np.kron(l0_projection, l0p)
 
-        l0_coeffs = np.matmul(coeffs_data, l0_projection[1:])
+        l0_compos = np.matmul(compos_data, l0_projection[1:])
 
         # lambda 0 projection onto computational subspace
         ax = axes[0]
         ax.set_title(f'${labels[0]}$ (projected)')
-        ax.plot(tlist, l0_coeffs)
+        ax.plot(tlist, l0_compos)
         
         iax += 1
         
@@ -439,7 +442,7 @@ def _plot_ilogu_coeffs(axes, coeffs_data, num_qubits, num_paulis, basis_indices_
         ax = axes[iax]
 
         ax.set_title(f'${labels[iax]}$')
-        ax.plot(tlist, coeffs_data_selected[:, iax])
+        ax.plot(tlist, compos_data_selected[:, iax])
         
         if (np.array([indices[iax] for indices in basis_indices]) < num_comp_paulis).all():
             for spine in ax.spines.values():
@@ -447,8 +450,8 @@ def _plot_ilogu_coeffs(axes, coeffs_data, num_qubits, num_paulis, basis_indices_
                 
         iax += 1
     
-    ymax = np.amax(coeffs_data_selected)
-    ymin = np.amin(coeffs_data_selected)
+    ymax = np.amax(compos_data_selected)
+    ymin = np.amin(compos_data_selected)
     vrange = ymax - ymin
     ymax += 0.2 * vrange
     ymin -= 0.2 * vrange
@@ -463,16 +466,16 @@ def _plot_ilogu_coeffs(axes, coeffs_data, num_qubits, num_paulis, basis_indices_
 
 def plot_amplitude_scan(
     amplitudes: np.ndarray,
-    coefficients: np.ndarray,
+    components: np.ndarray,
     threshold: Optional[float] = None,
     amp_scale: Optional[FrequencyScale] = None,
-    coeff_scale: Optional[FrequencyScale] = None,
+    compo_scale: Optional[FrequencyScale] = None,
     max_poly_order: int = 4
 ) -> Tuple[mpl.figure.Figure, List[str], FrequencyScale]:
     
-    num_qubits = len(coefficients.shape) - 1 # first dimension: amplitudes
-    comp_dim = get_pauli_dim(coefficients.shape[1])
-    num_paulis = get_num_paulis(comp_dim)
+    num_qubits = len(components.shape) - 1 # first dimension: amplitudes
+    comp_dim = np.around(np.sqrt(components.shape[1])).astype(int)
+    num_paulis = comp_dim ** 2
 
     if amp_scale is None:
         amp_scale = _find_scale(np.amax(np.abs(amplitudes)))
@@ -480,20 +483,20 @@ def plot_amplitude_scan(
     amp_scale_omega = amp_scale.pulsatance_value
     amps_norm = amplitudes / amp_scale_omega
 
-    if coeff_scale is None:
-        coeff_scale = _find_scale(np.amax(np.abs(coefficients)))
+    if compo_scale is None:
+        compo_scale = _find_scale(np.amax(np.abs(components)))
         
-    coeff_scale_omega = coeff_scale.pulsatance_value
-    coeffs_norm = coefficients / coeff_scale_omega
+    compo_scale_omega = compo_scale.pulsatance_value
+    compos_norm = components / compo_scale_omega
     
     if threshold is None:
-        threshold = coeff_scale_omega * 1.e-2
+        threshold = compo_scale_omega * 1.e-2
         
-    threshold /= coeff_scale_omega
+    threshold /= compo_scale_omega
     
-    # Amplitude, coeff, and threshold are all divided by omega and are in terms of frequency
+    # Amplitude, compo, and threshold are all divided by omega and are in terms of frequency
     
-    amax = np.amax(np.abs(coeffs_norm), axis=0)
+    amax = np.amax(np.abs(compos_norm), axis=0)
     num_above_threshold = np.count_nonzero(amax > threshold)
     min_max = np.amin(np.where(amax > threshold, amax, np.amax(amax)))
     
@@ -502,24 +505,24 @@ def plot_amplitude_scan(
 
     if num_qubits > 1 and num_above_threshold > 6:
         # Which Pauli components of the first qubit have plots to draw?
-        has_passing_coeffs = np.any(amax.reshape(num_paulis, -1) > threshold, axis=1)
-        num_plots = np.sum(has_passing_coeffs)
+        has_passing_compos = np.any(amax.reshape(num_paulis, -1) > threshold, axis=1)
+        num_plots = np.sum(has_passing_compos)
         
         nv = np.ceil(np.sqrt(num_plots)).astype(int)
         nh = np.ceil(num_plots / nv).astype(int)
         fig, axes = plt.subplots(nv, nh, figsize=(16, 12))
         
-        prefixes = pauli_labels(num_paulis, symbol='')
+        prefixes = pauli.labels(comp_dim, symbol='')
         
         expr_lines = []
         iax = 0
 
         for ip in range(num_paulis):
-            if not has_passing_coeffs[ip]:
+            if not has_passing_compos[ip]:
                 continue
 
             ax = axes.reshape(-1)[iax]
-            expr_lines += _plot_amplitude_scan_on(ax, amps_norm, coeffs_norm[:, ip],
+            expr_lines += _plot_amplitude_scan_on(ax, amps_norm, compos_norm[:, ip],
                                                   plot_mask[ip], max_poly_order, prefix=prefixes[ip])
             
             iax += 1
@@ -527,11 +530,11 @@ def plot_amplitude_scan(
     else:
         num_plots = 1
         fig, axes = plt.subplots(1, 1, squeeze=False)
-        expr_lines = _plot_amplitude_scan_on(axes[0, 0], amps_norm, coeffs_norm, plot_mask,
+        expr_lines = _plot_amplitude_scan_on(axes[0, 0], amps_norm, compos_norm, plot_mask,
                                              max_poly_order)
 
-    cmax = np.amax(coeffs_norm, axis=0)
-    cmin = np.amin(coeffs_norm, axis=0)
+    cmax = np.amax(compos_norm, axis=0)
+    cmin = np.amin(compos_norm, axis=0)
     ymax = np.amax(np.where(plot_mask == 2, cmax * 0.1, cmax))
     ymin = np.amin(np.where(plot_mask == 2, cmin * 0.1, cmin))        
         
@@ -544,24 +547,24 @@ def plot_amplitude_scan(
         ax.set_ylim(ymin * 1.2, ymax * 1.2)
         ax.grid(True)
         ax.set_xlabel(f'Drive amplitude (${amp_scale.frequency_unit}$)')
-        ax.set_ylabel(f'${nu}/{coeff_scale.frequency_unit}$')
+        ax.set_ylabel(f'${nu}/{compo_scale.frequency_unit}$')
         
     fig.tight_layout()
     
     exprs = []
     for basis_label, rhs in expr_lines:
-        exprs.append(frac(nusub(basis_label), mathrm(coeff_scale.frequency_unit)) + ' = ' + rhs)
+        exprs.append(frac(nusub(basis_label), mathrm(compo_scale.frequency_unit)) + ' = ' + rhs)
         
     return fig, exprs, amp_scale
         
 
-def _plot_amplitude_scan_on(ax, amps_norm, coeffs_norm, plot_mask, max_poly_order, prefix=''):
-    num_qubits = len(coeffs_norm.shape) - 1 # first dimension: amplitudes
-    comp_dim = get_pauli_dim(coeffs_norm.shape[1])
-    num_paulis = get_num_paulis(comp_dim)
+def _plot_amplitude_scan_on(ax, amps_norm, compos_norm, plot_mask, max_poly_order, prefix=''):
+    num_qubits = len(compos_norm.shape) - 1 # first dimension: amplitudes
+    comp_dim = np.around(np.sqrt(compos_norm.shape[1])).astype(int)
+    num_paulis = comp_dim ** 2
     
-    basis_labels = prod_basis_labels(num_paulis, num_qubits, symbol='',
-                                     delimiter=('' if comp_dim == 2 else ','))
+    basis_labels = paulis.labels((comp_dim,) * num_qubits, symbol='',
+                                 delimiter=('' if comp_dim == 2 else ','))
     
     amps_norm_fine = np.linspace(amps_norm[0], amps_norm[-1], 100)
     num_amps = amps_norm.shape[0]
@@ -573,7 +576,7 @@ def _plot_amplitude_scan_on(ax, amps_norm, coeffs_norm, plot_mask, max_poly_orde
     
     imarker = 0
     
-    for index in np.ndindex(coeffs_norm.shape[1:]):
+    for index in np.ndindex(compos_norm.shape[1:]):
         if plot_mask[index] == 0:
             continue
             
@@ -593,9 +596,9 @@ def _plot_amplitude_scan_on(ax, amps_norm, coeffs_norm, plot_mask, max_poly_orde
         else:
             plot_scale = 1.
             
-        coeffs = coeffs_norm[(slice(None),) + index]
+        compos = compos_norm[(slice(None),) + index]
             
-        even = np.sum(coeffs[:num_amps // 2] * coeffs[-num_amps // 2:]) > 0.
+        even = np.sum(compos[:num_amps // 2] * compos[-num_amps // 2:]) > 0.
         
         if even:
             curve = _poly_even
@@ -604,9 +607,9 @@ def _plot_amplitude_scan_on(ax, amps_norm, coeffs_norm, plot_mask, max_poly_orde
             curve = _poly_odd
             p0 = np.zeros((max_poly_order + 1) // 2)
         
-        popt, _ = sciopt.curve_fit(curve, amps_norm, coeffs, p0=p0)
+        popt, _ = sciopt.curve_fit(curve, amps_norm, compos, p0=p0)
         
-        pathcol = ax.scatter(amps_norm, coeffs * plot_scale, marker=filled_markers[imarker % num_markers], label=plot_label)
+        pathcol = ax.scatter(amps_norm, compos * plot_scale, marker=filled_markers[imarker % num_markers], label=plot_label)
         ax.plot(amps_norm_fine, curve(amps_norm_fine, *popt) * plot_scale, color=pathcol.get_edgecolor())
         
         expr_rhs = ''

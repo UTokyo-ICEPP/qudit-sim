@@ -8,8 +8,8 @@ except ImportError:
 else:
     array_type = Union[np.ndarray, jnp.DeviceArray]
 
-from ..utils import matrix_ufunc
-from ..paulis import get_num_paulis, make_generalized_paulis, make_prod_basis
+from rqutils.math import matrix_exp, matrix_angle
+import rqutils.paulis as paulis
 
 def get_ilogus_and_valid_it(unitaries):
     ## Compute ilog(U(t))
@@ -27,7 +27,7 @@ def get_ilogus_and_valid_it(unitaries):
 
 
 def make_heff(
-    heff_coeffs: array_type,
+    heff_compos: array_type,
     basis_or_dim: Union[array_type, int],
     num_qubits: int = 0,
     npmod=np
@@ -40,55 +40,55 @@ def make_heff(
             basis_dim = basis.shape[-1]
 
         if num_qubits <= 0:
-            num_qubits = len(heff_coeffs.shape)
-            if num_qubits > get_num_paulis(basis_dim):
+            num_qubits = len(heff_compos.shape)
+            if num_qubits > basis_dim ** 2:
                 raise RuntimeError('Need to specify number of qubits for a flat-list input')
 
         if isinstance(basis_or_dim, int):
-            paulis = make_generalized_paulis(basis_dim)
-            basis = make_prod_basis(paulis, num_qubits)
+            basis = paulis.paulis((basis_dim,) * num_qubits)
     else:
         basis = basis_or_dim
             
-    heff_coeffs = heff_coeffs.reshape(-1)
+    heff_compos = heff_compos.reshape(-1)
     basis_list = basis.reshape(-1, *basis.shape[-2:])
-    return npmod.tensordot(basis_list, heff_coeffs, (0, 0)) / (2 ** (num_qubits - 1))
+    return npmod.tensordot(basis_list, heff_compos, (0, 0))
 
 
 def make_heff_t(
-    heff_coeffs: array_type,
-    basis_or_dim: Union[array_type, int],
+    heff: array_type,
     tlist: Union[array_type, float],
-    num_qubits: int = 0,
     npmod=np
 ) -> array_type:
-    heff = make_heff(heff_coeffs, basis_or_dim, num_qubits=num_qubits, npmod=npmod)
     tlist = npmod.asarray(tlist)
     tdims = (1,) * len(tlist.shape)
     return tlist[..., None, None] * heff.reshape(tdims + heff.shape)
 
 
-def make_ueff(
-    heff_coeffs: array_type,
-    basis_or_dim: Union[array_type, int],
+def compose_ueff(
+    heff_compos: array_type,
+    basis_list: array_type,
     tlist: Union[array_type, float] = 1.,
-    num_qubits: int = 0,
     phase_factor: float = -1.,
     npmod=np
 ) -> array_type:
-    heff_t = make_heff_t(heff_coeffs, basis_or_dim, tlist, num_qubits=num_qubits, npmod=npmod)
-    return matrix_ufunc(lambda v: npmod.exp(phase_factor * 1.j * v), heff_t, hermitian=True, npmod=npmod)
+    basis_list = basis_list.reshape(-1, *basis_list.shape[-2:])
+    heff_compos = heff_compos.reshape(-1)
+    heff = npmod.tensordot(basis_list, heff_compos, (0, 0))
+
+    heff_t = make_heff_t(heff, tlist, npmod=npmod)
+    
+    return matrix_exp(phase_factor * 1.j * heff_t, hermitian=-1, npmod=npmod)
 
 
 def heff_fidelity(
     time_evolution: array_type,
-    heff_coeffs: array_type,
+    heff_compos: array_type,
     basis_or_dim: Union[array_type, int],
     tlist: array_type,
     num_qubits: int = 0,
     npmod=np
 ) -> array_type:
-    heff_t = make_heff_t(heff_coeffs, basis_or_dim, tlist, num_qubits=num_qubits, npmod=npmod)
+    heff_t = make_heff_t(heff_compos, basis_or_dim, tlist, num_qubits=num_qubits, npmod=npmod)
     ueffdag_t = matrix_ufunc(lambda v: npmod.exp(1.j * v), heff_t, hermitian=True, npmod=npmod)
 
     tr_u_ueffdag = npmod.trace(npmod.matmul(time_evolution, ueffdag_t), axis1=1, axis2=2)

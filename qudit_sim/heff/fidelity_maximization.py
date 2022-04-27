@@ -12,7 +12,7 @@ import h5py
 from ..paulis import make_generalized_paulis, make_prod_basis, extract_coefficients
 from ..utils import matrix_ufunc
 from .leastsq_minimization import leastsq_minimization
-from .common import get_ilogus_and_valid_it, heff_fidelity, make_ueff
+from .common import get_ilogus_and_valid_it, heff_fidelity, compose_ueff
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +162,7 @@ def fidelity_maximization(
             res = jsciopt.minimize(fun, c0, args=(ydata,), method='BFGS')
             return res.x[0], res.success
 
-        ueff_dagger = make_ueff(copt, basis_list, tlist_norm, num_qubits, phase_factor=1.)
+        ueff_dagger = compose_ueff(copt, basis_list, tlist_norm, phase_factor=1.)
         target = jnp.matmul(time_evolution, ueff_dagger)
 
         ilogtargets = matrix_ufunc(lambda u: -np.angle(u), target)
