@@ -103,7 +103,7 @@ def run_pulse_sim(
                 if idx == (0,) * num_qudits: # skip the identity
                     continue
                 
-                e_ops.append(qtp.tensor([pauli_objs[i] for i in idx]))
+                e_ops.append(qtp.tensor([pauli_objs[i] for i in idx]) / (2 ** (num_qudits - 1)))
             
     ## kwargs passed directly to sesolve
     
