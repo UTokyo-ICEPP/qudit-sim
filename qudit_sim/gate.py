@@ -169,4 +169,4 @@ def gate_expr(
     threshold: Optional[float] = 0.01
 ) -> str:
     hamiltonian = QPrintPauli(components, symbol=symbol, epsilon=threshold)
-    return fr'\exp\left[-i \left({hamiltonian}\right)\right]'
+    return fr'\exp\left[-i \left({hamiltonian.latex()}\right)\right]'

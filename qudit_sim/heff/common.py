@@ -13,7 +13,8 @@ import rqutils.paulis as paulis
 
 def get_ilogus_and_valid_it(unitaries):
     ## Compute ilog(U(t))
-    ilogus, ilogvs = matrix_ufunc(lambda u: -np.angle(u), unitaries, with_diagonals=True)
+    ilogus, ilogvs = matrix_angle(unitaries, with_diagonals=True)
+    ilogus *= -1.
 
     ## Find the first t where an eigenvalue does a 2pi jump
     last_valid_it = ilogus.shape[0]
@@ -24,34 +25,6 @@ def get_ilogus_and_valid_it(unitaries):
             last_valid_it = min(last_valid_it, hits_minus_pi[0])
             
     return ilogus, ilogvs, last_valid_it
-
-
-def make_heff(
-    heff_compos: array_type,
-    basis_or_dim: Union[array_type, int],
-    num_qubits: int = 0,
-    npmod=np
-) -> array_type:
-    if npmod is np:
-        if isinstance(basis_or_dim, int):
-            basis_dim = basis_or_dim
-        else:
-            basis = basis_or_dim
-            basis_dim = basis.shape[-1]
-
-        if num_qubits <= 0:
-            num_qubits = len(heff_compos.shape)
-            if num_qubits > basis_dim ** 2:
-                raise RuntimeError('Need to specify number of qubits for a flat-list input')
-
-        if isinstance(basis_or_dim, int):
-            basis = paulis.paulis((basis_dim,) * num_qubits)
-    else:
-        basis = basis_or_dim
-            
-    heff_compos = heff_compos.reshape(-1)
-    basis_list = basis.reshape(-1, *basis.shape[-2:])
-    return npmod.tensordot(basis_list, heff_compos, (0, 0))
 
 
 def make_heff_t(
@@ -89,7 +62,7 @@ def heff_fidelity(
     npmod=np
 ) -> array_type:
     heff_t = make_heff_t(heff_compos, basis_or_dim, tlist, num_qubits=num_qubits, npmod=npmod)
-    ueffdag_t = matrix_ufunc(lambda v: npmod.exp(1.j * v), heff_t, hermitian=True, npmod=npmod)
+    ueffdag_t = matrix_exp(1.j * heff_t, hermitian=-1, npmod=npmod)
 
     tr_u_ueffdag = npmod.trace(npmod.matmul(time_evolution, ueffdag_t), axis1=1, axis2=2)
     fidelity = (npmod.square(tr_u_ueffdag.real) + npmod.square(tr_u_ueffdag.imag)) / (ueffdag_t.shape[-1] ** 2)

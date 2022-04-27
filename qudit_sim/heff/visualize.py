@@ -8,6 +8,7 @@ from matplotlib.markers import MarkerStyle
 
 import rqutils.paulis as paulis
 from rqutils.math import matrix_exp, matrix_angle
+from rqutils.qprint import QPrintPauli
 
 from ..utils import FrequencyScale
 from .common import make_heff_t
@@ -30,52 +31,31 @@ def heff_expr(
     Args:
         heff: Array of Pauli components returned by find_heff
         symbol: Symbol to use instead of :math:`\lambda` for the matrices.
-        threshold: Ignore terms with absolute coefficients below this value.
+        threshold: Ignore terms with absolute components below this value.
         scale: Manually set the scale.
         
     Returns:
         A LaTeX expression string for the effective Hamiltonian.
     """
-    components = components.copy()
-    
-    num_qubits = len(components.shape)
-    labels = paulis.labels(np.around(np.sqrt(components.shape)).astype(int), symbol=symbol)
+    max_abs = np.amax(np.abs(components))
 
     if scale is None:
-        scale = _find_scale(np.amax(np.abs(components)))
+        scale = _find_scale(max_abs)
         
     scale_omega = scale.pulsatance_value
     
     if threshold is None:
         threshold = scale_omega * 1.e-2
         
-    components /= scale_omega
-    threshold /= scale_omega
-            
-    expr = ''
+    lhs_label = r'\frac{H_{\mathrm{eff}}}{\mathrm{%s}}' % scale.frequency_unit
     
-    for index in np.ndindex(components.shape):
-        compo = components[index]
-        if abs(compo) < threshold:
-            continue
-            
-        if compo < 0.:
-            expr += ' - '
-        elif expr:
-            expr += ' + '
-            
-        if len(components.shape) == 1:
-            expr += f'{abs(compo):.3f}{labels[index]}'
-        else:
-            if len(components.shape) == 2:
-                denom = '2'
-            else:
-                denom = '2^{%d}' % (len(components.shape) - 1)
-                
-            expr += f'{abs(compo):.3f}' + (r'\frac{%s}{%s}' % (labels[index], denom))
+    pobj = QPrintPauli(components / scale_omega,
+                       epsilon=(threshold / max_abs),
+                       lhs_label=lhs_label,
+                       symbol=symbol)
+    
+    return pobj.latex()
         
-    return r'\frac{H_{\mathrm{eff}}}{\mathrm{' + scale.frequency_unit + '}} = ' + expr
-
 
 def compos_bar(
     components: np.ndarray,
@@ -85,29 +65,22 @@ def compos_bar(
     
     components = components.copy()
     
-    num_qubits = len(components.shape)
-    num_paulis = components.shape[0]
-    
-    labels = paulis.labels(np.around(np.sqrt(components.shape)).astype(int), symbol='',
-                           delimiter=('' if num_paulis == 4 else ','))
-    
-    maxval = np.amax(np.abs(components))
+    max_abs = np.amax(np.abs(components))
        
-    scale = _find_scale(maxval)
+    scale = _find_scale(max_abs)
     scale_omega = scale.pulsatance_value
     if threshold is None:
         threshold = scale_omega * 1.e-2
         
     # Negative threshold specified -> relative to max
     if threshold < 0.:
-        threshold *= -maxval
+        threshold *= -max_abs
 
     # Dividing by omega -> now everything is in terms of frequency (not angular)
     components /= scale_omega
     threshold /= scale_omega
             
     if ignore_identity:
-        components = components.copy()
         components.reshape(-1)[0] = 0.
         
     flat_indices = np.argsort(-np.abs(components.reshape(-1)))
@@ -118,6 +91,10 @@ def compos_bar(
     ax.bar(np.arange(nterms), components[indices])
     
     ax.axhline(0., color='black', linewidth=0.5)
+    
+    pauli_dim = np.around(np.sqrt(components.shape)).astype(int)
+    labels = paulis.labels(pauli_dim, symbol='',
+                           delimiter=('' if pauli_dim[0] == 2 else ','))
     
     xticks = np.char.add(np.char.add('$', labels), '$')
         
@@ -164,32 +141,32 @@ def inspect_leastsq_minimization(
     basis_size = num_paulis ** num_qubits - 1
     
     tlist *= tscale.frequency_value
-    coeffs /= tscale.frequency_value
-    heff_coeffs /= tscale.frequency_value
+    compos /= tscale.frequency_value
+    heff_compos /= tscale.frequency_value
     
-    num_loops = ilogu_coeffs.shape[0]
+    num_loops = ilogu_compos.shape[0]
     
-    max_heff_coeff = np.amax(np.abs(heff_coeffs), axis=1, keepdims=True)
-    max_heff_coeff = np.repeat(max_heff_coeff, basis_size, axis=1)
-    coeff_ratio = np.zeros_like(coeffs)
-    np.divide(np.abs(coeffs), max_heff_coeff, out=coeff_ratio, where=(max_heff_coeff > 0.))
+    max_heff_compo = np.amax(np.abs(heff_compos), axis=1, keepdims=True)
+    max_heff_compo = np.repeat(max_heff_compo, basis_size, axis=1)
+    compo_ratio = np.zeros_like(compos)
+    np.divide(np.abs(compos), max_heff_compo, out=compo_ratio, where=(max_heff_compo > 0.))
     
     is_update_candidate = success & (com < max_com)
-    coeff_nonnegligible = (coeff_ratio > min_coeff_ratio)
-    is_update_candidate[1:] &= coeff_nonnegligible[1:] | (last_valid_it[1:, None] != tlist.shape[0])
+    compo_nonnegligible = (compo_ratio > min_compo_ratio)
+    is_update_candidate[1:] &= compo_nonnegligible[1:] | (last_valid_it[1:, None] != tlist.shape[0])
     num_candidates = np.count_nonzero(is_update_candidate[iloop], axis=1)
     num_candidates = np.minimum(num_update_per_iteration, num_candidates)
-    masked_coeffs = np.where(is_update_candidate, np.abs(coeffs), 0.)
-    sorted_coeffs = -np.sort(-masked_coeffs)
-    coeff_mins = np.where(num_candidates < num_basis,
-                          sorted_coeffs[np.arange(num_loops), num_candidates],
+    masked_compos = np.where(is_update_candidate, np.abs(compos), 0.)
+    sorted_compos = -np.sort(-masked_compos)
+    compo_mins = np.where(num_candidates < num_basis,
+                          sorted_compos[np.arange(num_loops), num_candidates],
                           0.)
-    selected = (masked_coeffs > coeff_mins[:, None])
+    selected = (masked_compos > compo_mins[:, None])
 
     log_com = np.zeros_like(com)
     np.log10(com, out=log_com, where=(com > 0.))
-    log_cr = np.ones_like(coeff_ratio) * np.amin(coeff_ratio, where=(coeff_ratio > 0.), initial=np.amax(coeff_ratio))
-    np.log10(coeff_ratio, out=log_cr, where=(coeff_ratio > 0.))
+    log_cr = np.ones_like(compo_ratio) * np.amin(compo_ratio, where=(compo_ratio > 0.), initial=np.amax(compo_ratio))
+    np.log10(compo_ratio, out=log_cr, where=(compo_ratio > 0.))
     
     if basis_indices is not None:
         tuple_of_indices = tuple(np.array(index[i] for index in basis_indices) for i in range(len(basis_indices[0])))
@@ -201,7 +178,7 @@ def inspect_leastsq_minimization(
     for iloop in range(num_loops):
         if basis_indices is None:
             # Make a list of tuples from a tuple of arrays
-            indices_loop = np.nonzero(np.amax(np.abs(ilogu_coeffs[iloop]), axis=0) > threshold)[0] + 1
+            indices_loop = np.nonzero(np.amax(np.abs(ilogu_compos[iloop]), axis=0) > threshold)[0] + 1
             indices_loop = np.concatenate([np.array([0]), indices_loop])
         else:
             indices_loop = basis_indices
