@@ -190,35 +190,12 @@ dependencies given by cosine and sine functions, respectively.
 # and exploit such cases in the future.
 
 from typing import Any, Dict, Sequence, List, Tuple, Callable, Optional, Union, Hashable
-import copy
 from dataclasses import dataclass
 import numpy as np
 import qutip as qtp
 
 from .pulse import PulseSequence
-
-def cos_freq(freq):
-    return lambda t, args: np.cos(freq * t)
-
-def sin_freq(freq):
-    return lambda t, args: np.sin(freq * t)
-
-def exp_freq(freq):
-    def fun(t, args):
-        exponent = t * freq
-        return np.cos(exponent) + 1.j * np.sin(exponent)
-    
-    return fun
-
-def scaled_function(scale, fun):
-    return lambda t, args: scale * fun(t, args)
-
-def prod_function(fun1, fun2):
-    return lambda t, args: fun1(t, args) * fun2(t, args)
-
-def conj_function(fun):
-    return lambda t, args: fun(t, args).conjugate()
-
+from .drive import DriveTerm, cos_freq, sin_freq
 
 REL_FREQUENCY_EPSILON = 1.e-7
 
@@ -236,182 +213,6 @@ class QuditParams:
     frame: Frame
 
 
-@dataclass
-class DriveData:
-    r"""Data class representing a drive.
-    
-    Args:
-        frequency: Carrier frequency of the drive. None is allowed if amplitude is a PulseSequence
-            that starts with SetFrequency.
-        amplitude: Function :math:`r(t)`.
-        is_real: Set to True if `amplitude` is a str or a callable and is known to take
-            only real values.
-    """
-    frequency: Optional[float] = None
-    amplitude: Union[float, complex, str, np.ndarray, PulseSequence, Callable, None] = 1.+0.j
-    is_real: bool = False
-    
-    def generate_fn(frame_frequency, drive_base):
-        r"""Generate the drive functions with respect to the given frame.
-        
-        The drive Hamiltonian for a given channel :math:`j`, qudit :math:`k`, level :math:`l` is
-        
-        .. math::
-        
-            \tilde{H}_{\mathrm{d}}|_{jk}^{l} = \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i (\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right) \left( e^{i (\xi_k^{l} t + \phi_k^{l})} \sqrt{l+1} |l + 1 \rangle_k \langle l |_k  + \mathrm{h.c.} \right).
-        
-        Let
-        
-        .. math::
-
-            R_{jk}(t) = \alpha_{jk} e^{i\rho_{jk}} \frac{\Omega_j}{2} r_j(t)
-            
-        and
-        
-        .. math::
-
-            D^{l-}_{jk}(t) & = R_{jk}(t) e^{-i (\nu_j - \xi_k^{l}) t}, \\
-            D^{l+}_{jk}(t) & = R_{jk}(t) e^{-i (\nu_j + \xi_k^{l}) t}.
-            
-        Also let
-        
-        .. math::
-        
-            A^{l}_{k} = e^{-i \phi^{l}_{k}} \sqrt{l + 1} | l \rangle_k \langle l + 1 |_k
-            
-        and
-        
-        .. math::
-
-            X^{l}_{k} & = A^{l\dagger}_{k} + A^{l}_{k} \\
-            Y^{l}_{k} & = i(A^{l\dagger}_{k} - A^{l}_{k})
-            
-        Then the drive term above is
-        
-        .. math::
-        
-            \tilde{H}_{\mathrm{d}}|_{jk}^{l} = & D^{l-}_{jk}(t) A^{l\dagger}_{k} + [D^{l-}_{jk}(t)]^* A^{l}_{k} + [D^{l+}_{jk}(t)]^* A^{l\dagger}_{k} + D^{l+}_{jk}(t) A^{l}_{k} \\
-                                             = & \mathrm{Re}[D^{l-}_{jk}(t) + D^{l+}_{jk}(t)] X^{l}_{k} + \mathrm{Im}[D^{l-}_{jk}(t) - D^{l+}_{jk}(t)] Y^{l}_{k}.
-                                             
-        TODO mention split XY if phase of R is constant
-        
-        
-        Args:
-            frame_frequency: Frame frequency :math:`\xi_k^{l}`.
-            drive_base: Factor :math:`\alpha_{jk} e^{i \rho_{jk}} \frac{\Omega_j}{2}`.
-            
-        Returns:
-            A 5-tuple where the first element is the 
-        """
-        if isinstance(self.amplitude, PulseSequence):
-            return self.amplitude.generate_fn(frame_frequency, drive_base, initial_frequency=self.frequency)
-        
-        if self.frequency is None:
-            raise RuntimeError('Drive frequency not set')
-        
-        detuning = self.frequency - frame_frequency
-        supertuning = self.frequency + frame_frequency
-
-        is_resonant = (abs(detuning) < REL_FREQUENCY_EPSILON * frame.frequency)
-        
-        amplitude = self.amplitude
-        if isinstance(amplitude, str):
-            # If this is actually a static expression, convert to complex
-            try:
-                amplitude = eval(amplitude)
-            except:
-                pass
-            
-        if isinstance(amplitude, (float, complex)):
-            # static envelope
-            
-            envelope = amplitude * drive_base
-            
-            is_real = envelope.imag == 0.
-
-            if is_resonant:
-                fn_1 = envelope.real
-                if is_real:
-                    fn_2 = None
-                else:
-                    fn_2 = -envelope.imag
-            else:
-                fn_1 = f'{envelope.real} * cos({detuning} * t)'
-                fn_2 = f'{envelope.real} * sin({detuning} * t)'
-                if not is_real:
-                    fn_1 += f' + ({envelope.imag}) * sin({detuning} * t)'
-                    fn_2 += f' - ({envelope.imag}) * cos({detuning} * t)'
-                    
-            fn_3 = f'{envelope.real} * cos({supertuning} * t)'
-            fn_4 = f'{envelope.real} * sin(-{supertuning} * t)'
-            if not is_real:
-                fn_3 += f' + ({envelope.imag}) * sin({supertuning} * t)'
-                fn_4 += f' + ({envelope.imag}) * cos({supertuning} * t)'
-                    
-            split = 'xy'
-            
-        else:
-            # dynamic envelope
-
-            if isinstance(amplitude, str):
-                envelope = f'({drive_base} * ({amplitude}))'
-
-                is_real = self.is_real
-
-                conj = f'{envelope}.conjugate()'
-                cos = f'cos({detuning} * t)'
-                sin = f'sin({detuning} * t)'
-                exp_n = f'(cos({detuning} * t) - 1.j * sin({detuning} * t))'
-                exp_p = f'(cos({detuning} * t) + 1.j * sin({detuning} * t))'
-                prod = lambda env, f: f'{env} * {f}'            
-
-            if isinstance(amplitude, np.ndarray):
-                envelope = amplitude * drive_base
-
-                is_real = np.all(envelope.imag == 0.)
-
-                conj = envelope.conjugate()
-                cos = cos_freq(detuning)
-                sin = sin_freq(detuning)
-                exp_n = exp_freq(-detuning)
-                exp_p = exp_freq(detuning)
-                prod = lambda env, f: scaled_function(env, f)
-
-            elif callable(amplitude):
-                envelope = scaled_function(drive_base, amplitude)
-
-                is_real = self.is_real
-
-                conj = conj_function(envelope)
-                cos = cos_freq(detuning)
-                sin = sin_freq(detuning)
-                exp_n = exp_freq(-detuning)
-                exp_p = exp_freq(detuning)
-                prod = lambda env, f: prod_function(env, f)
-                
-            if is_real:
-                if is_resonant:
-                    fn_1 = envelope
-                    fn_2 = None
-                else:
-                    fn_1 = prod(envelope, cos)
-                    fn_2 = prod(envelope, sin)
-                
-                split = 'xy'
-                
-            else:
-                if is_resonant:
-                    fn_1 = envelope
-                    fn_2 = conj
-                else:
-                    fn_1 = prod(envelope, exp_n)
-                    fn_2 = prod(conj, exp_p)
-                    
-                split = 'ca'
-
-        return split, fn_1, fn_2, abs(self.frequency - frame_frequency)
-    
-    
 class HamiltonianGenerator:
     r"""Generator for a Hamiltonian with static transverse couplings and external drive terms.
 
@@ -539,7 +340,7 @@ class HamiltonianGenerator:
         qudit_id: Hashable,
         frequency: Optional[float] = None,
         amplitude: Union[float, complex, str, np.ndarray, PulseSequence, Callable, None] = 1.+0.j,
-        is_real: bool = False
+        phase: Optional[float] = None
     ) -> None:
         r"""Add a drive term.
         
@@ -548,11 +349,11 @@ class HamiltonianGenerator:
             frequency: Carrier frequency of the drive. None is allowed if amplitude is a PulseSequence
                 that starts with SetFrequency.
             amplitude: Function `r(t)`.
-            is_real: Set to True if `amplitude` is a str or a callable and is known to take
-                only real values.
+            phase: The phase value of `amplitude` when it is a str or a callable and is known to have
+                a constant phase. None otherwise.
         """
-        self.drive[self.qudit_params[qudit_id]] = DriveData(frequency=frequency, amplitude=amplitude,
-                                                            is_real=is_real)
+        self.drive[self.qudit_params[qudit_id]] = DriveTerm(frequency=frequency, amplitude=amplitude,
+                                                            phase=phase)
         
     @property
     def max_frequency(self) -> float:
@@ -773,26 +574,27 @@ class HamiltonianGenerator:
                         continue
                         
                 # Hamiltonian term can be split in xy (static and/or real envelope) or creation/annihilation (otherwise)
-                split, fn_1, fn_2, term_max_frequency = drive.generate_fn(frame_frequency, drive_base)
+                fn_x, fn_y, term_max_frequency = drive.generate_fn(frame_frequency, drive_base, rwa)
                     
-                if split == 'xy':
-                    h_x = creation_op.dag() + creation_op
-                    h_y = 1.j * (creation_op.dag() - creation_op)
+                h_x = creation_op + creation_op.dag()
+                h_y = 1.j * (creation_op - creation_op.dag())
 
-                    if isinstance(fn_1, (float, complex)):
-                        hstatic += fn_1 * h_x
-                        if fn_2 is not None:
-                            hstatic += fn_2 * h_y
-
-                    else:
-                        hdrive.append([h_x, fn_1])
-                        if fn_2 is not None:
-                            hdrive.append([h_y, fn_2])
-                            
-                else:
-                    hdrive.append([creation_op, fn_1])
-                    hdrive.append([creation_op.dag(), fn_2])
+                if isinstance(fn_x, (float, complex)):
+                    if fn_x != 0.:
+                        hstatic += fn_x * h_x
+                    if fn_y != 0.:
+                        hstatic += fn_y * h_y
                         
+                elif isinstance(fn_x, np.ndarray):
+                    if np.any(fn_x != 0.):
+                        hdrive.append([h_x, fn_x])
+                    if np.any(fn_y != 0.):
+                        hdrive.append([h_y, fn_y])
+
+                else:
+                    hdrive.append([h_x, fn_x])
+                    hdrive.append([h_y, fn_y])
+                            
                 self._max_frequency_drive = max(self._max_frequency_drive, term_max_frequency)
                 
         if hstatic != qtp.Qobj():

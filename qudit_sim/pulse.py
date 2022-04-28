@@ -13,34 +13,32 @@ s = 1.
 ns = 1.e-9
 
 class PulseSequence(list):
-    def generate_fn(self, reference_frequency, drive_base, initial_frequency=None, reference_phase=0.):
-        ## TODO RETURN split, fn_1, fn_2, max_frequency
-        ## split is xy if all pulses are real. In this case fn_1 is pulse * cos and fn_2 is pulse * sin
-        ## If further the frequency is constant and resonant with the frame, set fn_2 to None
-        ## Else split is ca and fn_1 is pulse * exp(-detuning * t), fn_2 is conjugate
-        ## Allow initial frequency to be None if the first instruction is SetFrequency
-        
+    def generate_fn(self, reference_frequency, drive_base, rwa, initial_frequency=None):
         funclist = []
         timelist = []
         
         def modulate(frequency, phase_offset, time, pulse):
             detuning = frequency - reference_frequency
-            offset = phase_offset - reference_phase
             def fun(t, args):
-                return drive_base * np.exp(-1.j * detuning * t + offset) * pulse(t - time, args)
+                phase = -detuning * t + phase_offset
+                return drive_base * pulse(t - time, args) * (np.cos(phase) - 1.j * np.sin(phase))
             
             return fun
 
         frequency = initial_frequency
+        max_frequency = 0. if frequency is None else frequency
         phase_offset = 0.
         time = 0.
+        
         for inst in self:
             if isinstance(inst, ShiftFrequency):
                 frequency += inst.value
+                max_frequency = max(max_frequency, frequency)
             elif isinstance(inst, ShiftPhase):
                 phase_offset += inst.value
             elif isinstance(inst, SetFrequency):
                 frequency = inst.value
+                max_frequency = max(max_frequency, frequency)
             elif isinstance(inst, SetPhase):
                 phase_offset = inst.value - frequency * time
             elif isinstance(inst, Delay):
@@ -60,7 +58,10 @@ class PulseSequence(list):
             condlist = [((t >= start) & (t < end)) for start, end in zip(timelist[:-1], timelist[1:])]
             return np.piecewise(tlist, condlist, funclist, args)
         
-        return fn
+        fn_x = lambda t, args: fn(t, args).real
+        fn_y = lambda t, args: fn(t, args).imag
+        
+        return fn_x, fn_y, max_frequency
 
 
 class Pulse:
