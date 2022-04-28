@@ -140,7 +140,7 @@ class DriveTerm:
             fn_x, fn_y = self._generate_fn_rwa(amplitude, frame_frequency, drive_base)
             max_freq = abs(self.frequency - frame_frequency)
         else:
-            fn_x, fn_y self._generate_fn_full(amplitude, frame_frequency, drive_base)
+            fn_x, fn_y = self._generate_fn_full(amplitude, frame_frequency, drive_base)
             max_freq = self.frequency + frame_frequency
             
         return fn_x, fn_y, max_freq

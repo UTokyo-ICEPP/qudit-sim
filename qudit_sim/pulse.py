@@ -13,15 +13,25 @@ s = 1.
 ns = 1.e-9
 
 class PulseSequence(list):
-    def generate_fn(self, reference_frequency, drive_base, rwa, initial_frequency=None):
+    def generate_fn(self, reference_frequency, drive_base, rwa=True, initial_frequency=None):
         funclist = []
         timelist = []
         
-        def modulate(frequency, phase_offset, time, pulse):
-            detuning = frequency - reference_frequency
-            def fun(t, args):
-                phase = -detuning * t + phase_offset
-                return drive_base * pulse(t - time, args) * (np.cos(phase) - 1.j * np.sin(phase))
+        def modulate(frequency, phase_offset, time, pulse, rwa):
+            if rwa:
+                detuning = frequency - reference_frequency
+                def fun(t, args):
+                    phase = -detuning * t + phase_offset
+                    return drive_base * pulse(t - time, args) * (np.cos(phase) - 1.j * np.sin(phase))
+                
+            else:
+                def fun(t, args):
+                    double_envelope = 2. * drive_base * pulse(t - time, args)
+                    prefactor = (double_envelope.real * np.cos(frequency * t)
+                                 + double_envelope.imag * np.sin(frequency * t))
+                    
+                    return prefactor * (np.cos(reference_frequency * t)
+                                        + 1.j * np.sin(reference_frequency * t))
             
             return fun
 

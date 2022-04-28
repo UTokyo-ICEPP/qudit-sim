@@ -9,3 +9,4 @@ API Reference
    :recursive:
    
    hamiltonian
+   drive
