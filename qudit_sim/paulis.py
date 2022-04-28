@@ -2,8 +2,6 @@ from typing import Optional, Any
 import string
 import numpy as np
 
-from .utils import matrix_ufunc
-
 def get_num_paulis(pauli_dim: int) -> int:
     return pauli_dim ** 2
 

@@ -1,8 +1,201 @@
-from typing import Any, Dict, Sequence, List, Tuple, Callable, Optional, Union
+r"""
+======================================================================================
+Hamiltonian for a statically coupled multi-qudit system (:mod:`qudit_sim.hamiltonian`)
+======================================================================================
+
+.. currentmodule:: qudit_sim.hamiltonian
+
+Fundamentals
+============
+
+The full Hamiltonian of an :math:`n`-qudit system with static coupling and drive terms is
+
+.. math::
+
+    H = H_0 + H_{\mathrm{int}} + H_{\mathrm{d}},
+
+where
+
+.. math::
+
+    H_0 & = \sum_{j=1}^{n} \left[ \omega_j b_j^{\dagger} b_j + \frac{\Delta_j}{2} b_j^{\dagger} b_j (b_j^{\dagger} b_j - 1) \right]
+          = \sum_{j=1}^{n} \left[ \left( \omega_j - \frac{\Delta_j}{2} \right) N_j + \frac{\Delta_j}{2} N_j^2 \right], \\
+    H_{\mathrm{int}} & = \sum_{j<k} J_{jk} \left( b_j^{\dagger} b_k + b_j b_k^{\dagger} \right), \\
+    H_{\mathrm{d}} & = \sum_{jk} \alpha_{jk} \Omega_j \left( p_j(t) \cos (\nu_j t - \rho_{jk}) + q_j(t) \sin (\nu_j t - \rho_{jk}) \right)
+                       \left( b_k^{\dagger} + b_k \right) \\
+                   & = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i(\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right) \left( b_k^{\dagger} + b_k \right)
+
+with :math:`b_j^{\dagger}` and :math:`b_j` the creation and annihilation operators for qudit :math:`j` and
+
+- :math:`\omega_j`: Qubit frequency of qudit :math:`j`
+- :math:`\Delta_j`: Anharmonicity of qudit :math:`j`
+- :math:`J_{jk}`: Coupling between qudits :math:`j` and :math:`k`
+- :math:`\Omega_j`: Base amplitude of drive in channel :math:`j`
+- :math:`p_j (t), q_j (t)`: I and Q components of the pulse envelope of drive in channel :math:`j`, and :math:`r_j (t) = p_j(t) + iq_j(t)`
+- :math:`\nu_j`: Local oscillator frequency of drive in channel :math:`j`
+- :math:`\alpha_{jk}`: Crosstalk attenuation factor of drive in channel :math:`j` sensed by qudit :math:`k`
+- :math:`\rho_{jk}`: Crosstalk phase shift of drive in channel :math:`j` sensed by qudit :math:`k`.
+
+When considering more than a single drive frequency per channel, it can be more convenient to express
+the drive Hamiltonian in the frequency domain:
+
+.. math::
+
+    H_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \int d\nu \left( \tilde{r}_j(\nu) e^{-i (\nu t - \rho_{jk})} + \mathrm{c.c.} \right) \left( b_k^{\dagger} + b_k \right)
+
+Change of frame
+===============
+
+Qudit frame
+-----------
+
+We move to the qudit frame through a transformation with :math:`U_q := e^{i H_0 t}`:
+
+.. math::
+
+    \tilde{H} & := U_q H U_q^{\dagger} + i \dot{U_q} U_q^{\dagger} \\
+    & = U_q (H_{\mathrm{int}} + H_{\mathrm{d}}) U_q^{\dagger} =: \tilde{H}_{\mathrm{int}} + \tilde{H}_{\mathrm{d}}.
+
+:math:`\tilde{H}` is the generator of time evolution for state :math:`U_q |\psi\rangle`:
+
+.. math::
+
+    i \frac{\partial}{\partial t} U_q |\psi\rangle & = (i \dot{U}_q + U_q H) |\psi\rangle \\
+                                                   & = \tilde{H} U_q |\psi\rangle.
+
+To write down :math:`\tilde{H}_{\mathrm{int}}` and :math:`\tilde{H}_{\mathrm{d}}` in terms of :math:`\{b_j\}_j` and :math:`\{N_j\}_j`,
+we first note that :math:`U_q` can be factored into commuting subsystem unitaries:
+
+.. math::
+
+    U_q = \prod_j \exp \left\{ i \left[\left( \omega_j - \frac{\Delta_j}{2} \right) N_j + \frac{\Delta_j}{2} N_j^2 \right] t \right\} =: \prod_j e^{i h_j t}.
+
+Each :math:`h_j` commutes with :math:`b_k` and :math:`b_k^{\dagger}` if :math:`k \neq j`, so
+
+.. math::
+
+    \tilde{H}_{\mathrm{int}} & = \sum_{j<k} J_{jk} \left( \tilde{b}_j^{\dagger} \tilde{b}_k + \tilde{b}_j \tilde{b}_k^{\dagger} \right) \\
+    \tilde{H}_{\mathrm{d}} & = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i(\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right) \left( \tilde{b}_k^{\dagger} + \tilde{b}_k \right)
+    
+where
+
+.. math::
+
+    \tilde{b}_{j} & = e^{i h_j t} b_j e^{-i h_j t}, \\
+    \tilde{b}_{j}^{\dagger} & = e^{i h_j t} b_j^{\dagger} e^{-i h_j t}.
+
+By definition :math:`b_j N_j = (N_j + 1) b_j`, which implies
+
+.. math::
+
+    b_j e^{-i h_j t} = \exp \left\{ -i \left[\left( \omega_j - \frac{\Delta_j}{2} \right) (N_j + 1) + \frac{\Delta_j}{2} (N_j + 1)^2) \right] t \right\} b_j
+    
+and therefore
+
+.. math::
+
+    \tilde{b}_{j} & = \exp \left\{ i \left[\left( \omega_j - \frac{\Delta_j}{2} \right) (N_j - (N_j + 1)) + \frac{\Delta_j}{2} (N_j^2 - (N_j + 1)^2) \right] t \right\} b_j \\
+                  & = e^{-i(\omega_j + \Delta_j N_j) t} b_j.
+
+Similarly, :math:`b_j^{\dagger} N_j = (N_j - 1) b_j^{\dagger}` leads to
+
+.. math::
+
+    \tilde{b}_{j}^{\dagger} & = \exp \left\{ i \left[\left( \omega_j - \frac{\Delta_j}{2} \right) (N_j - (N_j - 1)) + \frac{\Delta_j}{2} (N_j^2 - (N_j - 1)^2) \right] t \right\} b_j^{\dagger} \\
+                  & = e^{i(\omega_j + \Delta_j (N_j - 1)) t} b_j^{\dagger}.
+
+The interaction Hamiltonian in the qudit frame is therefore
+
+.. math::
+
+    \tilde{H}_{\mathrm{int}} & = \sum_{j<k} J_{jk} \left( e^{i (\omega_j - \omega_k) t} e^{i [\Delta_j (N_j - 1) - \Delta_k N_k] t} b_j^{\dagger} b_k + \mathrm{h.c.} \right) \\
+                             & = \sum_{j<k} J_{jk} \left( e^{i (\omega_j - \omega_k) t} \sum_{lm} e^{i (\Delta_j l - \Delta_k m) t} \sqrt{(l+1)(m+1)} | l + 1 \rangle_j \langle l |_j \otimes | m \rangle_k \langle m + 1 |_k + \mathrm{h.c.} \right).
+    
+In the last line, we used the expansion of the annihilation operator :math:`b_j = \sum_{l} \sqrt{l+1} | l \rangle_j \langle l + 1 |_j` and its Hermitian conjugate.
+
+The drive Hamiltonian in the qudit frame is
+
+.. math::
+
+    \tilde{H}_{\mathrm{d}} & = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i(\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right) \left( e^{i(\omega_k + \Delta_k (N_k - 1))t} b_k^{\dagger} + \mathrm{h.c.} \right) \\
+                           & = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i(\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right) \sum_l \left( e^{i \omega_k t} e^{i \Delta_k l t} \sqrt{l+1} | l + 1 \rangle_k \langle l |_k + \mathrm{h.c.} \right).
+    
+General frame
+-------------
+
+We can move to an arbitrary frame specifying the frequency and phase offset for each level gap of each qudit. Let for qudit :math:`j` the frequency
+and the phase offset between level :math:`l` and :math:`l+1` be :math:`\xi_{j}^{l}` and :math:`\phi_{j}^{l}`, and :math:`\Xi_{j}^{l} := \sum_{m<l} \xi_{j}^{m}`,
+:math:`\Phi_{j}^{l} := \sum_{m<l} \phi_{j}^{m}`. Then the transformation unitary is
+
+.. math::
+
+    U_f := \exp \left[ i \sum_j \sum_l \left( \Xi_j^l t + \Phi_j^{l} \right) |l\rangle_j \langle l |_j \right].
+
+:math:`U_f` commutes with the free Hamiltonian :math:`H_0` but :math:`i \dot{U}_f U_f^{\dagger} \neq -H_0` in general, so
+
+.. math::
+
+    \tilde{H} = U_f H U_f^{\dagger} + i \dot{U_f} U_f^{\dagger} = H_{\mathrm{diag}} + \tilde{H}_{\mathrm{int}} + \tilde{H}_{\mathrm{d}}.
+    
+The three terms can be expressed in terms of individual qudit levels as
+
+.. math::
+
+    H_{\mathrm{diag}} & = \sum_{j} \sum_{l} \left[ \left( \omega_j - \frac{\Delta_j}{2} \right) l + \frac{\Delta_j}{2} l^2 - \Xi_j^{l} \right] |l\rangle_j \langle l|_j, \\
+    \tilde{H}_{\mathrm{int}} & = \sum_{j<k} J_{jk} \sum_{lm} \left( e^{i [(\xi_j^{l} - \xi_{k}^{m}) t + (\phi_j^{l} - \phi_k^{m})]} \sqrt{(l+1)(m+1)} |l+1\rangle_j \langle l|_j \otimes |m\rangle_k \langle m+1|_k + \mathrm{h.c.} \right), \\
+    \tilde{H}_{\mathrm{d}} & = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i (\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right) \sum_l \left( e^{i (\xi_k^{l} t + \phi_k^{l})} \sqrt{l+1} |l + 1 \rangle_k \langle l |_k  + \mathrm{h.c.} \right).
+
+Rotating-wave approximation
+---------------------------
+
+When :math:`|\nu_j + \xi_k^l| \gg |\nu_j - \xi_k^l|` for all :math:`j, k, l`, we can apply the rotating-wave approximation (RWA) to the drive Hamiltonian and ignore
+the fast-oscillating terms:
+
+.. math::
+
+    \bar{H}_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{i \rho_{jk}} \sum_l e^{-i (\epsilon_{jk}^l t - \phi_{k}^l)} \sqrt{l+1} |l+1\rangle_k \langle l |_k + \mathrm{h.c.} \right),
+
+where :math:`\epsilon_{jk}^l := \nu_j - \xi_k^l`.
+
+The RWA drive Hamiltonian in the frequency domain is (assuming :math:`\tilde{r}_j` has support only around the frame frequencies)
+
+.. math::
+
+    \bar{H}_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \int d\nu \left( \tilde{r}_j(\nu) e^{i \rho_{jk}} \sum_l e^{-i [(\nu - \xi_k^l) t - \phi_{k}^l]} |l+1\rangle_k \langle l |_k + \mathrm{h.c.} \right).
+
+
+
+QuTiP implementation
+====================
+
+Time-dependent Hamiltonian in QuTiP is represented by a list of two-lists `[H, c(t)]` where `H` is a static Qobj and
+`c(t)` is the time-dependent coefficient of `H`. There must be one such two-list per distinct time dependency.
+As apparent from above, in the frame-transformed interaction Hamiltonian,
+each level combination of each pair of coupled qudits has its own frequency. Similarly, the drive Hamiltonian has a
+distinct frequency for each level of each qudit. Therefore the QuTiP Hamiltonian list typically contains a large number
+of entries.
+
+While `c(t)` can be a complex function (and therefore `H` be a non-Hermitian matrix), having `c(t)` real and `H` Hermitian
+seems to be advantageous in terms of calculation speed. Therefore, in our implementation, the Hamiltonian terms are split
+into symmetric (e.g. :math:`|l+1\rangle \langle l| + |l\rangle \langle l+1|`) and antisymmetric
+(e.g. :math:`i(|l+1\rangle \langle l| - |l\rangle \langle l+1|)`) parts whenever possible, with the corresponding time
+dependencies given by cosine and sine functions, respectively.
+"""
+
+# TODO: Qubit optimization
+
+# When only considering qubits, anharmonicity terms are dropped, making the formulae above somewhat simpler. In particular,
+# when one or more drives are resonant with qubit frequencies, some terms in the interaction and drive Hamiltonians
+# will have common frequencies (i.e. :math:`\delta_{jk}` and `\epsilon_{kj}` coincide). We should look into how to detect
+# and exploit such cases in the future.
+
+from typing import Any, Dict, Sequence, List, Tuple, Callable, Optional, Union, Hashable
 import copy
 from dataclasses import dataclass
 import numpy as np
 import qutip as qtp
+
+from .pulse import PulseSequence
 
 def cos_freq(freq):
     return lambda t, args: np.cos(freq * t)
@@ -34,24 +227,90 @@ class Frame:
     frequency: Optional[np.ndarray] = None
     phase: Optional[np.ndarray] = None
 
+
 @dataclass
 class QuditParams:
-    qid: int
     qubit_frequency: float
     anharmonicity: float
     drive_amplitude: float
     frame: Frame
 
-    
+
 @dataclass
 class DriveData:
-    frequency: float
-    amplitude: Union[float, complex, str, np.ndarray, Callable, None] = 1.+0.j
-    sequence: Optional[PulseSequence] = None
+    r"""Data class representing a drive.
+    
+    Args:
+        frequency: Carrier frequency of the drive. None is allowed if amplitude is a PulseSequence
+            that starts with SetFrequency.
+        amplitude: Function :math:`r(t)`.
+        is_real: Set to True if `amplitude` is a str or a callable and is known to take
+            only real values.
+    """
+    frequency: Optional[float] = None
+    amplitude: Union[float, complex, str, np.ndarray, PulseSequence, Callable, None] = 1.+0.j
     is_real: bool = False
     
-    def generate_fn(frame, drive_base):
-        detuning = self.frequency - frame.frequency
+    def generate_fn(frame_frequency, drive_base):
+        r"""Generate the drive functions with respect to the given frame.
+        
+        The drive Hamiltonian for a given channel :math:`j`, qudit :math:`k`, level :math:`l` is
+        
+        .. math::
+        
+            \tilde{H}_{\mathrm{d}}|_{jk}^{l} = \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i (\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right) \left( e^{i (\xi_k^{l} t + \phi_k^{l})} \sqrt{l+1} |l + 1 \rangle_k \langle l |_k  + \mathrm{h.c.} \right).
+        
+        Let
+        
+        .. math::
+
+            R_{jk}(t) = \alpha_{jk} e^{i\rho_{jk}} \frac{\Omega_j}{2} r_j(t)
+            
+        and
+        
+        .. math::
+
+            D^{l-}_{jk}(t) & = R_{jk}(t) e^{-i (\nu_j - \xi_k^{l}) t}, \\
+            D^{l+}_{jk}(t) & = R_{jk}(t) e^{-i (\nu_j + \xi_k^{l}) t}.
+            
+        Also let
+        
+        .. math::
+        
+            A^{l}_{k} = e^{-i \phi^{l}_{k}} \sqrt{l + 1} | l \rangle_k \langle l + 1 |_k
+            
+        and
+        
+        .. math::
+
+            X^{l}_{k} & = A^{l\dagger}_{k} + A^{l}_{k} \\
+            Y^{l}_{k} & = i(A^{l\dagger}_{k} - A^{l}_{k})
+            
+        Then the drive term above is
+        
+        .. math::
+        
+            \tilde{H}_{\mathrm{d}}|_{jk}^{l} = & D^{l-}_{jk}(t) A^{l\dagger}_{k} + [D^{l-}_{jk}(t)]^* A^{l}_{k} + [D^{l+}_{jk}(t)]^* A^{l\dagger}_{k} + D^{l+}_{jk}(t) A^{l}_{k} \\
+                                             = & \mathrm{Re}[D^{l-}_{jk}(t) + D^{l+}_{jk}(t)] X^{l}_{k} + \mathrm{Im}[D^{l-}_{jk}(t) - D^{l+}_{jk}(t)] Y^{l}_{k}.
+                                             
+        TODO mention split XY if phase of R is constant
+        
+        
+        Args:
+            frame_frequency: Frame frequency :math:`\xi_k^{l}`.
+            drive_base: Factor :math:`\alpha_{jk} e^{i \rho_{jk}} \frac{\Omega_j}{2}`.
+            
+        Returns:
+            A 5-tuple where the first element is the 
+        """
+        if isinstance(self.amplitude, PulseSequence):
+            return self.amplitude.generate_fn(frame_frequency, drive_base, initial_frequency=self.frequency)
+        
+        if self.frequency is None:
+            raise RuntimeError('Drive frequency not set')
+        
+        detuning = self.frequency - frame_frequency
+        supertuning = self.frequency + frame_frequency
 
         is_resonant = (abs(detuning) < REL_FREQUENCY_EPSILON * frame.frequency)
         
@@ -80,8 +339,14 @@ class DriveData:
                 fn_1 = f'{envelope.real} * cos({detuning} * t)'
                 fn_2 = f'{envelope.real} * sin({detuning} * t)'
                 if not is_real:
-                    fn_1 += f' + {envelope.imag} * sin({detuning} * t)'
-                    fn_2 += f' - {envelope.imag} * cos({detuning} * t)'
+                    fn_1 += f' + ({envelope.imag}) * sin({detuning} * t)'
+                    fn_2 += f' - ({envelope.imag}) * cos({detuning} * t)'
+                    
+            fn_3 = f'{envelope.real} * cos({supertuning} * t)'
+            fn_4 = f'{envelope.real} * sin(-{supertuning} * t)'
+            if not is_real:
+                fn_3 += f' + ({envelope.imag}) * sin({supertuning} * t)'
+                fn_4 += f' + ({envelope.imag}) * cos({supertuning} * t)'
                     
             split = 'xy'
             
@@ -144,116 +409,19 @@ class DriveData:
                     
                 split = 'ca'
 
-        return split, fn_1, fn_2
+        return split, fn_1, fn_2, abs(self.frequency - frame_frequency)
     
     
-class RWAHamiltonianGenerator:
-    r"""Rotating-wave approximation Hamiltonian in the qudit frame.
+class HamiltonianGenerator:
+    r"""Generator for a Hamiltonian with static transverse couplings and external drive terms.
 
-    **Full Hamiltonian:**
-    
-    The full Hamiltonian of the :math:`n`-qudit system is
-    
-    .. math::
-    
-        H = H_0 + H_{\mathrm{int}} + H_{\mathrm{d}},
-        
-    where
-    
-    .. math::
-    
-        H_0 & = \sum_{j=0}^{n} \left[ \omega_j b_j^{\dagger} b_j + \frac{\Delta_j}{2} b_j^{\dagger} b_j (b_j^{\dagger} b_j - 1) \right] \\
-        & = \sum_{j=0}^{n} \left[ \left( \omega_j - \frac{\Delta_j}{2} \right) N_j + \frac{\Delta_j}{2} N_j^2 \right],
-        
-        H_{\mathrm{int}} = \sum_{jk} J_{jk} \left( b_j^{\dagger} b_k + b_j b_k^{\dagger} \right),
-        
-        H_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \Omega_j \left( p_j(t) \cos (\nu_j t) + q_j(t) \sin (\nu_j t) \right) \left( e^{i\phi_{jk}} b_k^{\dagger} + e^{-i\phi_{jk}} b_k \right),
-        
-    with
-    
-    - :math:`\omega_j`: Frequency of the :math:`j`th qudit
-    - :math:`\Delta_j`: Anharmonicity of the :math:`j`th qudit
-    - :math:`J_{jk}`: Coupling between qudits :math:`j` and :math:`k`
-    - :math:`\alpha_{jk}`: Crosstalk attenuation factor of drive in channel :math:`j` sensed by qudit :math:`k`
-    - :math:`\phi_{jk}`: Crosstalk phase shift of drive in channel :math:`j` sensed by qudit :math:`k`
-    - :math:`\Omega_j`: Base amplitude of drive in channel :math:`j`
-    - :math:`p_j (t), q_j (t)`: I and Q components of the pulse envelope of drive in channel :math:`j`
-    - :math:`\nu_j`: Local oscillator frequency of drive in channel :math:`j`.
-    
-    When considering more than a single drive frequency per channel, it can be more convenient to express
-    the drive Hamiltonian in the frequency domain:
-    
-    .. math::
-    
-        H_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \Omega_j \int d\nu \left( \tilde{p}_j(\nu) \cos (\nu t) + \tilde{q}_j(\nu) \sin (\nu t) \right) \left( e^{i\phi_{jk}} b_k^{\dagger} + e^{-i\phi_{jk}} b_k \right)
-    
-    **Qudit-frame Hamiltonian with Rotating-wave approximation:**
-    
-    We move to the qudit frame through a transformation with :math:`U_q := e^{i H_0 t}`:
-    
-    .. math::
-    
-        \tilde{H} & := U_q H U_q^{\dagger} + i \dot{U_q} U_q^{\dagger} \\
-        & = U_q (H_{\mathrm{int}} + H_{\mathrm{d}}) U_q^{\dagger} =: \tilde{H}_{\mathrm{int}} + \tilde{H}_{\mathrm{d}}.
-    
-    Using :math:`b N = (N + 1) b` and :math:`b^{\dagger}N = (N - 1) b^{\dagger}`, we have
-
-    .. math::
-    
-        b_j H_0^n = & \left\{ \sum_{k \neq j} \left[ \left( \omega_k - \frac{\Delta_k}{2} \right) N_k + \frac{\Delta_k}{2} N_k^2 \right] \right. \\
-        + \left. \left( \omega_j - \frac{\Delta_j}{2} \right) (N_j + 1) + \frac{\Delta_j}{2} (N_j + 1)^2 \right\}^n b_j \\
-        = & \left[ H_0 + \omega_j + \Delta_j N_j \right]^n b_j,
-
-        b_j^{\dagger} H_0^n = & \left\{ \sum_{k \neq j} \left[ \left( \omega_k - \frac{\Delta_k}{2} \right) N_k + \frac{\Delta_k}{2} N_k^2 \right] \right. \\
-        + \left. \left( \omega_j - \frac{\Delta_j}{2} \right) (N_j - 1) + \frac{\Delta_j}{2} (N_j - 1)^2 \right\}^n b_j^{\dagger} \\
-        = & \left[ H_0 - \omega_j - \Delta_j (N_j - 1) \right]^n b_j^{\dagger}.
-              
-    The interaction Hamiltonian in the qudit frame is therefore
-    
-    .. math::
-    
-        \tilde{H}_{\mathrm{int}} = \sum_{jk} J_{jk} \left( e^{i \delta_{jk} t} e^{i [\Delta_j (N_j - 1) - \Delta_k N_k] t} b_j^{\dagger} b_k \right. \\
-        \left. + e^{-i \delta_{jk} t} e^{-i [\Delta_j N_j - \Delta_k (N_k - 1)] t} b_j b_k^{\dagger} \right).
-
-    The drive Hamiltonian is
-    
-    .. math::
-    
-        \tilde{H}_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \Omega_j \left( p_j(t) \cos (\nu_j t) + q_j(t) \sin (\nu_j t) \right) \left( e^{i (\omega_k t + \phi_{jk})} e^{i \Delta_k (N_k - 1) t} b_k^{\dagger} \right. \\
-        \left. + e^{-i (\omega_k t + \phi_{jk})} e^{-i \Delta_k N_k t} b_k \right),
-    
-    and with the rotating wave approximation (RWA)
-    
-    .. math::
-    
-        \bar{H}_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left[ r_j(t) e^{-i (\epsilon_{jk} t - \phi_{jk})} e^{i \Delta_k (N_k - 1) t} b_k^{\dagger} \right. \\
-        \left. + r^{*}_j(t) e^{i (\epsilon_{jk} t - \phi_{jk})} e^{-i \Delta_k N_k t} b_k \right],
-        
-    where :math:`\epsilon_{jk} := \nu_j - \omega_k` and :math:`r_j(t) := p_j(t) + i q_j(t)`.
-    
-    The RWA drive Hamiltonian in the frequency domain is (assuming :math:`\tilde{p}_j` and :math:`\tilde{q}_j` have
-    support only around the qudit frequencies)
-    
-    .. math::
-    
-        \bar{H}_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \int d\nu \left[ \tilde{r}_j(\nu) e^{-i [(\nu - \omega_k) t - \phi_{jk}]} e^{i \Delta_k (N_k - 1) t} b_k^{\dagger} \right. \\
-        \left. + \tilde{r}^{*}_j(\nu) e^{i [(\nu - \omega_k) t - \phi_{jk}]} e^{-i \Delta_k N_k t} b_k \right].
-    
-    **QuTiP implementation:**
-    
-    Time-dependent Hamiltonian in QuTiP is represented by a two-tuple `(H, c(t))` where `H` is a static Qobj and `c(t)`
-    is the time-dependent coefficient of `H`. This function returns two lists of tuples, corresponding to the 
-    interaction and drive Hamiltonians, with the total list length corresponding to the number of distinct
-    time dependencies in the RWA Hamiltonian :math:`\tilde{H}_{\mathrm{int}} + \bar{H}_{\mathrm{d}}`. Because
-    `c(t)` must be a real function, each returned tuple contains two Qobjs corresponding to the "X"
-    (:math:`\propto b^{\dagger} + b`) and "Y" (:math:`\propto i(b^{\dagger} - b)`) parts of the Hamiltonian.
-        
-    **TODO: Qubit optimization:**
-    
-    When only considering qubits, anharmonicity terms are dropped, making the formulae above somewhat simpler. In particular,
-    when one or more drives are resonant with qubit frequencies, some terms in the interaction and drive Hamiltonians
-    will have common frequencies (i.e. :math:`\delta_{jk}` and `\epsilon_{kj}` coincide). We should look into how to detect
-    and exploit such cases in the future.
+    Args:
+        num_levels: Number of energy levels to consider.
+        qudits: If passing `params` to initialize the Hamiltonian, list of qudit numbers to include.
+        params: Hamiltonian parameters given by IBMQ `backend.configuration().hamiltonian['vars']`, optionally
+            augmented with `'crosstalk'`, which should be a `dict` of form `{(j, k): z}` specifying the crosstalk
+            factor `z` (complex corresponding to :math:`\alpha_{jk} e^{i\rho_{jk}}`) of drive on qudit `j` seen
+            by qudit `k`. `j` and `k` are qudit ids given in `qudits`.
     """
     def __init__(
         self,
@@ -261,16 +429,6 @@ class RWAHamiltonianGenerator:
         qudits: Optional[Union[int, Sequence[int]]] = None,
         params: Optional[Dict[str, Any]] = None
     ) -> None:
-        r"""
-        Args:
-            num_levels: Number of oscillator levels to consider.
-            qudits: List of :math:`n` qudits to include in the Hamiltonian.
-            params: Hamiltonian parameters given by IBMQ `backend.configuration().hamiltonian['vars']`, optionally
-                augmented with `'crosstalk'`, which should be a `dict` of form `{(i, j): z}` specifying the crosstalk
-                factor `z` (complex corresponding to :math:`\alpha_{jk} e^{i\phi_{jk}}`) of drive on qudit `i` seen
-                by qudit `j`. `i` and `j` are qudit ids given in `qudits`.
-        """
-        
         self.num_levels = num_levels
         
         # Makes use of dict order guarantee from python 3.7
@@ -290,7 +448,7 @@ class RWAHamiltonianGenerator:
             qudits = (qudits,)
 
         for q in qudits:
-            self.add_qudit(q, params[f'wq{q}'], params[f'delta{q}'], params[f'omegad{q}'])
+            self.add_qudit(params[f'wq{q}'], params[f'delta{q}'], params[f'omegad{q}'], qudit_id=q)
 
         for q1, q2 in zip(qudits[:-1], qudits[1:]):
             try:
@@ -306,71 +464,99 @@ class RWAHamiltonianGenerator:
             
     def add_qudit(
         self,
-        qudit: int,
         qubit_frequency: float,
         anharmonicity: float,
         drive_amplitude: float,
-        index: Optional[int] = None,
+        qudit_id: Optional[Hashable] = None,
+        position: Optional[int] = None,
         frame_frequency: Optional[np.ndarray] = None,
         frame_phase: Optional[np.ndarray] = None,
     ) -> None:
         """Add a qudit to the system.
+        
+        Args:
+            qubit_frequency: Qubit frequency.
+            anharmonicity: Anharmonicity.
+            drive_amplitude: Base drive amplitude in rad/s.
+            qudit_id: Identifier for the qudit. If None, the position (order of addition) is used.
+            position: If an integer, the qudit is inserted into the specified position.
+            frame_frequency: Frame frequency for all level spacings.
+            frame_phase: Frame phase offset for all level spacings.
         """
-        params = QuditParams(qid=qudit, qubit_frequency=qubit_frequency, anharmonicity=anharmonicity,
+        params = QuditParams(qubit_frequency=qubit_frequency, anharmonicity=anharmonicity,
                              drive_amplitude=drive_amplitude,
                              frame=Frame(frequency=frame_frequency, phase=frame_phase))
+        
+        if qudit_id is None:
+            if position is None:
+                qudit_id = len(self.qudit_params)
+            else:
+                qudit_id = position
+                
+        if qudit_id in self.qudit_params:
+            raise KeyError(f'Qudit id {qudit_id} already exists.')
 
-        if index is None:
-            self.qudit_params[qudit] = params
-        elif index > len(self.qudit_params):
-            raise IndexError(f'Index {index} greater than number of existing parameters')
+        if position is None:
+            self.qudit_params[qudit_id] = params
+        elif position > len(self.qudit_params):
+            raise IndexError(f'Position {position} greater than number of existing parameters')
         else:
-            qudit_params = dict(list(self.qudit_params.items())[:index])
-            qudit_params[qudit] = params
-            qudit_params.update(list(self.qudit_params.items())[index:])
+            qudit_params = dict(list(self.qudit_params.items())[:position])
+            qudit_params[qudit_id] = params
+            qudit_params.update(list(self.qudit_params.items())[position:])
 
             self.qudit_params.clear()
             self.qudit_params.update(qudit_params)
         
     def set_frame(
         self,
-        qudit: int,
+        qudit_id: Hashable,
         frequency: Union[np.ndarray, None],
         phase: Union[np.ndarray, None]
     ) -> None:
-        """Set the rotating frame for the qudit."""
-        self.qudit_params[qudit].frame = Frame(frequency=frequency, phase=phase)
+        """Set the frame for the qudit.
+        
+        The arrays must be of size `num_levels - 1`.
+        """
+        self.qudit_params[qudit_id].frame = Frame(frequency=frequency, phase=phase)
             
-    def add_coupling(self, q1: int, q2: int, value: float) -> None:
+    def add_coupling(self, q1: Hashable, q2: Hashable, value: float) -> None:
+        """Add a coupling term between two qudits."""
         self.coupling[frozenset({self.qudit_params[q1], self.qudit_params[q2]})] = value
             
-    def add_crosstalk(self, source: int, target: int, factor: complex) -> None:
+    def add_crosstalk(self, source: Hashable, target: Hashable, factor: complex) -> None:
+        r"""Add a crosstalk term from the source channel to the target qudit.
+        
+        Args:
+            source: Qudit ID of the source channel.
+            target: Qudit ID of the target qudit.
+            factor: Crosstalk coefficient (:math:`\alpha_{jk} e^{i\rho_{jk}}`).
+        """
         self.crosstalk[(self.qudit_params[source], self.qudit_params[target])] = factor
         
     def add_drive(
         self,
-        qudit: int,
-        frequency: float,
-        amplitude: Union[float, complex, str, np.ndarray, Callable, None] = 1.+0.j,
-        sequence: Optional[PulseSequence] = None,
+        qudit_id: Hashable,
+        frequency: Optional[float] = None,
+        amplitude: Union[float, complex, str, np.ndarray, PulseSequence, Callable, None] = 1.+0.j,
         is_real: bool = False
     ) -> None:
-        """Add a drive term.
+        r"""Add a drive term.
         
         Args:
-            qudit: ID of the qudit to apply the drive to.
-            frequency: Carrier frequency of the drive.
-            amplitude: A constant drive amplitude or an envelope function.
-            sequence: The full pulse sequence. If not None, `amplitude` is ignored.
+            qudit_id: Qudit to apply the drive to.
+            frequency: Carrier frequency of the drive. None is allowed if amplitude is a PulseSequence
+                that starts with SetFrequency.
+            amplitude: Function `r(t)`.
             is_real: Set to True if `amplitude` is a str or a callable and is known to take
                 only real values.
         """
-        self.drive[self.qudit_params[qudit]] = DriveData(frequency=frequency, amplitude=amplitude,
-                                                         sequence=sequence, is_real=is_real)
+        self.drive[self.qudit_params[qudit_id]] = DriveData(frequency=frequency, amplitude=amplitude,
+                                                            is_real=is_real)
         
     @property
     def max_frequency(self) -> float:
-        """Return the maximum frequency appearing in this Hamiltonian."""
+        """Maximum frequency appearing in this Hamiltonian."""
         return max(self._max_frequency_int, self._max_frequency_drive)
     
     @property
@@ -396,10 +582,9 @@ class RWAHamiltonianGenerator:
         Returns:
             A list of Hamiltonian terms that can be passed to qutip.sesolve.
         """
-        
         if tlist is None and self._need_tlist:
             raise RuntimeError('This Hamiltonian must be generated with a tlist')
-        
+            
         hstatic = self.generate_hdiag()
         hint = self.generate_hint(compile_hint=compile_hint)
         hdrive = self.generate_hdrive(rwa=rwa)
@@ -430,6 +615,11 @@ class RWAHamiltonianGenerator:
         return hamiltonian
         
     def generate_hdiag(self) -> qtp.Qobj:
+        """Generate the diagonal term of the Hamiltonian.
+        
+        Returns:
+            A Qobj representing Hdiag. The object may be empty if the qudit frame is used.
+        """
         hdiag = qtp.Qobj()
         
         num_qudits = len(self.qudit_params)
@@ -452,7 +642,15 @@ class RWAHamiltonianGenerator:
         return hdiag
     
     def generate_hint(self, compile_hint: bool = True) -> List:
-        """Generate the interaction Hamiltonian."""
+        """Generate the interaction Hamiltonian.
+        
+        Args:
+            compile_hint: If True, interaction Hamiltonian terms are given as compilable strings.
+            
+        Returns:
+            A list of Hamiltonian terms. The first entry may be a single Qobj instance if there is a static term.
+            Otherwise the entries are 2-lists `[Qobj, c(t)]`.
+        """
         self._max_frequency_int = 0.
 
         hint = list()
@@ -519,6 +717,15 @@ class RWAHamiltonianGenerator:
         return hint
 
     def generate_hdrive(self, rwa: bool = True) -> List:
+        """Generate the drive Hamiltonian.
+        
+        Args:
+            rwa: If True, apply the rotating-wave approximation.
+            
+        Returns:
+            A list of Hamiltonian terms. The first entry may be a single Qobj instance if there is a static term.
+            Otherwise the entries are 2-lists `[Qobj, c(t)]`.
+        """
         self._max_frequency_drive = 0.
         self._need_tlist = False
         
@@ -566,14 +773,7 @@ class RWAHamiltonianGenerator:
                         continue
                         
                 # Hamiltonian term can be split in xy (static and/or real envelope) or creation/annihilation (otherwise)
-                    
-                if drive.sequence is None:
-                    split, fn_1, fn_2 = drive.generate_fn(frame_frequency, drive_base)
-                    term_max_frequency = abs(drive.frequency - frame_frequency)
-                            
-                else:
-                    split, fn_1, fn_2, term_max_frequency = drive.sequence.generate_fn(frame_frequency, drive_base,
-                                                                                       initial_frequency=drive.frequency)
+                split, fn_1, fn_2, term_max_frequency = drive.generate_fn(frame_frequency, drive_base)
                     
                 if split == 'xy':
                     h_x = creation_op.dag() + creation_op

@@ -105,7 +105,7 @@ def identify_gate(
         
         unitary = result.states[-1]
         
-    ilogu = matrix_ufunc(lambda u: -np.angle(u), unitary)
+    ilogu = -matrix_angle(unitary)
     ilogu_compos = paulis.components(ilogu, (num_sim_levels,) * num_qubits)
     ilogu_compos_trunc = paulis.truncate(ilogu_compos, (comp_dim,) * num_qubits)
     
