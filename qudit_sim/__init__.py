@@ -11,29 +11,10 @@ __all__ += [
     'run_pulse_sim'
 ]
 
-from .hamiltonian import RWAHamiltonianGenerator
+from .hamiltonian import HamiltonianGenerator
 
 __all__ += [
-    'RWAHamiltonianGenerator'
-]
-
-from .paulis import (get_num_paulis, make_generalized_paulis, make_prod_basis,
-                     extract_coefficients, get_l0_projection, truncate_coefficients,
-                     unravel_basis_index, pauli_labels, prod_basis_labels,
-                     matrix_symmetry, shift_phase)
-
-__all__ += [
-    'get_num_paulis',
-    'make_generalized_paulis',
-    'make_prod_basis',
-    'extract_coefficients',
-    'get_l0_projection',
-    'truncate_coefficients',
-    'unravel_basis_index',
-    'pauli_labels',
-    'prod_basis_labels',
-    'matrix_symmetry',
-    'shift_phase'
+    'HamiltonianGenerator'
 ]
 
 from .pulse import Gaussian, GaussianSquare, Drag, PulseSequence

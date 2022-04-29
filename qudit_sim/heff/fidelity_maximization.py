@@ -1,4 +1,4 @@
-from typing import Optional, Union
+from typing import Optional, Union, Sequence
 import logging
 from functools import partial
 
@@ -20,8 +20,7 @@ logger = logging.getLogger(__name__)
 def fidelity_maximization(
     time_evolution: np.ndarray,
     tlist: np.ndarray,
-    num_qubits: int = 1,
-    num_sim_levels: int = 2,
+    pauli_dim: Union[int, Sequence[int]],
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
     jax_device_id: Optional[int] = None,
@@ -35,7 +34,6 @@ def fidelity_maximization(
     original_log_level = logger.level
     logger.setLevel(log_level)
     
-    pauli_dim = (num_sim_levels,) * num_qubits
     matrix_dim = np.prod(pauli_dim)
     assert time_evolution.shape == (tlist.shape[0], matrix_dim, matrix_dim), 'Inconsistent input shape'
     
@@ -82,14 +80,14 @@ def fidelity_maximization(
     
     ## Loss minimization (fidelity maximization)
     @partial(jax.jit, device=jax_device)
-    def _loss_fn(time_evolution, heff_compos_norm, basis_list, num_qubits, tlist_norm):
-        fidelity = heff_fidelity(time_evolution, heff_compos_norm, basis_list, tlist_norm, num_qubits, npmod=jnp)
+    def _loss_fn(time_evolution, heff_compos_norm, basis_list, tlist_norm):
+        fidelity = heff_fidelity(time_evolution, heff_compos_norm, basis_list, tlist_norm, npmod=jnp)
         return 1. - 1. / (tlist_norm.shape[0] + 1) - jnp.mean(fidelity)
     
     if optimizer == 'minuit':
         from iminuit import Minuit
         
-        loss_fn = jax.jit(lambda c: _loss_fn(time_evolution, c, basis_list, num_qubits, tlist_norm),
+        loss_fn = jax.jit(lambda c: _loss_fn(time_evolution, c, basis_list, tlist_norm),
                           device=jax_device)
         grad = jax.jit(jax.grad(loss_fn), device=jax_device)
         
@@ -112,7 +110,7 @@ def fidelity_maximization(
             loss_values = np.zeros(max_updates, dtype='f8')
             grad_values = np.zeros((max_updates, initial.shape[0]), dtype='f8')
             
-        loss_fn = jax.jit(lambda params: _loss_fn(time_evolution, params['c'], basis_list, num_qubits, tlist_norm),
+        loss_fn = jax.jit(lambda params: _loss_fn(time_evolution, params['c'], basis_list, tlist_norm),
                           device=jax_device)
         loss_and_grad = jax.jit(jax.value_and_grad(loss_fn), device=jax_device)
 
@@ -185,7 +183,7 @@ def fidelity_maximization(
     heff_compos = np.concatenate(([0.], copt / tlist[-1])).reshape(basis.shape[:-2])
 
     if save_result_to:
-        final_fidelity = np.concatenate(([1.], heff_fidelity(time_evolution, heff_compos, basis, tlist[1:], num_qubits)))
+        final_fidelity = np.concatenate(([1.], heff_fidelity(time_evolution, heff_compos, basis, tlist[1:])))
         with h5py.File(f'{save_result_to}.h5', 'a') as out:
             out.create_dataset('final_fidelity', data=final_fidelity)
             if optimizer != 'minuit':

@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Union, Sequence
 import os
 import logging
 from functools import partial
@@ -24,8 +24,7 @@ from .common import get_ilogus_and_valid_it, compose_ueff
 def leastsq_minimization(
     time_evolution: np.ndarray,
     tlist: np.ndarray,
-    num_qubits: int = 1,
-    num_sim_levels: int = 2,
+    pauli_dim: Union[int, Sequence[int]],
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
     max_com: float = 20.,
@@ -49,7 +48,6 @@ def leastsq_minimization(
     original_log_level = logging.getLogger().level
     logging.getLogger().setLevel(log_level)
     
-    pauli_dim = (num_sim_levels,) * num_qubits
     matrix_dim = np.prod(pauli_dim)   
     assert time_evolution.shape == (tlist.shape[0], matrix_dim, matrix_dim), 'Inconsistent input shape'
     

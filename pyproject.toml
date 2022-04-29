@@ -1,14 +1,6 @@
 [build-system]
-requires = [
-    "flit_core >=3.2,<4",
-    "oldest-supported-numpy",
-    "scipy",
-    "qutip",
-    "h5py",
-    "jax",
-    "optax"
-]
-build-backend = "flit_core.buildapi"
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "qudit_sim"

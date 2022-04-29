@@ -56,13 +56,11 @@ def compose_ueff(
 def heff_fidelity(
     time_evolution: array_type,
     heff_compos: array_type,
-    basis_or_dim: Union[array_type, int],
+    basis_list: array_type,
     tlist: array_type,
-    num_qubits: int = 0,
     npmod=np
 ) -> array_type:
-    heff_t = make_heff_t(heff_compos, basis_or_dim, tlist, num_qubits=num_qubits, npmod=npmod)
-    ueffdag_t = matrix_exp(1.j * heff_t, hermitian=-1, npmod=npmod)
+    ueffdag_t = compose_ueff(heff_compos, basis_list, tlist, phase_factor=1., npmod=npmod)
 
     tr_u_ueffdag = npmod.trace(npmod.matmul(time_evolution, ueffdag_t), axis1=1, axis2=2)
     fidelity = (npmod.square(tr_u_ueffdag.real) + npmod.square(tr_u_ueffdag.imag)) / (ueffdag_t.shape[-1] ** 2)

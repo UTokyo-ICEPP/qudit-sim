@@ -1,3 +1,24 @@
+r"""
+================================
+Effective Hamiltonian extraction
+================================
+
+The full time evolution operator :math:`U_{H}(t) = T\left[\exp(-i \int_0^t dt' H(t'))\right]` of a driven qudit
+system is time-dependent and highly nontrivial. However, when the drive amplitude is a constant, at a longer time
+scale, it should be approximatable with a time evolution by a constant Hamiltonian (= effective Hamiltonian)
+:math:`U_{\mathrm{eff}}(t) = \exp(-i H_{\mathrm{eff}} t)`.
+
+Identification of this :math:`H_{\mathrm{eff}}` is essentially a linear fit to the time evolution of Pauli
+components of :math:`i \mathrm{log} (U_{H}(t))`. In qudit-sim we have two implementations of this fit:
+
+- `"fidelity"` finds the effective Pauli components that maximize
+  :math:`\sum_{i} \big| \mathrm{tr} \left[ U(t_i)\, \exp \left(i H_{\mathrm{eff}} t_i \right)\right]} \big|^2`.
+- `"leastsq"` performs a least-squares fit to individual components of :math:`i \mathrm{log} (U_{H}(t))`.
+
+Fidelity method is usually more robust, but the least squares method allows better "fine-tuning". A combined
+method is also available.
+"""
+
 from typing import Any, Dict, List, Sequence, Optional, Union
 import os
 import logging
@@ -16,11 +37,7 @@ from .parallel import parallel_map
 logger = logging.getLogger(__name__)
 
 def find_heff(
-    qubits: Union[Sequence[int], int],
-    params: Dict[str, Any],
-    drive_def: Union[List[DriveDef], DriveDef],
-    phase_offsets: Optional[Dict[int, float]] = None,
-    num_sim_levels: int = 2,
+    hgen: Union[HamiltonianGenerator, List[HamiltonianGenerator]],
     num_cycles: int = 100,
     comp_dim: int = 2,
     method: str = 'fidelity',
@@ -31,22 +48,14 @@ def find_heff(
     jax_devices: Optional[List[int]] = None,
     log_level: int = logging.WARNING
 ) -> np.ndarray:
-    """Run a pulse simulation with constant drives and extract the Pauli components of the effective Hamiltonian.
+    r"""Run a pulse simulation with constant drives and extract the Pauli components of the effective Hamiltonian.
     
     QuTiP `sesolve` applied to the identity matrix will give the time evolution operator :math:`U_H(t)` according
-    to the rotating-wave Hamiltonian :math:`H` at each time point. If an effective Hamiltonian 
-    :math:`H_{\mathrm{eff}}` is to be found, the evolution should be approximatable with
-    :math:`\exp(-i H_{\mathrm{eff}} t)`. This function takes the matrix-log of calculated :math:`U_H(t)`, extracts
-    the Pauli components at each time point, and performs a linear fit to each component as a function of time.
+    to the rotating-wave Hamiltonian :math:`H` at each time point. This function then finds the Pauli components
+    of :math:`H_{\mathrm{eff}}` whose time evolution :math:`\exp(-i H_{\mathrm{eff}} t)` approximates :math:`U_H(t)`.
 
     Args:
-        qubits: List of qudits to include in the Hamiltonian.
-        params: Hamiltonian parameters. See the docstring of `hamiltonian.RWAHamiltonianGenerator` for details.
-        drive_def: Drive definition or a list thereof. See the docstring of `hamiltonian.RWAHamiltonianGenerator`
-            for details. Argument `'amplitude'` for each channel must be a float or a constant expression string.
-        phase_offsets: Model of phase offsets between the room temperature electronics and the qudit system. Drive
-            signal is sent to the qudits with the given offsets, which are subtracted from the effective Hamiltonian.
-        num_sim_levels: Number of oscillator levels in the simulation.
+        hgen: Hamiltonian generator or a list thereof.
         num_cycles: Duration of the square pulse, in units of cycles in the highest frequency appearing in the
             Hamiltonian.
         comp_dim: Dimensionality of the computational space.
@@ -69,12 +78,7 @@ def find_heff(
     original_log_level = logger.level
     logger.setLevel(log_level)
     
-    assert comp_dim <= num_sim_levels, 'Number of levels in simulation cannot be less than computational dimension'
-    
-    if isinstance(qubits, int):
-        qubits = (qubits,)
-        
-    num_qubits = len(qubits)
+    assert comp_dim <= hgen.num_levels, 'Number of levels in simulation cannot be less than computational dimension'
     
     ## Extraction function and parameters
     
@@ -90,19 +94,11 @@ def find_heff(
     
     ## Evolve the identity operator to obtain the time evolution operators
     
-    psi0 = qtp.tensor([qtp.qeye(num_sim_levels)] * num_qubits)
+    psi0 = qtp.tensor([qtp.qeye(hgen.num_levels)] * hgen.num_qudits)
     
     logger.info('Running a square pulse simulation for %d cycles', num_cycles)
 
     tlist_tuple = (10, num_cycles)
-    
-    if phase_offsets is not None:
-        phase_offset_array = np.zeros(num_qubits, dtype=np.float)
-        for iq, qubit in enumerate(qubits):
-            try:
-                phase_offset_array[iq] = phase_offsets[qubit]
-            except KeyError:
-                pass
     
     if isinstance(drive_def, list):
         if save_result_to:
@@ -115,10 +111,11 @@ def find_heff(
             kwarg_keys = None
             kwarg_values = None
 
-        common_args = (qubits, params)
-        common_kwargs = {'phase_offsets': phase_offsets, 'psi0': psi0,
-                         'tlist': tlist_tuple, 'force_array': True,
+        common_args = (hgen,)
+        common_kwargs = {'psi0': psi0, 'tlist': tlist_tuple, 'force_array': True,
                          'log_level': log_level}
+        
+        ## TODO HERE
                 
         results = parallel_map(
             run_pulse_sim,
@@ -159,8 +156,8 @@ def find_heff(
             kwarg_values.append((jax_device_id,))
             
         common_kwargs = {
-            'num_qubits': num_qubits,
-            'num_sim_levels': num_sim_levels,
+            'num_qudits': hgen.num_qudits,
+            'hgen.num_levels': hgen.num_levels,
             'log_level': log_level
         }
         common_kwargs.update(extraction_params)
@@ -173,8 +170,8 @@ def find_heff(
                 kwarg_values[idef] += (filename,)
                 
                 with h5py.File(f'{filename}.h5', 'w') as out:
-                    out.create_dataset('num_qubits', data=num_qubits)
-                    out.create_dataset('num_sim_levels', data=num_sim_levels)
+                    out.create_dataset('num_qudits', data=hgen.num_qudits)
+                    out.create_dataset('hgen.num_levels', data=hgen.num_levels)
                     out.create_dataset('comp_dim', data=comp_dim)
                     out.create_dataset('time_evolution', data=result.states)
                     out.create_dataset('tlist', data=result.times)
@@ -193,7 +190,7 @@ def find_heff(
         )
         
         heff_compos = np.stack(heff_compos_list)
-        heff_compos_trunc = paulis.truncate(heff_compos, (comp_dim,) * num_qubits)
+        heff_compos_trunc = paulis.truncate(heff_compos, (comp_dim,) * hgen.num_qudits)
         
         if phase_offsets is not None:
             for iq, offset in enumerate(phase_offset_array):
@@ -203,26 +200,24 @@ def find_heff(
             for idef in range(len(drive_def)):
                 filename = os.path.join(save_result_to, f'heff_{idef}')
                 with h5py.File(f'{filename}.h5', 'a') as out:
-                    if num_sim_levels != comp_dim:
+                    if hgen.num_levels != comp_dim:
                         out.create_dataset('heff_compos_original', data=heff_compos_list[idef])
                     out.create_dataset('heff_compos', data=heff_compos_trunc[idef])
     
     else:
         result = run_pulse_sim(
-            qubits,
-            params,
-            drive_def,
-            phase_offsets=phase_offsets,
+            hgen,
             psi0=psi0,
             tlist=tlist_tuple,
             force_array=True,
             save_result_to=save_result_to,
-            log_level=log_level)
+            log_level=log_level
+        )
         
         if save_result_to:
             with h5py.File(f'{save_result_to}.h5', 'w') as out:
-                out.create_dataset('num_qubits', data=num_qubits)
-                out.create_dataset('num_sim_levels', data=num_sim_levels)
+                out.create_dataset('num_qudits', data=hgen.num_qudits)
+                out.create_dataset('hgen.num_levels', data=hgen.num_levels)
                 out.create_dataset('comp_dim', data=comp_dim)
                 out.create_dataset('time_evolution', data=result.states)
                 out.create_dataset('tlist', data=result.times)
@@ -232,13 +227,13 @@ def find_heff(
         heff_compos = extraction_fn(
             result.states,
             result.times,
-            num_qubits=num_qubits,
-            num_sim_levels=num_sim_levels,
+            num_qudits=hgen.num_qudits,
+            hgen.num_levels=hgen.num_levels,
             save_result_to=save_result_to,
             log_level=log_level,
             **extraction_params)
         
-        heff_compos_trunc = paulis.truncate(heff_compos, (comp_dim,) * num_qubits)
+        heff_compos_trunc = paulis.truncate(heff_compos, (comp_dim,) * hgen.num_qudits)
         
         if phase_offsets is not None:
             for iq, offset in enumerate(phase_offset_array):
@@ -246,7 +241,7 @@ def find_heff(
         
         if save_result_to:
             with h5py.File(f'{save_result_to}.h5', 'a') as out:
-                if num_sim_levels != comp_dim:
+                if hgen.num_levels != comp_dim:
                     out.create_dataset('heff_compos_original', data=heff_compos)
                 out.create_dataset('heff_compos', data=heff_compos_trunc)
                 

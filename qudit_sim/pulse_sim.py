@@ -11,8 +11,7 @@ import qutip as qtp
 
 import rqutils.paulis as paulis
 
-from .paulis import shift_phase
-from .hamiltonian import RWAHamiltonianGenerator
+from .hamiltonian import HamiltonianGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +20,11 @@ DriveDef = Dict[Union[int, str], Dict[str, Any]]
 PulseSimResult = collections.namedtuple('PulseSimResult', ['times', 'expect', 'states'])
 
 def run_pulse_sim(
-    qudits: Union[Sequence[int], int],
-    params: Dict[str, Any],
-    drive_def: Dict,
-    phase_offsets: Optional[Dict[int, float]] = None,
+    hgen: HamiltonianGenerator,
     psi0: qtp.Qobj = qtp.basis(2, 0),
     tlist: Union[np.ndarray, Tuple[int, int]] = (10, 100),
+    args: Optional[Any] = None,
+    rwa: bool = True,
     force_array: bool = False,
     e_ops: Optional[Sequence[Any]] = None,
     options: Optional[qtp.solver.Options] = None,
@@ -36,7 +34,7 @@ def run_pulse_sim(
 ) -> PulseSimResult:
     """Run a pulse simulation.
     
-    Sets up an RWAHamiltonianGenerator object from the given parameters, determine the time points for the simulation
+    Generates the Hamiltonian terms from the HamiltonianGenerator, determine the time points for the simulation
     if necessary, and run `qutip.sesolve`.
     
     ** Implementation notes (why we return an original object instead of the QuTiP result) **
@@ -51,17 +49,12 @@ def run_pulse_sim(
     So, the solution was to just return a "sanitized" object, consisting of plain ndarrays.
 
     Args:
-        qudits: List of qudits to include in the Hamiltonian.
-        params: Hamiltonian parameters. See the docstring of RWAHamiltonian for details.
-        drive_def: Drive definition dict. Keys are qudit ids and values are dicts of format
-            `{'frequency': frequency, 'amplitude': amplitude}`. Can optionally include a key `'args'` where the
-            corresponding value is then passed to the `args` argument of `sesolve`.
-        phase_offsets: Model of phase offsets between the room temperature electronics and the qudit system. Drive
-            signal is sent to the qudits with the given offsets. Expectation values of the observables specified in
-            e_ops will be phase-shifted accordingly.
+        hgen: Fully set up Hamiltonian generator.
         psi0: Initial state Qobj.
         tlist: Time points to use in the simulation or a pair `(points_per_cycle, num_cycles)` where in the latter
             case the cycle of the fastest oscillating term in the Hamiltonian will be used.
+        args: Second parameter passed to drive amplitude functions (if callable).
+        rwa: Whether to use the rotating-wave approximation.
         force_array: Use an array-based Hamiltonian for the simulation. May run faster but potentially give
             inaccurate results, depending on the Hamiltonian.
         e_ops: List of observables passed to the QuTiP solver.
@@ -75,69 +68,35 @@ def run_pulse_sim(
     original_log_level = logger.level
     logger.setLevel(log_level)
     
-    if isinstance(qudits, int):
-        qudits = (qudits,)
-        
-    num_qudits = len(qudits)
-    assert len(psi0.dims[0]) == num_qudits
+    assert len(psi0.dims[0]) == hgen.num_qudits
     
     ## Make the Hamiltonian
     
     num_sim_levels = psi0.dims[0][0]
     
-    if phase_offsets is not None:
-        params = copy.deepcopy(params)
-        
-        for q, offset in phase_offsets.items():
-            params[f'omegad{q}'] *= np.exp(1.j * offset)
-            
-        if e_ops is not None:
-            # Extract the Pauli components of the given observables
-            e_ops_components = list(paulis.components(op.full(), dim=(num_sim_levels,) * num_qudits) for op in e_ops)
-            
-            # Pass the Pauli products as observables instead to sesolve
-            e_ops = []
-            paulis = paulis.paulis(num_sim_levels)
-            pauli_objs = list(qtp.Qobj(inpt=p) for p in paulis)
-            for idx in np.ndindex((paulis.shape[0],) * num_qudits):
-                if idx == (0,) * num_qudits: # skip the identity
-                    continue
-                
-                e_ops.append(qtp.tensor([pauli_objs[i] for i in idx]) / (2 ** (num_qudits - 1)))
-            
     ## kwargs passed directly to sesolve
     
     kwargs = {'e_ops': e_ops, 'options': options, 'progress_bar': progress_bar}
-    
-    # When using the array Hamiltonian, Hint terms should be kept as python functions which
-    # yield the arrays upon calling array_hamiltonian().
-    hgen = RWAHamiltonianGenerator(qudits, params, num_sim_levels, compile_hint=(not force_array))
-    
-    logger.info('Instantiated a Hamiltonian generator for %d qudits and %d levels', num_qudits, num_sim_levels)
-    logger.info('Number of interaction terms: %d', len(hgen.hint))
-    if e_ops is not None:
-        logger.info('Number of observables: %d', len(e_ops))
-    
-    for key, value in drive_def.items():
-        if key == 'args':
-            kwargs['args'] = value
-            continue
-            
-        logger.info('Adding a drive with frequency %f and envelope %s', value['frequency'], value['amplitude'])
-
-        hgen.add_drive(key, frequency=value['frequency'], amplitude=value['amplitude'])
+    if args is not None:
+        kwargs['args'] = args
         
-    logger.info('Number of drive terms: %d', len(hgen.hdrive))
+    ## Define the time points if necessary
 
     if isinstance(tlist, tuple):
         tlist = hgen.make_tlist(*tlist)
         
     logger.info('Using %d time points from %.3e to %.3e', tlist.shape[0], tlist[0], tlist[-1])
+    
+    ## Generate the Hamiltonian
 
     if force_array or hgen.need_tlist:
-        hamiltonian = hgen.array_generate(tlist)
+        tlist_arg = {'tlist': tlist, 'args': args}
     else:
-        hamiltonian = hgen.generate()
+        tlist_arg = dict()
+        
+    hamiltonian = hgen.generate(rwa=rwa, compile_hint=True, **tlist_arg)
+    
+    ## Run sesolve in a temporary directory
         
     logger.info('Hamiltonian with %d terms generated. Starting simulation..', len(hamiltonian))
     
@@ -164,27 +123,7 @@ def run_pulse_sim(
     else:
         states = None
         
-    if phase_offsets is not None and e_ops is not None:
-        # shape (num_prod_basis - 1, T)
-        basis_expect = np.stack(qtp_result.expect)
-
-        phase_offset_array = np.zeros(num_qudits, dtype=np.float)
-        for iq, qudit in enumerate(qudits):
-            try:
-                phase_offset_array[iq] = phase_offsets[qudit]
-            except KeyError:
-                pass
-            
-        expect = []
-        # shift the component phases and combine it with the Pauli expectation values
-        for compos in e_ops_components:
-            for iq, offset in enumerate(phase_offset_array):
-                compos = shift_phase(compos, -offset, dim=iq)
-                
-            expect.append(basis_expect.T @ compos.reshape(-1)[1:])
-
-    else:
-        expect = list(exp.copy() for exp in qtp_result.expect)
+    expect = list(exp.copy() for exp in qtp_result.expect)
         
     logger.setLevel(original_log_level)
     

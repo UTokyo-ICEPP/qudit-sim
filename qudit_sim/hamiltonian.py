@@ -363,6 +363,10 @@ class HamiltonianGenerator:
     @property
     def need_tlist(self) -> bool:
         return self._need_tlist
+    
+    @property
+    def num_qudits(self) -> int:
+        return len(self.qudit_params)
 
     def generate(
         self,
@@ -625,7 +629,7 @@ class HamiltonianGenerator:
                 raise RuntimeError('Cannot determine the tlist')
 
             hstat = hamiltonian[0]
-            amp2 = np.trace(hstat @ hstat).real / (2 ** len(self.qudit_params))
+            amp2 = np.trace(hstat @ hstat).real / (2 ** self.num_qudits)
             return np.linspace(0., 2. * np.pi / np.sqrt(amp2) * num_cycles, points_per_cycle * num_cycles)
         else:
             return np.linspace(0., 2. * np.pi / self.max_frequency * num_cycles, points_per_cycle * num_cycles)
