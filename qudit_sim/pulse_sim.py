@@ -9,19 +9,16 @@ import collections
 import numpy as np
 import qutip as qtp
 
-import rqutils.paulis as paulis
-
 from .hamiltonian import HamiltonianGenerator
+from .parallel import parallel_map
 
 logger = logging.getLogger(__name__)
 
-DriveDef = Dict[Union[int, str], Dict[str, Any]]
-
-PulseSimResult = collections.namedtuple('PulseSimResult', ['times', 'expect', 'states'])
+PulseSimResult = collections.namedtuple('PulseSimResult', ['times', 'expect', 'states', 'dim'])
 
 def run_pulse_sim(
-    hgen: HamiltonianGenerator,
-    psi0: qtp.Qobj = qtp.basis(2, 0),
+    hgen: Union[HamiltonianGenerator, List[HamiltonianGenerator]],
+    psi0: Optional[qtp.Qobj] = None,
     tlist: Union[np.ndarray, Tuple[int, int]] = (10, 100),
     args: Optional[Any] = None,
     rwa: bool = True,
@@ -30,8 +27,9 @@ def run_pulse_sim(
     options: Optional[qtp.solver.Options] = None,
     progress_bar: Optional[qtp.ui.progressbar.BaseProgressBar] = None,
     save_result_to: Optional[str] = None,
+    num_cpus: int = 0,
     log_level: int = logging.WARNING
-) -> PulseSimResult:
+) -> Union[PulseSimResult, List[PulseSimResult]]:
     """Run a pulse simulation.
     
     Generates the Hamiltonian terms from the HamiltonianGenerator, determine the time points for the simulation
@@ -49,8 +47,8 @@ def run_pulse_sim(
     So, the solution was to just return a "sanitized" object, consisting of plain ndarrays.
 
     Args:
-        hgen: Fully set up Hamiltonian generator.
-        psi0: Initial state Qobj.
+        hgen: Fully set up Hamiltonian generator or a list thereof.
+        psi0: Initial state Qobj. Defaults to the identity operator appropriate for the given Hamiltonian.
         tlist: Time points to use in the simulation or a pair `(points_per_cycle, num_cycles)` where in the latter
             case the cycle of the fastest oscillating term in the Hamiltonian will be used.
         args: Second parameter passed to drive amplitude functions (if callable).
@@ -68,17 +66,59 @@ def run_pulse_sim(
     original_log_level = logger.level
     logger.setLevel(log_level)
     
-    assert len(psi0.dims[0]) == hgen.num_qudits
-    
-    ## Make the Hamiltonian
-    
-    num_sim_levels = psi0.dims[0][0]
-    
     ## kwargs passed directly to sesolve
     
     kwargs = {'e_ops': e_ops, 'options': options, 'progress_bar': progress_bar}
     if args is not None:
         kwargs['args'] = args
+    
+    if isinstance(hgen, list):
+        common_kwargs = {'psi0': psi0, 'tlist': tlist, 'rwa': rwa, 'force_array': force_array, 'kwargs': kwargs}
+        
+        num_tasks = len(hgen)
+        
+        kwarg_keys = ('logger_name',)
+        kwarg_values = list((f'{__name__}.{i}',) for i in range(num_tasks))
+        
+        if save_result_to:
+            if not (os.path.exists(save_result_to) and os.path.isdir(save_result_to)):
+                os.makedirs(save_result_to)
+                
+            kwarg_keys += ('save_result_to',)
+            for itask in range(num_tasks):
+                kwarg_values[itask] += (os.path.join(save_result_to, f'sim_{itask}'),)
+
+        else:
+            common_kwargs['save_result_to'] = ''
+            
+        result = parallel_map(_run_single, args=hgen, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
+                              common_kwargs=common_kwargs, num_cpus=num_cpus, log_level=log_level)
+    
+    else:
+        result = _run_single(hgen, psi0, tlist, rwa, force_array, kwargs, save_result_to)
+        
+    logger.setLevel(original_log_level)
+    
+    return result
+
+
+def _run_single(
+    hgen: HamiltonianGenerator,
+    psi0: Union[qtp.Qobj, None],
+    tlist: Union[np.ndarray, Tuple[int, int]],
+    rwa: bool,
+    force_array: bool,
+    kwargs: dict,
+    save_result_to: str,
+    logger_name: str = __name__
+):
+    """Run one pulse simulation."""
+    logger = logging.getLogger(logger_name)
+                     
+    ## Define the initial state if necessary
+    
+    if psi0 is None:
+        psi0 = qtp.tensor([qtp.qeye(hgen.num_levels)] * hgen.num_qudits)
         
     ## Define the time points if necessary
 
@@ -86,11 +126,11 @@ def run_pulse_sim(
         tlist = hgen.make_tlist(*tlist)
         
     logger.info('Using %d time points from %.3e to %.3e', tlist.shape[0], tlist[0], tlist[-1])
-    
+
     ## Generate the Hamiltonian
 
     if force_array or hgen.need_tlist:
-        tlist_arg = {'tlist': tlist, 'args': args}
+        tlist_arg = {'tlist': tlist, 'args': kwargs['args']}
     else:
         tlist_arg = dict()
         
@@ -124,7 +164,6 @@ def run_pulse_sim(
         states = None
         
     expect = list(exp.copy() for exp in qtp_result.expect)
-        
-    logger.setLevel(original_log_level)
+    dim = (hgen.num_levels,) * hgen.num_qudits
     
-    return PulseSimResult(times=tlist, expect=expect, states=states)
+    return PulseSimResult(times=tlist, expect=expect, states=states, dim=dim)

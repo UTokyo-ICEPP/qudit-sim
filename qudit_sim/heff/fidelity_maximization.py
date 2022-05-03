@@ -184,7 +184,7 @@ def fidelity_maximization(
 
     if save_result_to:
         final_fidelity = np.concatenate(([1.], heff_fidelity(time_evolution, heff_compos, basis, tlist[1:])))
-        with h5py.File(f'{save_result_to}.h5', 'a') as out:
+        with h5py.File(f'{save_result_to}_ext.h5', 'w') as out:
             out.create_dataset('final_fidelity', data=final_fidelity)
             if optimizer != 'minuit':
                 out.create_dataset('compos', data=compo_values[:num_updates])

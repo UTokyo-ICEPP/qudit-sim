@@ -26,25 +26,20 @@ logging.basicConfig(level=logging.INFO)
 
 import numpy as np
 import h5py
-import qutip as qtp
 
 import rqutils.paulis as paulis
 
-from .paulis import shift_phase
-from .pulse_sim import run_pulse_sim, DriveDef
 from .parallel import parallel_map
 
 logger = logging.getLogger(__name__)
 
 def find_heff(
-    hgen: Union[HamiltonianGenerator, List[HamiltonianGenerator]],
-    num_cycles: int = 100,
+    sim_result: Union['PulseSimResult', List['PulseSimResult']],
     comp_dim: int = 2,
     method: str = 'fidelity',
-    extraction_params: Optional[Dict] = None,
+    method_params: Optional[Dict] = None,
     save_result_to: Optional[str] = None,
-    sim_num_cpus: int = 0,
-    ext_num_cpus: int = 0,
+    num_cpus: int = 0,
     jax_devices: Optional[List[int]] = None,
     log_level: int = logging.WARNING
 ) -> np.ndarray:
@@ -78,8 +73,6 @@ def find_heff(
     original_log_level = logger.level
     logger.setLevel(log_level)
     
-    assert comp_dim <= hgen.num_levels, 'Number of levels in simulation cannot be less than computational dimension'
-    
     ## Extraction function and parameters
     
     if method == 'leastsq':
@@ -89,47 +82,28 @@ def find_heff(
         from .heff import fidelity_maximization
         extraction_fn = fidelity_maximization
         
-    if extraction_params is None:
-        extraction_params = dict()
-    
-    ## Evolve the identity operator to obtain the time evolution operators
-    
-    psi0 = qtp.tensor([qtp.qeye(hgen.num_levels)] * hgen.num_qudits)
-    
-    logger.info('Running a square pulse simulation for %d cycles', num_cycles)
-
-    tlist_tuple = (10, num_cycles)
-    
-    if isinstance(drive_def, list):
-        if save_result_to:
-            if not (os.path.exists(save_result_to) and os.path.isdir(save_result_to)):
-                os.makedirs(save_result_to)
-                
-            kwarg_keys = 'save_result_to'
-            kwarg_values = list(os.path.join(save_result_to, f'sim_{i}') for i in range(len(drive_def)))
-        else:
-            kwarg_keys = None
-            kwarg_values = None
-
-        common_args = (hgen,)
-        common_kwargs = {'psi0': psi0, 'tlist': tlist_tuple, 'force_array': True,
-                         'log_level': log_level}
+    if method_params is None:
+        method_params = dict()
         
-        ## TODO HERE
+    def save_result(filename, sim_result, compos, compos_original):
+        with h5py.File(f'{filename}.h5', 'w') as out:
+            out.create_dataset('num_qudits', data=len(sim_result.dim))
+            out.create_dataset('num_sim_levels', data=sim_result.dim[0])
+            out.create_dataset('comp_dim', data=comp_dim)
+            out.create_dataset('time_evolution', data=sim_result.states)
+            out.create_dataset('tlist', data=sim_result.times)
+            out.create_dataset('heff_compos', data=compos)
+            if compos_original is not None:
+                out.create_dataset('heff_compos_original', data=compos_original)
                 
-        results = parallel_map(
-            run_pulse_sim,
-            args=drive_def,
-            kwarg_keys=kwarg_keys,
-            kwarg_values=kwarg_values,
-            arg_position=2,
-            common_args=common_args,
-            common_kwargs=common_kwargs,
-            num_cpus=sim_num_cpus,
-            log_level=log_level
-        )
+            with h5py.File(f'{filename}_ext.h5', 'r') as source:
+                for key in source.keys():
+                    out.create_dataset(key, data=source[key])
+
+            os.unlink(f'{filename}_ext.h5')
         
-        logger.info('Passing the simulation results to %s', extraction_fn.__name__)
+    if isinstance(sim_result, list):
+        num_tasks = len(sim_result)
         
         if jax_devices is None:
             try:
@@ -145,38 +119,28 @@ def find_heff(
         args = []
         kwarg_keys = ('jax_device_id',)
         kwarg_values = []
-        for result in results:
+        for result in sim_result:
             try:
                 jax_device_id = next(jax_device_iter)
             except StopIteration:
                 jax_device_iter = iter(jax_devices)
                 jax_device_id = next(jax_device_iter)
             
-            args.append((result.states, result.times))
+            args.append((result.states, result.times, result.dim))
             kwarg_values.append((jax_device_id,))
-            
-        common_kwargs = {
-            'num_qudits': hgen.num_qudits,
-            'hgen.num_levels': hgen.num_levels,
-            'log_level': log_level
-        }
-        common_kwargs.update(extraction_params)
         
         if save_result_to:
-            kwarg_keys += ('save_result_to',)
+            if not (os.path.exists(save_result_to) and os.path.isdir(save_result_to)):
+                os.makedirs(save_result_to)
             
-            for idef, result in enumerate(results):
-                filename = os.path.join(save_result_to, f'heff_{idef}')
-                kwarg_values[idef] += (filename,)
+            kwarg_keys += ('save_result_to',)
+            for itask in range(num_tasks):
+                kwarg_values[itask] += (filename,)
                 
-                with h5py.File(f'{filename}.h5', 'w') as out:
-                    out.create_dataset('num_qudits', data=hgen.num_qudits)
-                    out.create_dataset('hgen.num_levels', data=hgen.num_levels)
-                    out.create_dataset('comp_dim', data=comp_dim)
-                    out.create_dataset('time_evolution', data=result.states)
-                    out.create_dataset('tlist', data=result.times)
-                    if phase_offsets is not None:
-                        out.create_dataset('phase_offsets', data=phase_offset_array)
+        common_kwargs = {
+            'log_level': log_level
+        }
+        common_kwargs.update(method_params)
         
         heff_compos_list = parallel_map(
             extraction_fn,
@@ -184,67 +148,41 @@ def find_heff(
             kwarg_keys=kwarg_keys,
             kwarg_values=kwarg_values,
             common_kwargs=common_kwargs,
-            num_cpus=ext_num_cpus,
+            num_cpus=num_cpus,
             log_level=log_level,
-            thread_based=True
-        )
+            thread_based=True)
         
         heff_compos = np.stack(heff_compos_list)
-        heff_compos_trunc = paulis.truncate(heff_compos, (comp_dim,) * hgen.num_qudits)
-        
-        if phase_offsets is not None:
-            for iq, offset in enumerate(phase_offset_array):
-                heff_compos_trunc = shift_phase(heff_compos_trunc, offset, dim=(iq + 1))
-        
-        if save_result_to:
-            for idef in range(len(drive_def)):
-                filename = os.path.join(save_result_to, f'heff_{idef}')
-                with h5py.File(f'{filename}.h5', 'a') as out:
-                    if hgen.num_levels != comp_dim:
-                        out.create_dataset('heff_compos_original', data=heff_compos_list[idef])
-                    out.create_dataset('heff_compos', data=heff_compos_trunc[idef])
-    
-    else:
-        result = run_pulse_sim(
-            hgen,
-            psi0=psi0,
-            tlist=tlist_tuple,
-            force_array=True,
-            save_result_to=save_result_to,
-            log_level=log_level
-        )
-        
-        if save_result_to:
-            with h5py.File(f'{save_result_to}.h5', 'w') as out:
-                out.create_dataset('num_qudits', data=hgen.num_qudits)
-                out.create_dataset('hgen.num_levels', data=hgen.num_levels)
-                out.create_dataset('comp_dim', data=comp_dim)
-                out.create_dataset('time_evolution', data=result.states)
-                out.create_dataset('tlist', data=result.times)
-                if phase_offsets is not None:
-                    out.create_dataset('phase_offsets', data=phase_offset_array)
 
+        if result.dim[0] != comp_dim:
+            heff_compos_original = heff_compos
+            heff_compos = paulis.truncate(heff_compos, (comp_dim,) * len(result.dim))
+        else:
+            heff_compos_original = None
+        
+        if save_result_to:
+            for itask, result in enumerate(sim_result):
+                filename = os.path.join(save_result_to, f'heff_{itask}')
+                save_result(filename, result, heff_compos, heff_compos_original)
+    
+    else:        
         heff_compos = extraction_fn(
-            result.states,
-            result.times,
-            num_qudits=hgen.num_qudits,
-            hgen.num_levels=hgen.num_levels,
+            sim_result.states,
+            sim_result.times,
+            sim_result.dim,
             save_result_to=save_result_to,
             log_level=log_level,
-            **extraction_params)
+            **method_params)
         
-        heff_compos_trunc = paulis.truncate(heff_compos, (comp_dim,) * hgen.num_qudits)
-        
-        if phase_offsets is not None:
-            for iq, offset in enumerate(phase_offset_array):
-                heff_compos_trunc = shift_phase(heff_compos_trunc, offset, dim=iq)
+        if sim_result.dim[0] != comp_dim:
+            heff_compos_original = heff_compos
+            heff_compos = paulis.truncate(heff_compos, (comp_dim,) * len(sim_result.dim))
+        else:
+            heff_compos_original = None
         
         if save_result_to:
-            with h5py.File(f'{save_result_to}.h5', 'a') as out:
-                if hgen.num_levels != comp_dim:
-                    out.create_dataset('heff_compos_original', data=heff_compos)
-                out.create_dataset('heff_compos', data=heff_compos_trunc)
+            save_result(save_result_to, sim_result, heff_compos, heff_compos_original)
                 
     logger.setLevel(original_log_level)
     
-    return heff_compos_trunc
+    return heff_compos

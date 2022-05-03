@@ -262,6 +262,19 @@ class HamiltonianGenerator:
         if 'crosstalk' in params:
             for (qsrc, qtrg), factor in params['crosstalk'].items():
                 self.add_crosstalk(qsrc, qtrg, factor)
+
+    @property
+    def num_qudits(self) -> int:
+        return len(self.qudit_params)                
+        
+    @property
+    def max_frequency(self) -> float:
+        """Maximum frequency appearing in this Hamiltonian."""
+        return max(self._max_frequency_int, self._max_frequency_drive)
+    
+    @property
+    def need_tlist(self) -> bool:
+        return self._need_tlist
             
     def add_qudit(
         self,
@@ -354,19 +367,6 @@ class HamiltonianGenerator:
         """
         self.drive[self.qudit_params[qudit_id]] = DriveTerm(frequency=frequency, amplitude=amplitude,
                                                             phase=phase)
-        
-    @property
-    def max_frequency(self) -> float:
-        """Maximum frequency appearing in this Hamiltonian."""
-        return max(self._max_frequency_int, self._max_frequency_drive)
-    
-    @property
-    def need_tlist(self) -> bool:
-        return self._need_tlist
-    
-    @property
-    def num_qudits(self) -> int:
-        return len(self.qudit_params)
 
     def generate(
         self,

@@ -182,7 +182,7 @@ def leastsq_minimization(
             
     if save_result_to and save_iterations:
         with h5py.File(f'{save_result_to}_iter.h5', 'r') as source:
-            with h5py.File(f'{save_result_to}.h5', 'a') as out:
+            with h5py.File(f'{save_result_to}_ext.h5', 'w') as out:
                 for key in source.keys():
                     data = source[key]
                     if len(data.shape) > 0:
