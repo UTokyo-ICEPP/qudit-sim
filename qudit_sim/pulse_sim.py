@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 PulseSimResult = collections.namedtuple('PulseSimResult', ['times', 'expect', 'states', 'dim'])
 
-def run_pulse_sim(
+def pulse_sim(
     hgen: Union[HamiltonianGenerator, List[HamiltonianGenerator]],
     psi0: Optional[qtp.Qobj] = None,
     tlist: Union[np.ndarray, Tuple[int, int]] = (10, 100),
@@ -78,8 +78,8 @@ def run_pulse_sim(
         num_tasks = len(hgen)
         
         kwarg_keys = ('logger_name',)
-        kwarg_values = list((f'{__name__}.{i}',) for i in range(num_tasks))
-        
+        kwarg_values = list((f'{__name__}.{itask}',) for itask in range(num_tasks))
+
         if save_result_to:
             if not (os.path.exists(save_result_to) and os.path.isdir(save_result_to)):
                 os.makedirs(save_result_to)
@@ -88,9 +88,6 @@ def run_pulse_sim(
             for itask in range(num_tasks):
                 kwarg_values[itask] += (os.path.join(save_result_to, f'sim_{itask}'),)
 
-        else:
-            common_kwargs['save_result_to'] = ''
-            
         result = parallel_map(_run_single, args=hgen, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
                               common_kwargs=common_kwargs, num_cpus=num_cpus, log_level=log_level)
     
@@ -109,7 +106,7 @@ def _run_single(
     rwa: bool,
     force_array: bool,
     kwargs: dict,
-    save_result_to: str,
+    save_result_to: Optional[str] = None,
     logger_name: str = __name__
 ):
     """Run one pulse simulation."""
