@@ -201,12 +201,14 @@ REL_FREQUENCY_EPSILON = 1.e-7
 
 @dataclass
 class Frame:
+    """Frame specification for a single level gap of a qudit."""
     frequency: Optional[np.ndarray] = None
     phase: Optional[np.ndarray] = None
 
 
 @dataclass
 class QuditParams:
+    """Parameters defining a qudit."""
     qubit_frequency: float
     anharmonicity: float
     drive_amplitude: float
@@ -240,7 +242,6 @@ class HamiltonianGenerator:
         
         self._max_frequency_int = None
         self._max_frequency_drive = None
-        self._need_tlist = False
         
         if qudits is None:
             return
@@ -265,6 +266,7 @@ class HamiltonianGenerator:
 
     @property
     def num_qudits(self) -> int:
+        """Number of qudits."""
         return len(self.qudit_params)                
         
     @property
@@ -272,10 +274,6 @@ class HamiltonianGenerator:
         """Maximum frequency appearing in this Hamiltonian."""
         return max(self._max_frequency_int, self._max_frequency_drive)
     
-    @property
-    def need_tlist(self) -> bool:
-        return self._need_tlist
-            
     def add_qudit(
         self,
         qubit_frequency: float,
@@ -380,19 +378,16 @@ class HamiltonianGenerator:
         Args:
             rwa: If True, apply the rotating-wave approximation.
             compile_hint: If True, interaction Hamiltonian terms are given as compilable strings.
-            tlist: If not None, all callable Hamiltonian coefficients are called with (tlist, args) and the resulting
+            tlist: If not None, all callable Hamiltonian coefficients are called with `(tlist, args)` and the resulting
                 arrays are instead passed to sesolve.
             args: Arguments to the callable coefficients.
         
         Returns:
             A list of Hamiltonian terms that can be passed to qutip.sesolve.
-        """
-        if tlist is None and self._need_tlist:
-            raise RuntimeError('This Hamiltonian must be generated with a tlist')
-            
+        """            
         hstatic = self.generate_hdiag()
-        hint = self.generate_hint(compile_hint=compile_hint)
-        hdrive = self.generate_hdrive(rwa=rwa)
+        hint = self.generate_hint(compile_hint=compile_hint, tlist=tlist, args=args)
+        hdrive = self.generate_hdrive(rwa=rwa, tlist=tlist, args=args)
         
         if hint and isinstance(hint[0], qtp.Qobj):
             hstatic += hint.pop(0)
@@ -406,16 +401,8 @@ class HamiltonianGenerator:
             # but qutip recommends following this convention
             hamiltonian.append(hstatic)
             
-        if tlist is not None:
-            for h, f in hint + hdrive:
-                if callable(f):
-                    hamiltonian.append([h, f(tlist, args)])
-                else:
-                    hamiltonian.append([h, f])
-                    
-        else:
-            hamiltonian.extend(hint)
-            hamiltonian.extend(hdrive)
+        hamiltonian.extend(hint)
+        hamiltonian.extend(hdrive)
             
         return hamiltonian
         
@@ -446,11 +433,19 @@ class HamiltonianGenerator:
             
         return hdiag
     
-    def generate_hint(self, compile_hint: bool = True) -> List:
+    def generate_hint(
+        self,
+        compile_hint: bool = True,
+        tlist: Optional[np.ndarray] = None,
+        args: Optional[Dict[str, Any]] = None
+    ) -> List:
         """Generate the interaction Hamiltonian.
         
         Args:
             compile_hint: If True, interaction Hamiltonian terms are given as compilable strings.
+            tlist: Array of time points. If provided and `compile_hint=False`, all callable coefficients
+                are called with `(tlist, args)` and the resulting arrays are returned.
+            args: Arguments to the callable coefficients.
             
         Returns:
             A list of Hamiltonian terms. The first entry may be a single Qobj instance if there is a static term.
@@ -511,8 +506,14 @@ class HamiltonianGenerator:
                         hint.append([h_x, f'cos({frequency}*t)'])
                         hint.append([h_y, f'sin({frequency}*t)'])
                     else:
-                        hint.append([h_x, cos_freq(frequency)])
-                        hint.append([h_y, sin_freq(frequency)])
+                        fn_x = cos_freq(frequency)
+                        fn_y = sin_freq(frequency)
+                        if tlist is None:
+                            hint.append([h_x, fn_x])
+                            hint.append([h_y, fn_y])
+                        else:
+                            hint.append([h_x, fn_x(tlist, args)])
+                            hint.append([h_y, fn_y(tlist, args)])
 
                     self._max_frequency_int = max(self._max_frequency_int, abs(frequency))
                     
@@ -521,18 +522,24 @@ class HamiltonianGenerator:
 
         return hint
 
-    def generate_hdrive(self, rwa: bool = True) -> List:
+    def generate_hdrive(
+        self,
+        rwa: bool = True,
+        tlist: Optional[np.ndarray] = None,
+        args: Optional[Dict[str, Any]] = None
+    ) -> List:
         """Generate the drive Hamiltonian.
         
         Args:
             rwa: If True, apply the rotating-wave approximation.
+            tlist: Array of time points. Required when at least one drive amplitude is given as an array.
+            args: Arguments to the callable coefficients.
             
         Returns:
             A list of Hamiltonian terms. The first entry may be a single Qobj instance if there is a static term.
             Otherwise the entries are 2-lists `[Qobj, c(t)]`.
         """
         self._max_frequency_drive = 0.
-        self._need_tlist = False
         
         hdrive = list()
         hstatic = qtp.Qobj()
@@ -563,8 +570,8 @@ class HamiltonianGenerator:
 
         # Loop over the drive channels
         for ch_params, drive in self.drive.items():
-            if isinstance(drive.amplitude, np.ndarray):
-                self._need_tlist = True
+            if isinstance(drive.amplitude, np.ndarray) and tlist is None:
+                raise RuntimeError('Time points array is needed to generate a Hamiltonian with array-based drive.')
             
             # Loop over the driven operators
             for params, creation_op, frame_frequency in qops:
@@ -596,8 +603,12 @@ class HamiltonianGenerator:
                         hdrive.append([h_y, fn_y])
 
                 else:
-                    hdrive.append([h_x, fn_x])
-                    hdrive.append([h_y, fn_y])
+                    if tlist is None:
+                        hdrive.append([h_x, fn_x])
+                        hdrive.append([h_y, fn_y])
+                    else:
+                        hdrive.append([h_x, fn_x(tlist, args)])
+                        hdrive.append([h_y, fn_y(tlist, args)])
                             
                 self._max_frequency_drive = max(self._max_frequency_drive, term_max_frequency)
                 

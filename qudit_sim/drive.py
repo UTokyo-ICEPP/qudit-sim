@@ -50,17 +50,19 @@ The representation in terms of :math:`X^{l}_{k}` and :math:`Y^{l}_{k}` operators
 from typing import Callable, Optional, Union
 from dataclasses import dataclass
 import numpy as np
-import qutip as qtp
 
 from .pulse import PulseSequence
 
 def cos_freq(freq, phase=0.):
+    """`cos(freq * t + phase)`"""
     return lambda t, args: np.cos(freq * t + phase)
 
 def sin_freq(freq, phase=0.):
+    """`sin(freq * t + phase)`"""
     return lambda t, args: np.sin(freq * t + phase)
 
 def exp_freq(freq, phase=0.):
+    """`cos(freq * t + phase) + 1.j * sin(freq * t + phase)`"""
     def fun(t, args):
         exponent = t * freq + phase
         return np.cos(exponent) + 1.j * np.sin(exponent)
@@ -68,27 +70,35 @@ def exp_freq(freq, phase=0.):
     return fun
 
 def scaled_function(scale, fun):
+    """`scale * fun(t, args)`"""
     return lambda t, args: scale * fun(t, args)
 
 def prod_function(fun1, fun2):
+    """`fun1(t, args) * fun2(t, args)`"""
     return lambda t, args: fun1(t, args) * fun2(t, args)
 
 def sum_function(fun1, fun2):
+    """`fun1(t, args) + fun2(t, args)`"""
     return lambda t, args: fun1(t, args) + fun2(t, args)
 
 def diff_function(fun1, fun2):
+    """`fun1(t, args) - fun2(t, args)`"""
     return lambda t, args: fun1(t, args) - fun2(t, args)
 
 def conj_function(fun):
+    """`fun(t, args).conjugate()`"""
     return lambda t, args: fun(t, args).conjugate()
 
 def real_function(fun):
+    """`fun(t, args).real`"""
     return lambda t, args: fun(t, args).real
 
 def imag_function(fun):
+    """`fun(t, args).imag`"""
     return lambda t, args: fun(t, args).imag
 
 def abs_function(fun):
+    """`abs(fun(t, args))`"""
     return lambda t, args: np.abs(fun(t, args))
 
 

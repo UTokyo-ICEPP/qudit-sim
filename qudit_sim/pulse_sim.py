@@ -1,3 +1,5 @@
+"""Pulse simulation frontend."""
+
 from typing import Any, Dict, List, Tuple, Sequence, Optional, Union
 import os
 import tempfile
@@ -10,11 +12,10 @@ import numpy as np
 import qutip as qtp
 
 from .hamiltonian import HamiltonianGenerator
+from .util import PulseSimResult
 from .parallel import parallel_map
 
 logger = logging.getLogger(__name__)
-
-PulseSimResult = collections.namedtuple('PulseSimResult', ['times', 'expect', 'states', 'dim'])
 
 def pulse_sim(
     hgen: Union[HamiltonianGenerator, List[HamiltonianGenerator]],
@@ -32,10 +33,11 @@ def pulse_sim(
 ) -> Union[PulseSimResult, List[PulseSimResult]]:
     """Run a pulse simulation.
     
-    Generates the Hamiltonian terms from the HamiltonianGenerator, determine the time points for the simulation
+    Generate the Hamiltonian terms from the HamiltonianGenerator, determine the time points for the simulation
     if necessary, and run `qutip.sesolve`.
     
-    ** Implementation notes (why we return an original object instead of the QuTiP result) **
+    .. rubric:: Implementation notes (why we return an original object instead of the QuTiP result)
+    
     When the coefficients of the time-dependent Hamiltonian are compiled (preferred
     method), QuTiP creates a transient python module with file name generated from the code hash, PID, and the current time.
     When running multiple simulations in parallel this is not strictly safe, and so we enclose `sesolve` in a context with

@@ -1,4 +1,4 @@
-"""Pulse shape library"""
+"""Pulse shape library."""
 
 from typing import List, Union, Optional
 import copy
@@ -7,19 +7,50 @@ from collections import namedtuple
 from dataclasses import dataclass
 import numpy as np
 
+from .util import FrequencyScale
+
 logger = logging.getLogger(__name__)
 
-s = 1.
-ns = 1.e-9
+s = FrequencyScale.Hz.time_value
+ns = FrequencyScale.GHz.time_value
 
 class PulseSequence(list):
-    def generate_fn(self, reference_frequency, drive_base, rwa=True, initial_frequency=None):
+    """Pulse sequence.
+    
+    This class represents a sequence of instructions (pulse, delay, frequency/phase shift/set)
+    given to a single channel. In practice, the class is implemented as a subclass of Python
+    list with a single additional function `generate_fn`.
+    """
+    
+    def generate_fn(
+        self,
+        frame_frequency: float,
+        drive_base: complex,
+        rwa: bool = True,
+        initial_frequency: Optional[float] = None
+    ) -> tuple:
+        r"""Generate the X and Y drive coefficients and the maximum frequency appearing in the sequence.
+        
+        The return values are equivalent to what is returned by `drive.DriveTerm.generate_fn` (in fact
+        this function is called within `DriveTerm.generate_fn` when the drive amplitude is given as a
+        PulseSequence).
+        
+        Args:
+            frame_frequency: Frame frequency :math:`\xi_k^{l}`.
+            drive_base: Factor :math:`\alpha_{jk} e^{i \rho_{jk}} \frac{\Omega_j}{2}`.
+            rwa: If True, returns the RWA coefficients.
+            initial_frequency: Initial carrier frequency. Can be None if the first instruction
+                is SetFrequency.
+            
+        Returns:
+            A 3-tuple of X and Y coefficients and the maximum frequency appearing in the term.
+        """
         funclist = []
         timelist = []
         
         def modulate(frequency, phase_offset, time, pulse, rwa):
             if rwa:
-                detuning = frequency - reference_frequency
+                detuning = frequency - frame_frequency
                 def fun(t, args):
                     phase = -detuning * t + phase_offset
                     return drive_base * pulse(t - time, args) * (np.cos(phase) - 1.j * np.sin(phase))
@@ -30,8 +61,8 @@ class PulseSequence(list):
                     prefactor = (double_envelope.real * np.cos(frequency * t)
                                  + double_envelope.imag * np.sin(frequency * t))
                     
-                    return prefactor * (np.cos(reference_frequency * t)
-                                        + 1.j * np.sin(reference_frequency * t))
+                    return prefactor * (np.cos(frame_frequency * t)
+                                        + 1.j * np.sin(frame_frequency * t))
             
             return fun
 
@@ -75,7 +106,13 @@ class PulseSequence(list):
 
 
 class Pulse:
-    def __init__(self, duration):
+    """Base class for all pulse shapes.
+    
+    Args:
+        duration: Pulse duration.
+    """
+    
+    def __init__(self, duration: float):
         assert duration > 0., 'Pulse duration must be positive'
         self.duration = duration
         
@@ -90,6 +127,16 @@ class Pulse:
         
 
 class Gaussian(Pulse):
+    """Gaussian pulse.
+    
+    Args:
+        duration: Pulse duration.
+        amp: Gaussian height relative to the drive base amplitude.
+        sigma: Gaussian width in seconds.
+        center: Center of the Gaussian as time in seconds from the beginning of the pulse.
+        zero_ends: Whether to "ground" the pulse by removing the pedestal and rescaling the
+            amplitude accordingly.
+    """
     def __init__(
         self,
         duration: float,
@@ -131,6 +178,15 @@ class Gaussian(Pulse):
             
 
 class GaussianSquare(Pulse):
+    """Gaussian-square pulse.
+    
+    Args:
+        duration: Pulse duration.
+        amp: Gaussian height relative to the drive base amplitude.
+        sigma: Gaussian width in seconds.
+        zero_ends: Whether to "ground" the pulse by removing the pedestal and rescaling the
+            amplitude accordingly.
+    """
     def __init__(
         self,
         duration: float,
@@ -168,6 +224,17 @@ class GaussianSquare(Pulse):
 
     
 class Drag(Gaussian):
+    r"""DRAG pulse.
+    
+    Args:
+        duration: Pulse duration.
+        amp: Gaussian height relative to the drive base amplitude.
+        sigma: Gaussian width in seconds.
+        beta: DRAG :math:`\beta` factor.
+        center: Center of the Gaussian as time in seconds from the beginning of the pulse.
+        zero_ends: Whether to "ground" the pulse by removing the pedestal and rescaling the
+            amplitude accordingly.
+    """
     def __init__(
         self,
         duration: float,
@@ -196,20 +263,25 @@ class Drag(Gaussian):
             
 @dataclass
 class ShiftFrequency:
+    """Frequency shift in rad/s."""
     value: float
 
 @dataclass
 class ShiftPhase:
+    """Phase shift (virtual Z)."""
     value: float
 
 @dataclass
 class SetFrequency:
+    """Frequency setting in rad/s."""
     value: float
 
 @dataclass
 class SetPhase:
+    """Phase setting."""
     value: float
     
 @dataclass
 class Delay:
+    """Delay in seconds."""
     value: float

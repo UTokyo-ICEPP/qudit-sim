@@ -1,9 +1,8 @@
-from typing import Callable, Union, Any
-import sys
-import tempfile
+import collections
 import enum
 import numpy as np
-import h5py
+
+PulseSimResult = collections.namedtuple('PulseSimResult', ['times', 'expect', 'states', 'dim'])
 
 twopi = 2. * np.pi
 
@@ -30,6 +29,10 @@ class FrequencyScale(enum.Enum):
     @property
     def pulsatance_unit(self):
         return self.name.replace('Hz', 'rad/s')
+    
+    @property
+    def time_value(self):
+        return np.power(10., -3 * self.value)
     
     @property
     def time_unit(self):

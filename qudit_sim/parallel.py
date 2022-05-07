@@ -1,3 +1,5 @@
+"""Parallel execution function wrapper."""
+
 from typing import Callable, List, Sequence, Tuple, Optional, Union, Any
 import time
 from multiprocessing import Process, Pipe, cpu_count
@@ -65,15 +67,19 @@ def parallel_map(
     """Call the target on a list of args in parallel processes.
     
     The returned result is equivalent to
-    ```
-    kwargs = list(dict(zip(kwarg_keys, values)) for values in kwarg_values)
-    [target(*(a + common_args), **(k | common_kwargs)) for a, k in zip(args, kwargs)]
-    ```
+
+    .. code-block:: python
+    
+        kwargs = list(dict(zip(kwarg_keys, values)) for values in kwarg_values)
+        [target(*(a + common_args), **(k | common_kwargs)) for a, k in zip(args, kwargs)]
+
     The order of the positional arguments can optionally be specified via the `arg_position` parameter. If this is
     given, the positional arguments to the target function is
-    ```
-    positional[arg_position[i]] = args[][i]
-    ```
+
+    .. code-block:: python
+
+        positional[arg_position[i]] = args[][i]
+
     with `common_args` filling in the unused positions in order.
     
     Args:

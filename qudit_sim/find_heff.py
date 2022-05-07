@@ -1,23 +1,4 @@
-r"""
-================================
-Effective Hamiltonian extraction
-================================
-
-The full time evolution operator :math:`U_{H}(t) = T\left[\exp(-i \int_0^t dt' H(t'))\right]` of a driven qudit
-system is time-dependent and highly nontrivial. However, when the drive amplitude is a constant, at a longer time
-scale, it should be approximatable with a time evolution by a constant Hamiltonian (= effective Hamiltonian)
-:math:`U_{\mathrm{eff}}(t) = \exp(-i H_{\mathrm{eff}} t)`.
-
-Identification of this :math:`H_{\mathrm{eff}}` is essentially a linear fit to the time evolution of Pauli
-components of :math:`i \mathrm{log} (U_{H}(t))`. In qudit-sim we have two implementations of this fit:
-
-- `"fidelity"` finds the effective Pauli components that maximize
-  :math:`\sum_{i} \big| \mathrm{tr} \left[ U(t_i)\, \exp \left(i H_{\mathrm{eff}} t_i \right)\right]} \big|^2`.
-- `"leastsq"` performs a least-squares fit to individual components of :math:`i \mathrm{log} (U_{H}(t))`.
-
-The fidelity method is usually more robust, but the least squares method allows better "fine-tuning". A combined
-method is also available.
-"""
+"""Effective Hamiltonian extraction frontend."""
 
 from typing import Any, Dict, List, Sequence, Optional, Union
 import os
@@ -29,12 +10,13 @@ import h5py
 
 import rqutils.paulis as paulis
 
+from .util import PulseSimResult
 from .parallel import parallel_map
 
 logger = logging.getLogger(__name__)
 
 def find_heff(
-    sim_result: Union['PulseSimResult', List['PulseSimResult']],
+    sim_result: Union[PulseSimResult, List[PulseSimResult]],
     comp_dim: int = 2,
     method: str = 'fidelity',
     method_params: Optional[Dict] = None,
@@ -45,10 +27,21 @@ def find_heff(
 ) -> Union[np.ndarray, List[np.ndarray]]:
     r"""Run a pulse simulation with constant drives and extract the Pauli components of the effective Hamiltonian.
     
-    QuTiP `sesolve` applied to the identity matrix will give the time evolution operator :math:`U_H(t)` according
-    to the rotating-wave Hamiltonian :math:`H` at each time point. This function then finds the Pauli components
-    of :math:`H_{\mathrm{eff}}` whose time evolution :math:`\exp(-i H_{\mathrm{eff}} t)` approximates :math:`U_H(t)`.
+    The full time evolution operator :math:`U_{H}(t) = T\left[\exp(-i \int_0^t dt' H(t'))\right]` of a driven qudit
+    system is time-dependent and highly nontrivial. However, when the drive amplitude is a constant, at a longer time
+    scale, it should be approximatable with a time evolution by a constant Hamiltonian (= effective Hamiltonian)
+    :math:`U_{\mathrm{eff}}(t) = \exp(-i H_{\mathrm{eff}} t)`.
 
+    Identification of this :math:`H_{\mathrm{eff}}` is essentially a linear fit to the time evolution of Pauli
+    components of :math:`i \mathrm{log} (U_{H}(t))`. In qudit-sim we have two implementations of this fit:
+
+    - `"fidelity"` finds the effective Pauli components that maximize
+      :math:`\sum_{i} \big| \mathrm{tr} \left[ U(t_i)\, \exp \left(i H_{\mathrm{eff}} t_i \right)\right] \big|^2`.
+    - `"leastsq"` performs a least-squares fit to individual components of :math:`i \mathrm{log} (U_{H}(t))`.
+
+    The fidelity method is usually more robust, but the least squares method allows better "fine-tuning". A combined
+    method is also available.
+    
     Args:
         sim_result: Result from pulse_sim.
         comp_dim: Dimensionality of the computational space.
@@ -65,7 +58,7 @@ def find_heff(
     Returns:
         An array with the value at index `[i, j, ..]` corresponding to the component of
         :math:`(\lambda_i \otimes \lambda_j \otimes \dots)/2^{n-1}` of the effective Hamiltonian. If a list is passed
-        as `sim_result`, returns an list of arrays.
+        as `sim_result`, returns a list of arrays.
     """
     original_log_level = logger.level
     logger.setLevel(log_level)
