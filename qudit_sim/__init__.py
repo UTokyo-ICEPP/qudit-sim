@@ -4,11 +4,11 @@ __version__ = "1.0"
 
 __all__ = []
 
-from .pulse_sim import PulseSimResult, run_pulse_sim
+from .pulse_sim import PulseSimResult, pulse_sim
 
 __all__ += [
     'PulseSimResult',
-    'run_pulse_sim'
+    'pulse_sim'
 ]
 
 from .hamiltonian import HamiltonianGenerator
@@ -39,7 +39,7 @@ __all__ += [
     'gate_expr'
 ]
 
-from .utils import FrequencyScale
+from .scale import FrequencyScale
 
 __all__ += [
     'FrequencyScale'
