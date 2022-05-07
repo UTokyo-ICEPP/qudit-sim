@@ -5,3 +5,8 @@ __pycache__
 *.pyx
 Untitled*
 untitled*
+qudit_sim.egg-info
+dist/
+build/
+docs/source/generated
+docs/build

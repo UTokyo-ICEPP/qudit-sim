@@ -1,0 +1,8 @@
+numpy>=1.16.6
+scipy>=1.0
+qutip>=4.6.3
+h5py>=3.6.0
+jax>=0.3.1
+optax>=0.1.1
+rqutils>=0.1.1
+matplotlib>=3.5.1
