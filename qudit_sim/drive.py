@@ -53,6 +53,8 @@ import numpy as np
 
 from .pulse import PulseSequence
 
+REL_FREQUENCY_EPSILON = 1.e-7
+
 def cos_freq(freq, phase=0.):
     """`cos(freq * t + phase)`"""
     return lambda t, args: np.cos(freq * t + phase)
@@ -102,7 +104,7 @@ def abs_function(fun):
     return lambda t, args: np.abs(fun(t, args))
 
 
-@dataclass
+@dataclass(frozen=True)
 class DriveTerm:
     r"""Data class representing a drive.
     
@@ -118,6 +120,7 @@ class DriveTerm:
     phase: Optional[float] = None
     
     def generate_fn(
+        self,
         frame_frequency: float,
         drive_base: complex,
         rwa: bool
@@ -155,9 +158,9 @@ class DriveTerm:
             
         return fn_x, fn_y, max_freq
         
-    def _generate_fn_rwa(amplitude, frame_frequency, drive_base):
+    def _generate_fn_rwa(self, amplitude, frame_frequency, drive_base):
         detuning = self.frequency - frame_frequency
-        is_resonant = (abs(detuning) < REL_FREQUENCY_EPSILON * frame.frequency)
+        is_resonant = (abs(detuning) < REL_FREQUENCY_EPSILON * frame_frequency)
 
         if isinstance(amplitude, (float, complex)):
             # static envelope
@@ -226,7 +229,7 @@ class DriveTerm:
         else:
             raise TypeError(f'Unsupported amplitude type f{type(amplitude)}')
 
-    def _generate_fn_full(amplitude, frame_frequency, drive_base):
+    def _generate_fn_full(self, amplitude, frame_frequency, drive_base):
         if isinstance(amplitude, (float, complex)):
             # static envelope
             double_envelope = 2. * amplitude * drive_base

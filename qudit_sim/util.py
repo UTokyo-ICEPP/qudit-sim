@@ -1,8 +1,14 @@
-import collections
+from typing import Union, Tuple
 import enum
+from dataclasses import dataclass
 import numpy as np
 
-PulseSimResult = collections.namedtuple('PulseSimResult', ['times', 'expect', 'states', 'dim'])
+@dataclass(frozen=True)
+class PulseSimResult:
+    times: np.ndarray
+    expect: Union[np.ndarray, None]
+    states: Union[np.ndarray, None]
+    dim: Tuple[int, ...]
 
 twopi = 2. * np.pi
 

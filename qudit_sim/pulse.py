@@ -3,7 +3,6 @@
 from typing import List, Union, Optional
 import copy
 import logging
-from collections import namedtuple
 from dataclasses import dataclass
 import numpy as np
 
@@ -261,27 +260,27 @@ class Drag(Gaussian):
         return gauss + 1.j * self.beta * dgauss
     
             
-@dataclass
+@dataclass(frozen=True)
 class ShiftFrequency:
     """Frequency shift in rad/s."""
     value: float
 
-@dataclass
+@dataclass(frozen=True)
 class ShiftPhase:
     """Phase shift (virtual Z)."""
     value: float
 
-@dataclass
+@dataclass(frozen=True)
 class SetFrequency:
     """Frequency setting in rad/s."""
     value: float
 
-@dataclass
+@dataclass(frozen=True)
 class SetPhase:
     """Phase setting."""
     value: float
     
-@dataclass
+@dataclass(frozen=True)
 class Delay:
     """Delay in seconds."""
     value: float
