@@ -408,8 +408,8 @@ class HamiltonianGenerator:
         Args:
             rwa: If True, apply the rotating-wave approximation.
             compile_hint: If True, interaction Hamiltonian terms are given as compilable strings.
-            tlist: If not None, all callable Hamiltonian coefficients are called with `(tlist, args)` and the resulting
-                arrays are instead passed to sesolve.
+            tlist: If not None, all callable Hamiltonian coefficients are called with `(tlist, args)` and the
+                resulting arrays are instead passed to sesolve.
             args: Arguments to the callable coefficients.
         
         Returns:
@@ -530,7 +530,7 @@ class HamiltonianGenerator:
                         frequency += sign * frame.frequency[level]
                         
                 if abs(frequency) < REL_FREQUENCY_EPSILON * (p1.qubit_frequency + p2.qubit_frequency) * 0.5:
-                    hstatic += op + op.dag()
+                    hstatic += coupling * (op + op.dag())
 
                 else:
                     h_x = coupling * (op + op.dag())
@@ -632,6 +632,11 @@ class HamiltonianGenerator:
                             hstatic += fn_x * h_x
                         if fn_y != 0.:
                             hstatic += fn_y * h_y
+                            
+                    elif isinstance(fn_x, str):
+                        hdrive.append([h_x, fn_x])
+                        if fn_y:
+                            hdrive.append([h_y, fn_y])
 
                     elif isinstance(fn_x, np.ndarray):
                         if np.any(fn_x != 0.):
@@ -642,10 +647,12 @@ class HamiltonianGenerator:
                     else:
                         if tlist is None:
                             hdrive.append([h_x, fn_x])
-                            hdrive.append([h_y, fn_y])
+                            if fn_y is not None:
+                                hdrive.append([h_y, fn_y])
                         else:
                             hdrive.append([h_x, fn_x(tlist, args)])
-                            hdrive.append([h_y, fn_y(tlist, args)])
+                            if fn_y is not None:
+                                hdrive.append([h_y, fn_y(tlist, args)])
 
                     self._max_frequency_drive = max(self._max_frequency_drive, term_max_frequency)
                 
@@ -677,7 +684,7 @@ class HamiltonianGenerator:
                 raise RuntimeError('Cannot determine the tlist')
 
             hstat = hamiltonian[0]
-            amp2 = np.trace(hstat @ hstat).real / (2 ** self.num_qudits)
+            amp2 = np.trace(hstat.full() @ hstat.full()).real / (2 ** self.num_qudits)
             return np.linspace(0., 2. * np.pi / np.sqrt(amp2) * num_cycles, points_per_cycle * num_cycles)
         else:
             return np.linspace(0., 2. * np.pi / self.max_frequency * num_cycles, points_per_cycle * num_cycles)

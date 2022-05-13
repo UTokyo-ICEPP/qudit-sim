@@ -116,7 +116,7 @@ class DriveTerm:
             a constant phase. None otherwise.
     """
     frequency: Optional[float] = None
-    amplitude: Union[float, complex, str, np.ndarray, PulseSequence, Callable, None] = 1.+0.j
+    amplitude: Union[float, complex, str, np.ndarray, PulseSequence, Callable] = 1.+0.j
     phase: Optional[float] = None
     
     def generate_fn(
@@ -213,8 +213,8 @@ class DriveTerm:
                 return real_function(envelope), imag_function(envelope)
 
             elif self.phase is None:
-                cos = cos_freq(-detuning)
-                sin = sin_freq(-detuning)
+                cos = cos_freq(detuning)
+                sin = sin_freq(detuning)
                 real = real_function(envelope)
                 imag = imag_function(envelope)
                 return (sum_function(prod_function(real, cos), prod_function(imag, sin)),
@@ -230,20 +230,21 @@ class DriveTerm:
             raise TypeError(f'Unsupported amplitude type f{type(amplitude)}')
 
     def _generate_fn_full(self, amplitude, frame_frequency, drive_base):
+        lab_frame = (frame_frequency == 0.)
+        
         if isinstance(amplitude, (float, complex)):
             # static envelope
             double_envelope = 2. * amplitude * drive_base
 
-            prefactor = []
-            if envelope.real != 0.:
-                prefactor.append(f'({double_envelope.real} * cos({self.frequency} * t))')
-            if envelope.imag != 0.:
-                prefactor.append(f'({double_envelope.imag} * sin({self.frequency} * t))')
+            prefactor_terms = []
+            if double_envelope.real != 0.:
+                prefactor_terms.append(f'({double_envelope.real} * cos({self.frequency} * t))')
+            if double_envelope.imag != 0.:
+                prefactor_terms.append(f'({double_envelope.imag} * sin({self.frequency} * t))')
                 
-            prefactor = ' + '.join(prefactor)
-
-            return (f'({prefactor}) * cos({frame_frequency} * t)',
-                    f'({prefactor}) * sin({frame_frequency} * t)')
+            prefactor = ' + '.join(prefactor_terms)
+            if len(prefactor_terms) > 1:
+                prefactor = f'({prefactor})'
 
         elif isinstance(amplitude, str):
             double_envelope = f'{2. * drive_base} * ({amplitude})'
@@ -254,17 +255,11 @@ class DriveTerm:
             else:
                 phase = np.angle(drive_base) + self.phase
                 prefactor = f'abs({double_envelope}) * cos({phase} - ({self.frequency} * t))'
-                
-            return (f'{prefactor} * cos({frame_frequency} * t)',
-                    f'{prefactor} * sin({frame_frequency} * t)')
 
         elif isinstance(amplitude, np.ndarray):
             double_envelope = 2. * amplitude * drive_base
 
             prefactor = real_function(scaled_function(double_envelope, exp_freq(-self.frequency)))
-
-            return (prod_function(prefactor, cos_freq(frame_frequency)),
-                    prod_function(prefactor, sin_freq(frame_frequency)))
 
         elif callable(amplitude):
             double_envelope = scaled_function(2. * drive_base, amplitude)
@@ -277,8 +272,19 @@ class DriveTerm:
                 absf = abs_function(double_envelope)
                 prefactor = prod_function(absf, cos_freq(-self.frequency, phase))
 
-            return (prod_function(prefactor, cos_freq(frame_frequency)),
-                    prod_function(prefactor, sin_freq(frame_frequency)))
-
         else:
             raise TypeError(f'Unsupported amplitude type f{type(amplitude)}')
+
+        if isinstance(prefactor, str):
+            if lab_frame:
+                return prefactor, ''
+            else:
+                return (f'{prefactor} * cos({frame_frequency} * t)',
+                        f'{prefactor} * sin({frame_frequency} * t)')
+            
+        else:
+            if lab_frame:
+                return prefactor, None
+            else:
+                return (prod_function(prefactor, cos_freq(frame_frequency)),
+                        prod_function(prefactor, sin_freq(frame_frequency)))

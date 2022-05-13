@@ -44,26 +44,38 @@ class PulseSequence(list):
         Returns:
             A 3-tuple of X and Y coefficients and the maximum frequency appearing in the term.
         """
-        funclist = []
-        timelist = []
-        
-        def modulate(frequency, phase_offset, time, pulse, rwa):
-            if rwa:
+       
+        if rwa:
+            def modulate(xy, frequency, phase_offset, time, pulse):
                 detuning = frequency - frame_frequency
                 def fun(t, args):
-                    phase = -detuning * t + phase_offset
-                    return drive_base * pulse(t - time, args) * (np.cos(phase) - 1.j * np.sin(phase))
+                    envelope = drive_base * pulse(t - time, args)
+                    phase = detuning * t + phase_offset
+                    
+                    if xy == 'x':
+                        return envelope.real * np.cos(phase) + envelope.imag * np.sin(phase)
+                    else:
+                        return envelope.imag * np.cos(phase) - envelope.real * np.sin(phase)
                 
-            else:
+                return fun
+                
+        else:
+            def modulate(xy, frequency, phase_offset, time, pulse): 
                 def fun(t, args):
                     double_envelope = 2. * drive_base * pulse(t - time, args)
-                    prefactor = (double_envelope.real * np.cos(frequency * t)
-                                 + double_envelope.imag * np.sin(frequency * t))
+                    prefactor = double_envelope.real * np.cos(frequency * t + phase_offset)
+                    prefactor += double_envelope.imag * np.sin(frequency * t + phase_offset)
                     
-                    return prefactor * (np.cos(frame_frequency * t)
-                                        + 1.j * np.sin(frame_frequency * t))
+                    if xy == 'x':
+                        return prefactor * np.cos(frame_frequency * t)
+                    else:
+                        return prefactor * np.sin(frame_frequency * t)
+
+                return fun
             
-            return fun
+        funclist_x = []
+        funclist_y = []
+        timelist = []
 
         frequency = initial_frequency
         max_frequency = 0. if frequency is None else frequency
@@ -82,24 +94,29 @@ class PulseSequence(list):
             elif isinstance(inst, SetPhase):
                 phase_offset = inst.value - frequency * time
             elif isinstance(inst, Delay):
-                funclist.append(0.)
+                funclist_x.append(0.)
+                funclist_y.append(0.)
                 timelist.append(time)
                 time += inst.value
             elif isinstance(inst, Pulse):
-                funclist.append(modulate(frequency, phase_offset, inst))
+                funclist_x.append(modulate('x', frequency, phase_offset, time, inst))
+                funclist_y.append(modulate('y', frequency, phase_offset, time, inst))
                 timelist.append(time)
                 time += inst.duration
                 
         timelist.append(time)
-
-        def fn(t, args):
-            # piecewise determines the output dtype from tlist
-            tlist = np.asarray(t, dtype=np.complex128)
-            condlist = [((t >= start) & (t < end)) for start, end in zip(timelist[:-1], timelist[1:])]
-            return np.piecewise(tlist, condlist, funclist, args)
         
-        fn_x = lambda t, args: fn(t, args).real
-        fn_y = lambda t, args: fn(t, args).imag
+        def make_fn(timelist, funclist):
+            def fn(t, args):
+                # piecewise determines the output dtype from tlist
+                t = np.asarray(t, dtype=np.float)
+                condlist = [((t >= start) & (t < end)) for start, end in zip(timelist[:-1], timelist[1:])]
+                return np.piecewise(t, condlist, funclist, args)
+            
+            return fn
+        
+        fn_x = make_fn(timelist, funclist_x)
+        fn_y = make_fn(timelist, funclist_y)
         
         return fn_x, fn_y, max_frequency
 
@@ -121,8 +138,10 @@ class Pulse:
     def __mul__(self, c):
         if not isinstance(c, (float, complex)):
             raise TypeError(f'Multiplication between Pulse and {type(c).__name__} is invalid')
-            
-        self._scale(c)
+
+        instance = copy.deepcopy(self)
+        instance._scale(c)
+        return instance
         
 
 class Gaussian(Pulse):
@@ -199,27 +218,31 @@ class GaussianSquare(Pulse):
         assert sigma > 1. * ns, 'Gaussian sigma must be greater than 1 ns'
         assert width < duration, 'GaussianSquare width must be less than duration'
         
-        self.gauss_width = duration - width
-        self.gauss_left = Gaussian(self.gauss_width, amp=amp, sigma=sigma,
-                                   center=None, zero_ends=zero_ends)
-        self.gauss_right = Gaussian(self.gauss_width, amp=amp, sigma=sigma,
-                                    center=None, zero_ends=zero_ends)
+        self.t1 = (duration - width) / 2.
 
-        self.amp = np.asarray(amp, dtype=np.complex128)
+        self.amp = amp
         self.width = width
+        
+        self.gauss_left = Gaussian(duration=self.t1 * 2., amp=amp, sigma=sigma,
+                                   center=None, zero_ends=zero_ends)
+        self.gauss_right = Gaussian(duration=self.t1 * 2., amp=amp, sigma=sigma,
+                                    center=None, zero_ends=zero_ends)
+        
+    def _right_tail(self, t, args):
+        return self.gauss_right(t - self.width, args)
 
     def __call__(self, t, args):
-        t1 = self.gauss_width / 2.
-        t2 = t1 + self.width
         # piecewise determines the output dtype from the first argument
         tlist = np.asarray(t, dtype=np.complex128)
         return np.piecewise(tlist,
-            [t < t1, t >= t2],
-            [self.gauss_left._call, self.gauss_right._call, self.amp],
+            [t < self.t1, t >= self.t1 + self.width],
+            [self.gauss_left, self._right_tail, self.amp],
             args)
     
     def _scale(self, c):
         self.amp *= c
+        self.gauss_left._scale(c)
+        self.gauss_right._scale(c)
 
     
 class Drag(Gaussian):
@@ -253,8 +276,8 @@ class Drag(Gaussian):
         
         self.beta = beta
         
-    def _call(self, t, args):
-        gauss = super()(t, args)
+    def __call__(self, t, args):
+        gauss = super().__call__(t, args)
         dgauss = -(t - self.center) / np.square(self.sigma) * gauss
 
         return gauss + 1.j * self.beta * dgauss

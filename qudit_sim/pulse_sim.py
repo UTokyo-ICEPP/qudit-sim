@@ -23,7 +23,7 @@ def pulse_sim(
     tlist: Union[np.ndarray, Tuple[int, int]] = (10, 100),
     args: Optional[Any] = None,
     rwa: bool = True,
-    force_array: bool = False,
+    keep_callable: bool = False,
     e_ops: Optional[Sequence[Any]] = None,
     options: Optional[qtp.solver.Options] = None,
     progress_bar: Optional[qtp.ui.progressbar.BaseProgressBar] = None,
@@ -55,8 +55,8 @@ def pulse_sim(
             case the cycle of the fastest oscillating term in the Hamiltonian will be used.
         args: Second parameter passed to drive amplitude functions (if callable).
         rwa: Whether to use the rotating-wave approximation.
-        force_array: Use an array-based Hamiltonian for the simulation. May run faster but potentially give
-            inaccurate results, depending on the Hamiltonian.
+        keep_callable: Keep callable time-dependent Hamiltonian coefficients. Otherwise all callable coefficients
+            are converted to arrays before simulation execution for efficiency (no loss of accuracy observed so far).
         e_ops: List of observables passed to the QuTiP solver.
         options: QuTiP solver options.
         progress_bar: QuTiP progress bar.
@@ -75,7 +75,7 @@ def pulse_sim(
         kwargs['args'] = args
     
     if isinstance(hgen, list):
-        common_kwargs = {'psi0': psi0, 'tlist': tlist, 'rwa': rwa, 'force_array': force_array, 'kwargs': kwargs}
+        common_kwargs = {'psi0': psi0, 'tlist': tlist, 'rwa': rwa, 'keep_callable': keep_callable, 'kwargs': kwargs}
         
         num_tasks = len(hgen)
         
@@ -94,7 +94,7 @@ def pulse_sim(
                               common_kwargs=common_kwargs, num_cpus=num_cpus, log_level=log_level)
     
     else:
-        result = _run_single(hgen, psi0, tlist, rwa, force_array, kwargs, save_result_to)
+        result = _run_single(hgen, psi0, tlist, rwa, keep_callable, kwargs, save_result_to)
         
     logger.setLevel(original_log_level)
     
@@ -106,7 +106,7 @@ def _run_single(
     psi0: Union[qtp.Qobj, None],
     tlist: Union[np.ndarray, Tuple[int, int]],
     rwa: bool,
-    force_array: bool,
+    keep_callable: bool,
     kwargs: dict,
     save_result_to: Optional[str] = None,
     logger_name: str = __name__
@@ -122,18 +122,21 @@ def _run_single(
     ## Define the time points if necessary
 
     if isinstance(tlist, tuple):
+        # Need to generate Hint and Hdrive once to get the max frequencies
+        hgen.generate_hint()
+        hgen.generate_hdrive(rwa=rwa)
         tlist = hgen.make_tlist(*tlist)
         
     logger.info('Using %d time points from %.3e to %.3e', tlist.shape[0], tlist[0], tlist[-1])
 
     ## Generate the Hamiltonian
 
-    if force_array or hgen.need_tlist:
-        tlist_arg = {'tlist': tlist, 'args': kwargs['args']}
-    else:
+    if keep_callable:
         tlist_arg = dict()
+    else:
+        tlist_arg = {'tlist': tlist, 'args': kwargs.get('args')}
         
-    hamiltonian = hgen.generate(rwa=rwa, compile_hint=True, **tlist_arg)
+    hamiltonian = hgen.generate(rwa=rwa, **tlist_arg)
     
     ## Run sesolve in a temporary directory
         
