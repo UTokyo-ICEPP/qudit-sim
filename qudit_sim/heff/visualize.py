@@ -10,7 +10,7 @@ import rqutils.paulis as paulis
 from rqutils.math import matrix_exp, matrix_angle
 from rqutils.qprint import QPrintPauli
 
-from ..scale import FrequencyScale
+from ..util import FrequencyScale
 from .common import make_heff_t
 
 twopi = 2. * np.pi

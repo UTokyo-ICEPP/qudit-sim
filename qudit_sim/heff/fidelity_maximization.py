@@ -54,7 +54,7 @@ def fidelity_maximization(
             if last_valid_it <= 1:
                 raise RuntimeError('Failed to obtain an initial estimate of the slopes')
                 
-            ilogu_compos = paulis.components(ilogus, dim=pauli_dim)
+            ilogu_compos = paulis.components(ilogus, dim=pauli_dim).real
             init = ilogu_compos[last_valid_it - 1].reshape(-1)[1:] / tlist[last_valid_it - 1]
 
         elif init == 'leastsq':
@@ -164,7 +164,7 @@ def fidelity_maximization(
         target = jnp.matmul(time_evolution, ueff_dagger)
 
         ilogtargets = -matrix_angle(target)
-        ilogtarget_compos = paulis.components(ilogtargets, dim=pauli_dim)
+        ilogtarget_compos = paulis.components(ilogtargets, dim=pauli_dim).real
         ilogtarget_compos = ilogtarget_compos.reshape(tlist_norm.shape[0], -1)[:, 1:]
 
         ## Do a linear fit to each component
@@ -172,10 +172,13 @@ def fidelity_maximization(
 
         failed = np.logical_not(success)
         if np.any(failed):
-            failed_indices = np.unravel_index(np.nonzero(failed)[0] + 1, basis.shape[:-2])
-            list_of_tuples = list(zip(*failed_indices))
+            failed_indices = np.nonzero(failed)[0]
+            # compos list has the first element (identity) removed -> add 1 to the indices before unraveling
+            failed_basis_indices = np.unravel_index(failed_indices + 1, basis.shape[:-2])
+            # convert to a list of tuples
+            failed_basis_indices = list(zip(*failed_basis_indices))
             residual_values_str = ', '.join(f'{idx_tuple}: {np.max(np.abs(ilogtarget_compos[:, idx]))}'
-                                           for idx_tuple, idx in zip(list_of_tuples, failed_indices))
+                                           for idx_tuple, idx in zip(failed_basis_indices, failed_indices))
             logger.warning('Residual adjustment failed for components %s', residual_values_str)
             
         copt += dopt
