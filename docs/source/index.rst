@@ -9,7 +9,7 @@ qudit-sim: Multi-qudit system simulation and analysis
 .. toctree::
    :maxdepth: 2
    :caption: Contents:
-   
+
    API References <apidocs/qudit_sim>
 
 

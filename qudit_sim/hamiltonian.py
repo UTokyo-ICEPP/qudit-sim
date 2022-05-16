@@ -76,7 +76,7 @@ Each :math:`h_j` commutes with :math:`b_k` and :math:`b_k^{\dagger}` if :math:`k
 
     \tilde{H}_{\mathrm{int}} & = \sum_{j<k} J_{jk} \left( \tilde{b}_j^{\dagger} \tilde{b}_k + \tilde{b}_j \tilde{b}_k^{\dagger} \right) \\
     \tilde{H}_{\mathrm{d}} & = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i(\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right) \left( \tilde{b}_k^{\dagger} + \tilde{b}_k \right)
-    
+
 where
 
 .. math::
@@ -89,7 +89,7 @@ By definition :math:`b_j N_j = (N_j + 1) b_j`, which implies
 .. math::
 
     b_j e^{-i h_j t} = \exp \left\{ -i \left[\left( \omega_j - \frac{\Delta_j}{2} \right) (N_j + 1) + \frac{\Delta_j}{2} (N_j + 1)^2) \right] t \right\} b_j
-    
+
 and therefore
 
 .. math::
@@ -110,7 +110,7 @@ The interaction Hamiltonian in the qudit frame is therefore
 
     \tilde{H}_{\mathrm{int}} & = \sum_{j<k} J_{jk} \left( e^{i (\omega_j - \omega_k) t} e^{i [\Delta_j (N_j - 1) - \Delta_k N_k] t} b_j^{\dagger} b_k + \mathrm{h.c.} \right) \\
                              & = \sum_{j<k} J_{jk} \left( e^{i (\omega_j - \omega_k) t} \sum_{lm} e^{i (\Delta_j l - \Delta_k m) t} \sqrt{(l+1)(m+1)} | l + 1 \rangle_j \langle l |_j \otimes | m \rangle_k \langle m + 1 |_k + \mathrm{h.c.} \right).
-    
+
 In the last line, we used the expansion of the annihilation operator :math:`b_j = \sum_{l} \sqrt{l+1} | l \rangle_j \langle l + 1 |_j` and its Hermitian conjugate.
 
 The drive Hamiltonian in the qudit frame is
@@ -119,7 +119,7 @@ The drive Hamiltonian in the qudit frame is
 
     \tilde{H}_{\mathrm{d}} & = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i(\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right) \left( e^{i(\omega_k + \Delta_k (N_k - 1))t} b_k^{\dagger} + \mathrm{h.c.} \right) \\
                            & = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i(\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right) \sum_l \left( e^{i \omega_k t} e^{i \Delta_k l t} \sqrt{l+1} | l + 1 \rangle_k \langle l |_k + \mathrm{h.c.} \right).
-    
+
 General frame
 -------------
 
@@ -136,7 +136,7 @@ and the phase offset between level :math:`l` and :math:`l+1` be :math:`\xi_{j}^{
 .. math::
 
     \tilde{H} = U_f H U_f^{\dagger} + i \dot{U_f} U_f^{\dagger} = H_{\mathrm{diag}} + \tilde{H}_{\mathrm{int}} + \tilde{H}_{\mathrm{d}}.
-    
+
 The three terms can be expressed in terms of individual qudit levels as
 
 .. math::
@@ -190,6 +190,7 @@ dependencies given by cosine and sine functions, respectively.
 # and exploit such cases in the future.
 
 from typing import Any, Dict, Sequence, List, Tuple, Callable, Optional, Union, Hashable
+import copy
 from dataclasses import dataclass
 import numpy as np
 import qutip as qtp
@@ -230,20 +231,20 @@ class HamiltonianGenerator:
         params: Optional[Dict[str, Any]] = None
     ) -> None:
         self._num_levels = num_levels
-        
+
         # Makes use of dict order guarantee from python 3.7
         self._qudit_params = dict()
         self._coupling = dict()
         self._crosstalk = dict()
         self._drive = dict()
         self._frame = dict()
-        
+
         self._max_frequency_int = None
         self._max_frequency_drive = None
-        
+
         if qudits is None:
             return
-        
+
         if isinstance(qudits, int):
             qudits = (qudits,)
 
@@ -257,7 +258,7 @@ class HamiltonianGenerator:
                 continue
 
             self.add_coupling(q1, q2, coupling)
-            
+
         if 'crosstalk' in params:
             for (qsrc, qtrg), factor in params['crosstalk'].items():
                 self.add_crosstalk(qsrc, qtrg, factor)
@@ -271,28 +272,28 @@ class HamiltonianGenerator:
     def num_qudits(self) -> int:
         """Number of qudits."""
         return len(self._qudit_params)
-        
+
     @property
     def max_frequency(self) -> float:
         """Maximum frequency appearing in this Hamiltonian."""
         return max(self._max_frequency_int, self._max_frequency_drive)
-    
+
     def qudit_params(self, qudit_id: Hashable) -> QuditParams:
         """Qudit parameters."""
         return self._qudit_params[qudit_id]
-    
+
     def coupling(self, q1: Hashable, q2: Hashable) -> float:
         """Coupling constant between the two qudits."""
         return self._coupling[frozenset({self._qudit_params[q1], self._qudit_params[q2]})]
-    
+
     def crosstalk(self, source: Hashable, target: Hashable) -> complex:
         """Crosstalk factor from source to target."""
         return self._crosstalk[(self._qudit_params[source], self._qudit_params[target])]
-    
+
     def drive(self, qudit_id: Hashable) -> List[DriveTerm]:
         """Drive terms for the qudit."""
         return list(self._drive[self._qudit_params[qudit_id]])
-    
+
     def add_qudit(
         self,
         qubit_frequency: float,
@@ -304,7 +305,7 @@ class HamiltonianGenerator:
         frame_phase: Optional[np.ndarray] = None,
     ) -> None:
         """Add a qudit to the system.
-        
+
         Args:
             qubit_frequency: Qubit frequency.
             anharmonicity: Anharmonicity.
@@ -316,13 +317,13 @@ class HamiltonianGenerator:
         """
         params = QuditParams(qubit_frequency=qubit_frequency, anharmonicity=anharmonicity,
                              drive_amplitude=drive_amplitude)
-        
+
         if qudit_id is None:
             if position is None:
                 qudit_id = len(self._qudit_params)
             else:
                 qudit_id = position
-                
+
         if qudit_id in self._qudit_params:
             raise KeyError(f'Qudit id {qudit_id} already exists.')
 
@@ -337,10 +338,10 @@ class HamiltonianGenerator:
 
             self._qudit_params.clear()
             self._qudit_params.update(qudit_params)
-            
+
         self._drive[params] = list()
         self._frame[params] = Frame(frequency=frame_frequency, phase=frame_phase)
-        
+
     def set_frame(
         self,
         qudit_id: Hashable,
@@ -348,9 +349,9 @@ class HamiltonianGenerator:
         phase: Optional[Union[np.ndarray, float]] = None
     ) -> None:
         """Set the frame for the qudit.
-        
+
         The arrays must be of size `num_levels - 1`.
-        
+
         Args:
             qudit_id: Qudit ID.
             frequency: Frame frequency for each level gap.
@@ -361,21 +362,21 @@ class HamiltonianGenerator:
             phase = np.full(self.num_qudits, phase)
 
         self._frame[self._qudit_params[qudit_id]] = Frame(frequency=frequency, phase=phase)
-            
+
     def add_coupling(self, q1: Hashable, q2: Hashable, value: float) -> None:
         """Add a coupling term between two qudits."""
         self._coupling[frozenset({self._qudit_params[q1], self._qudit_params[q2]})] = value
-            
+
     def add_crosstalk(self, source: Hashable, target: Hashable, factor: complex) -> None:
         r"""Add a crosstalk term from the source channel to the target qudit.
-        
+
         Args:
             source: Qudit ID of the source channel.
             target: Qudit ID of the target qudit.
             factor: Crosstalk coefficient (:math:`\alpha_{jk} e^{i\rho_{jk}}`).
         """
         self._crosstalk[(self._qudit_params[source], self._qudit_params[target])] = factor
-        
+
     def add_drive(
         self,
         qudit_id: Hashable,
@@ -384,7 +385,7 @@ class HamiltonianGenerator:
         phase: Optional[float] = None
     ) -> None:
         r"""Add a drive term.
-        
+
         Args:
             qudit_id: Qudit to apply the drive to.
             frequency: Carrier frequency of the drive. None is allowed if amplitude is a PulseSequence
@@ -404,55 +405,55 @@ class HamiltonianGenerator:
         args: Optional[Dict[str, Any]] = None
     ) -> List:
         """Return the list of Hamiltonian terms passable to qutip.sesolve.
-        
+
         Args:
             rwa: If True, apply the rotating-wave approximation.
             compile_hint: If True, interaction Hamiltonian terms are given as compilable strings.
             tlist: If not None, all callable Hamiltonian coefficients are called with `(tlist, args)` and the
                 resulting arrays are instead passed to sesolve.
             args: Arguments to the callable coefficients.
-        
+
         Returns:
             A list of Hamiltonian terms that can be passed to qutip.sesolve.
-        """            
+        """
         hstatic = self.generate_hdiag()
         hint = self.generate_hint(compile_hint=compile_hint, tlist=tlist, args=args)
         hdrive = self.generate_hdrive(rwa=rwa, tlist=tlist, args=args)
-        
+
         if hint and isinstance(hint[0], qtp.Qobj):
             hstatic += hint.pop(0)
         if hdrive and isinstance(hdrive[0], qtp.Qobj):
             hstatic += hdrive.pop(0)
 
         hamiltonian = []
-        
+
         if hstatic != qtp.Qobj():
             # The static term does not have to be the first element (nor does it have to be a single term, actually)
             # but qutip recommends following this convention
             hamiltonian.append(hstatic)
-            
+
         hamiltonian.extend(hint)
         hamiltonian.extend(hdrive)
-            
+
         return hamiltonian
-        
+
     def generate_hdiag(self) -> qtp.Qobj:
         """Generate the diagonal term of the Hamiltonian.
-        
+
         Returns:
             A Qobj representing Hdiag. The object may be empty if the qudit frame is used.
         """
         hdiag = qtp.Qobj()
-        
+
         num_qudits = len(self._qudit_params)
-        
+
         for iq, params in enumerate(self._qudit_params.values()):
             frame = self._frame[params]
-            
+
             if frame.frequency is None:
                 # qudit frame -> free Hamiltonian is null
                 continue
-                
+
             qudit_hfree = np.arange(self._num_levels) * (params.qubit_frequency - params.anharmonicity / 2.)
             qudit_hfree += np.square(np.arange(self._num_levels)) * params.anharmonicity / 2.
             energy_offset = qudit_hfree - np.cumsum(np.concatenate((np.zeros(1), frame.frequency)))
@@ -460,11 +461,11 @@ class HamiltonianGenerator:
 
             ops = [qtp.qeye(self._num_levels)] * num_qudits
             ops[iq] = qudit_op
-            
+
             hdiag += qtp.tensor(ops)
-            
+
         return hdiag
-    
+
     def generate_hint(
         self,
         compile_hint: bool = True,
@@ -472,13 +473,13 @@ class HamiltonianGenerator:
         args: Optional[Dict[str, Any]] = None
     ) -> List:
         """Generate the interaction Hamiltonian.
-        
+
         Args:
             compile_hint: If True, interaction Hamiltonian terms are given as compilable strings.
             tlist: Array of time points. If provided and `compile_hint=False`, all callable coefficients
                 are called with `(tlist, args)` and the resulting arrays are returned.
             args: Arguments to the callable coefficients.
-            
+
         Returns:
             A list of Hamiltonian terms. The first entry may be a single Qobj instance if there is a static term.
             Otherwise the entries are 2-lists `[Qobj, c(t)]`.
@@ -490,11 +491,11 @@ class HamiltonianGenerator:
 
         num_qudits = len(self._qudit_params)
         params_list = list(self._qudit_params.values())
-        
+
         for iq1, iq2 in np.ndindex((num_qudits, num_qudits)):
             if iq2 <= iq1:
                 continue
-                
+
             p1 = params_list[iq1]
             p2 = params_list[iq2]
 
@@ -506,36 +507,36 @@ class HamiltonianGenerator:
 
             for l1, l2 in np.ndindex((self._num_levels - 1, self._num_levels - 1)):
                 # exp(i (xi_{p1,l1} - xi_{p2,l2}) t) sqrt(l1 + 1) sqrt(l2 + 1) |l1+1>|l2><l1|<l2+1| + h.c.
-                
+
                 # Annihilator terms for this level combination
                 ann1 = np.sqrt(l1 + 1) * qtp.basis(self._num_levels, l1) * qtp.basis(self._num_levels, l1 + 1).dag()
                 ann2 = np.sqrt(l2 + 1) * qtp.basis(self._num_levels, l2) * qtp.basis(self._num_levels, l2 + 1).dag()
-                
+
                 ops = [qtp.qeye(self._num_levels)] * num_qudits
                 ops[iq1] = ann1.dag()
                 ops[iq2] = ann2
-                
+
                 op = qtp.tensor(ops)
                 frequency = 0.
-                
+
                 for params, level, sign in [(p1, l1, 1.), (p2, l2, -1.)]:
                     frame = self._frame[params]
-                    
+
                     if frame.phase is not None:
                         op *= np.exp(sign * 1.j * frame.phase[level])
-                        
+
                     if frame.frequency is None:
                         frequency += sign * (params.qubit_frequency + level * params.anharmonicity)
                     else:
                         frequency += sign * frame.frequency[level]
-                        
+
                 if abs(frequency) < REL_FREQUENCY_EPSILON * (p1.qubit_frequency + p2.qubit_frequency) * 0.5:
                     hstatic += coupling * (op + op.dag())
 
                 else:
                     h_x = coupling * (op + op.dag())
                     h_y = coupling * 1.j * (op - op.dag())
-                
+
                     if compile_hint:
                         hint.append([h_x, f'cos({frequency}*t)'])
                         hint.append([h_y, f'sin({frequency}*t)'])
@@ -550,7 +551,7 @@ class HamiltonianGenerator:
                             hint.append([h_y, fn_y(tlist, args)])
 
                     self._max_frequency_int = max(self._max_frequency_int, abs(frequency))
-                    
+
         if hstatic != qtp.Qobj():
             hint.insert(0, hstatic)
 
@@ -563,29 +564,29 @@ class HamiltonianGenerator:
         args: Optional[Dict[str, Any]] = None
     ) -> List:
         """Generate the drive Hamiltonian.
-        
+
         Args:
             rwa: If True, apply the rotating-wave approximation.
             tlist: Array of time points. Required when at least one drive amplitude is given as an array.
             args: Arguments to the callable coefficients.
-            
+
         Returns:
             A list of Hamiltonian terms. The first entry may be a single Qobj instance if there is a static term.
             Otherwise the entries are 2-lists `[Qobj, c(t)]`.
         """
         self._max_frequency_drive = 0.
-        
+
         hdrive = list()
         hstatic = qtp.Qobj()
-        
+
         num_qudits = len(self._qudit_params)
-        
+
         # Construct the Qobj for each qudit/level first
         qops = list()
 
         for iq, params in enumerate(self._qudit_params.values()):
             frame = self._frame[params]
-            
+
             for level in range(self._num_levels - 1):
                 cre = np.sqrt(level + 1) * qtp.basis(self._num_levels, level + 1) * qtp.basis(self._num_levels, level).dag()
 
@@ -593,10 +594,10 @@ class HamiltonianGenerator:
                 ops[iq] = cre
 
                 op = qtp.tensor(ops)
-                
+
                 if frame.phase is not None:
                     op *= np.exp(1.j * frame.phase[level])
-                
+
                 if frame.frequency is None:
                     frame_frequency = params.qubit_frequency + level * params.anharmonicity
                 else:
@@ -632,7 +633,7 @@ class HamiltonianGenerator:
                             hstatic += fn_x * h_x
                         if fn_y != 0.:
                             hstatic += fn_y * h_y
-                            
+
                     elif isinstance(fn_x, str):
                         hdrive.append([h_x, fn_x])
                         if fn_y:
@@ -655,22 +656,22 @@ class HamiltonianGenerator:
                                 hdrive.append([h_y, fn_y(tlist, args)])
 
                     self._max_frequency_drive = max(self._max_frequency_drive, term_max_frequency)
-                
+
         if hstatic != qtp.Qobj():
             hdrive.insert(0, hstatic)
-                
+
         return hdrive
-                
+
     def make_tlist(
         self,
         points_per_cycle: int,
         num_cycles: int
     ) -> np.ndarray:
         """Generate a list of time points using the maximum frequency in the Hamiltonian.
-        
+
         When the maximum frequency is 0 (i.e. single-qubit simulation with resonant drive), return the time
         range from 0 to 2pi/sqrt(tr(Hstat . Hstat) / 2^nq).
-    
+
         Args:
             points_per_cycle: Number of points per cycle at the highest frequency.
             num_cycles: Number of overall cycles.
@@ -688,3 +689,48 @@ class HamiltonianGenerator:
             return np.linspace(0., 2. * np.pi / np.sqrt(amp2) * num_cycles, points_per_cycle * num_cycles)
         else:
             return np.linspace(0., 2. * np.pi / self.max_frequency * num_cycles, points_per_cycle * num_cycles)
+
+    def make_scan(
+        self,
+        scan_type: str,
+        values: Sequence,
+        **kwargs
+    ) -> List['HamiltonianGenerator']:
+        """Generate a list of copies of self varied over a single attribute.
+
+        The argument `scan_type` determines which attribute to make variations over. Implemented scan types are
+        - `'amplitude'`: Drive amplitudes. Elements of `values` are passed to the `amplitude` parameter of `add_drive`.
+        - `'frequency'`: Drive frequencies. Elements of `values` are passed to the `frequency` parameter of `add_drive`.
+        - `'coupling'`: Qudit-qudit couplings. Elements of `values` are passed to the `value` parameter of `add_coupling`.
+
+        In all cases, the remaining arguments to the respective functions must be given in the `kwargs` of this method.
+
+        Args:
+            scan_type: `'amplitude'`, `'frequency'`, or `'coupling'`.
+            values: A list of values. One copy of self is created for each value.
+            kwargs: Remaining arguments to the function to be called on each copy.
+
+        Returns:
+            A list of copies of self varied over the specified attribute.
+        """
+        copies = list(copy.deepcopy(self) for _ in range(len(values)))
+
+        if scan_type == 'amplitude':
+            for value, instance in zip(values, copies):
+                instance.add_drive(qudit_id=kwargs['qudit_id'],
+                                   frequency=kwargs.get('frequency'),
+                                   amplitude=value,
+                                   phase=kwargs.get('phase'))
+
+        elif scan_type == 'frequency':
+            for value, instance in zip(values, copies):
+                instance.add_drive(qudit_id=kwargs['qudit_id'],
+                                   frequency=value,
+                                   amplitude=kwargs.get('amplitude', 1.+0.j),
+                                   phase=kwargs.get('phase'))
+
+        elif scan_type == 'coupling':
+            for value, instance in zip(values, copies):
+                instance.add_coupling(q1=kwargs['q1'], q2=kwargs['q2'], value=value)
+
+        return copies

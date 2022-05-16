@@ -14,16 +14,16 @@ logger = logging.getLogger(__name__)
 class ThreadConn:
     def __init__(self):
         pass
-        
+
     def poll(self):
         return hasattr(self, 'value')
-        
+
     def send(self, value):
         self.value = value
-        
+
     def recv(self):
         return self.value
-    
+
     def close(self):
         del self.value
 
@@ -47,7 +47,7 @@ def _wait_procs(processes, results, max_num, wait=2):
             time.sleep(wait)
         else:
             break
-            
+
 def _process_wrapper(target, args, kwargs, conn):
     result = target(*args, **kwargs)
     conn.send(result)
@@ -65,11 +65,11 @@ def parallel_map(
     log_level: int = logging.WARNING
 ) -> list:
     """Call the target on a list of args in parallel processes.
-    
+
     The returned result is equivalent to
 
     .. code-block:: python
-    
+
         kwargs = list(dict(zip(kwarg_keys, values)) for values in kwarg_values)
         [target(*(a + common_args), **(k | common_kwargs)) for a, k in zip(args, kwargs)]
 
@@ -81,7 +81,7 @@ def parallel_map(
         positional[arg_position[i]] = args[][i]
 
     with `common_args` filling in the unused positions in order.
-    
+
     Args:
         target: Function to execute in parallel.
         args: List of positional arguments.
@@ -93,18 +93,18 @@ def parallel_map(
         num_cpus: Maximum number of processes to run concurrently.
         thread_based: Use threads instead of processes.
         log_level: logger level.
-        
+
     Returns:
         List of return values of the function.
     """
     original_log_level = logger.level
     logger.setLevel(log_level)
-    
+
     if num_cpus <= 0:
         num_cpus = cpu_count()
-            
+
     assert num_cpus > 0, f'Invalid num_cpus value {num_cpus}'
-    
+
     arg_list = None
 
     if args is not None:
@@ -126,25 +126,25 @@ def parallel_map(
 
         else:
             arg_list = list((tuple(), k) for k in kwargs)
-            
+
     assert arg_list is not None
-    
+
     logger.info('Starting %d parallel execution of %s', len(arg_list), target.__name__)
-    
+
     num_done = 0
 
     processes = []
     results = [None] * len(arg_list)
-    
+
     for itask, (a, k) in enumerate(arg_list):
         num_procs = len(processes)
-        
+
         _wait_procs(processes, results, num_cpus - 1)
-        
+
         if len(processes) < num_procs:
             num_done += num_procs - len(processes)
             logger.info(' %d processes completed', num_done)
-        
+
         if common_args is not None:
             if arg_position is None:
                 a += common_args
@@ -161,9 +161,9 @@ def parallel_map(
                         newargs.append(next(common))
                     else:
                         newargs.append(a[pos_idx])
-                        
+
                 a = tuple(newargs)
-                
+
         if common_kwargs is not None:
             k.update(common_kwargs)
 
@@ -179,13 +179,13 @@ def parallel_map(
 
         process.start()
         processes.append((process, itask, conn_recv))
-        
+
         logger.debug('Process %d started', itask)
-        
+
     _wait_procs(processes, results, 0)
 
     logger.info('All processes completed')
-    
+
     logger.setLevel(original_log_level)
-    
+
     return results

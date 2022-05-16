@@ -68,7 +68,7 @@ def exp_freq(freq, phase=0.):
     def fun(t, args):
         exponent = t * freq + phase
         return np.cos(exponent) + 1.j * np.sin(exponent)
-    
+
     return fun
 
 def scaled_function(scale, fun):
@@ -107,7 +107,7 @@ def abs_function(fun):
 @dataclass(frozen=True)
 class DriveTerm:
     r"""Data class representing a drive.
-    
+
     Args:
         frequency: Carrier frequency of the drive. None is allowed if amplitude is a PulseSequence
             that starts with SetFrequency.
@@ -118,7 +118,7 @@ class DriveTerm:
     frequency: Optional[float] = None
     amplitude: Union[float, complex, str, np.ndarray, PulseSequence, Callable] = 1.+0.j
     phase: Optional[float] = None
-    
+
     def generate_fn(
         self,
         frame_frequency: float,
@@ -126,21 +126,21 @@ class DriveTerm:
         rwa: bool
     ) -> tuple:
         r"""Generate the coefficients for X and Y drives.
-        
+
         Args:
             frame_frequency: Frame frequency :math:`\xi_k^{l}`.
             drive_base: Factor :math:`\alpha_{jk} e^{i \rho_{jk}} \frac{\Omega_j}{2}`.
             rwa: If True, returns the RWA coefficients.
-            
+
         Returns:
             A 3-tuple of X and Y coefficients and the maximum frequency appearing in the term.
         """
         if isinstance(self.amplitude, PulseSequence):
             return self.amplitude.generate_fn(frame_frequency, drive_base, rwa, initial_frequency=self.frequency)
-        
+
         if self.frequency is None:
             raise RuntimeError('Drive frequency not set')
-            
+
         amplitude = self.amplitude
         if isinstance(amplitude, str):
             # If this is actually a static expression, convert to complex
@@ -148,16 +148,16 @@ class DriveTerm:
                 amplitude = eval(amplitude)
             except:
                 pass
-            
+
         if rwa:
             fn_x, fn_y = self._generate_fn_rwa(amplitude, frame_frequency, drive_base)
             max_freq = abs(self.frequency - frame_frequency)
         else:
             fn_x, fn_y = self._generate_fn_full(amplitude, frame_frequency, drive_base)
             max_freq = self.frequency + frame_frequency
-            
+
         return fn_x, fn_y, max_freq
-        
+
     def _generate_fn_rwa(self, amplitude, frame_frequency, drive_base):
         detuning = self.frequency - frame_frequency
         is_resonant = (abs(detuning) < REL_FREQUENCY_EPSILON * frame_frequency)
@@ -225,13 +225,13 @@ class DriveTerm:
                 absf = abs_function(envelope)
                 return (prod_function(absf, cos_freq(-detuning, phase)),
                         prod_function(absf, sin_freq(-detuning, phase)))
-            
+
         else:
             raise TypeError(f'Unsupported amplitude type f{type(amplitude)}')
 
     def _generate_fn_full(self, amplitude, frame_frequency, drive_base):
         lab_frame = (frame_frequency == 0.)
-        
+
         if isinstance(amplitude, (float, complex)):
             # static envelope
             double_envelope = 2. * amplitude * drive_base
@@ -241,7 +241,7 @@ class DriveTerm:
                 prefactor_terms.append(f'({double_envelope.real} * cos({self.frequency} * t))')
             if double_envelope.imag != 0.:
                 prefactor_terms.append(f'({double_envelope.imag} * sin({self.frequency} * t))')
-                
+
             prefactor = ' + '.join(prefactor_terms)
             if len(prefactor_terms) > 1:
                 prefactor = f'({prefactor})'
@@ -266,7 +266,7 @@ class DriveTerm:
 
             if self.phase is None:
                 prefactor = real_function(prod_function(double_envelope, exp_freq(-self.frequency)))
-                
+
             else:
                 phase = np.angle(drive_base) + self.phase
                 absf = abs_function(double_envelope)
@@ -281,7 +281,7 @@ class DriveTerm:
             else:
                 return (f'{prefactor} * cos({frame_frequency} * t)',
                         f'{prefactor} * sin({frame_frequency} * t)')
-            
+
         else:
             if lab_frame:
                 return prefactor, None

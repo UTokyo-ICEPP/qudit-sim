@@ -23,7 +23,7 @@ def get_ilogus_and_valid_it(unitaries):
         hits_minus_pi = np.asarray(ilogv_ext < -np.pi + margin).nonzero()[0]
         if len(hits_minus_pi) != 0:
             last_valid_it = min(last_valid_it, hits_minus_pi[0])
-            
+
     return ilogus, ilogvs, last_valid_it
 
 
@@ -49,7 +49,7 @@ def compose_ueff(
     heff = npmod.tensordot(basis_list, heff_compos, (0, 0))
 
     heff_t = make_heff_t(heff, tlist, npmod=npmod)
-    
+
     return matrix_exp(phase_factor * 1.j * heff_t, hermitian=-1, npmod=npmod)
 
 
@@ -64,5 +64,5 @@ def heff_fidelity(
 
     tr_u_ueffdag = npmod.trace(npmod.matmul(time_evolution, ueffdag_t), axis1=1, axis2=2)
     fidelity = (npmod.square(tr_u_ueffdag.real) + npmod.square(tr_u_ueffdag.imag)) / (ueffdag_t.shape[-1] ** 2)
-    
+
     return fidelity
