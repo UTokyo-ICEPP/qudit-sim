@@ -180,6 +180,9 @@ def fidelity_maximization(
 
         copt = params['c']
 
+    if not np.all(np.isfinite(copt)):
+        raise ValueError('Optimized components not finite')
+
     if residual_adjust:
         logger.info('Adjusting the Pauli components obtained from a linear fit to the residuals..')
 

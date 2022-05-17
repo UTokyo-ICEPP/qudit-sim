@@ -120,6 +120,9 @@ The drive Hamiltonian in the qudit frame is
     \tilde{H}_{\mathrm{d}} & = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i(\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right) \left( e^{i(\omega_k + \Delta_k (N_k - 1))t} b_k^{\dagger} + \mathrm{h.c.} \right) \\
                            & = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i(\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right) \sum_l \left( e^{i \omega_k t} e^{i \Delta_k l t} \sqrt{l+1} | l + 1 \rangle_k \langle l |_k + \mathrm{h.c.} \right).
 
+Mixed frame
+-----------
+
 General frame
 -------------
 
@@ -195,6 +198,7 @@ from dataclasses import dataclass
 import numpy as np
 import qutip as qtp
 
+import rqutils.paulis as paulis
 from .pulse import PulseSequence
 from .drive import DriveTerm, cos_freq, sin_freq
 
@@ -223,14 +227,19 @@ class HamiltonianGenerator:
             augmented with `'crosstalk'`, which should be a `dict` of form `{(j, k): z}` specifying the crosstalk
             factor `z` (complex corresponding to :math:`\alpha_{jk} e^{i\rho_{jk}}`) of drive on qudit `j` seen
             by qudit `k`. `j` and `k` are qudit ids given in `qudits`.
+        default_frame: Default global frame to use. `set_global_frame(default_frame)` is executed each time
+            `add_qudit` or `add_coupling` is called.
     """
     def __init__(
         self,
         num_levels: int = 2,
         qudits: Optional[Union[int, Sequence[int]]] = None,
-        params: Optional[Dict[str, Any]] = None
+        params: Optional[Dict[str, Any]] = None,
+        default_frame: str = 'mixed'
     ) -> None:
         self._num_levels = num_levels
+
+        self.default_frame = default_frame
 
         # Makes use of dict order guarantee from python 3.7
         self._qudit_params = dict()
@@ -342,6 +351,8 @@ class HamiltonianGenerator:
         self._drive[params] = list()
         self._frame[params] = Frame(frequency=frame_frequency, phase=frame_phase)
 
+        self.set_global_frame(self.default_frame)
+
     def set_frame(
         self,
         qudit_id: Hashable,
@@ -363,9 +374,86 @@ class HamiltonianGenerator:
 
         self._frame[self._qudit_params[qudit_id]] = Frame(frequency=frequency, phase=phase)
 
+    def set_global_frame(self, frame: str) -> None:
+        r"""Set frames for all qudits globally.
+
+        The allowed frame names are:
+
+        - 'qudit': Set frame frequencies to the individual qudit level gaps disregarding the couplings.
+          Equivalent to calling `set_frame(qid, frequency=None, phase=None)` for all `qid`.
+        - 'lab': Set frame frequencies to zero.
+        - 'mixed': Diagonalize the static Hamiltonian (in the lab frame) and set the frame frequencies
+          to the closest eigenvalues.
+
+        The mixed frame is determined by computing :math:`H_0 + H_{\mathrm{int}} = U D U^{\dagger}`,
+        where :math:`D` is the diagonal matrix of the Hamiltonian eigenvalues and :math:`U` is the
+        diagonalizing unitary. The ordering of the eigenvalues is indeterministic, but as long as the
+        couplings are perturbative, from
+
+        .. math::
+
+            H_{ij} = \sum_k U_{ik} D_{kk} U^{\dagger}_{kj}
+
+        we see that the eigenvalue that contributes the most to :math:`H_{ii}` is :math:`D_{kk}` where
+
+        .. math::
+
+            k = \underset{k}{\operatorname{argmax}} |U_{ik}|
+
+        Args:
+            frame: 'qudit', 'lab', or 'mixed'.
+        """
+
+        if frame == 'mixed' and len(self._coupling) == 0:
+            frame = 'qudit'
+
+        if frame == 'qudit':
+            for qid in self._qudit_params.keys():
+                self.set_frame(qid)
+
+        elif frame == 'lab':
+            for qid in self._qudit_params.keys():
+                self.set_frame(qid, frequency=np.zeros(self._num_levels - 1))
+
+        elif frame == 'mixed':
+            # Move to the lab frame first to generate a fully static H0+Hint
+            self.set_global_frame('lab')
+
+            hamiltonian = self.generate_hdiag() + self.generate_hint()[0]
+            eigvals, unitary = np.linalg.eigh(hamiltonian.full())
+            # hamiltonian == unitary @ np.diag(eigvals) @ unitary.T.conjugate()
+
+            # Row index of the biggest contributor to each column
+            k = np.argmax(np.abs(unitary), axis=1)
+            # Reordered eigenvalue matrix
+            eigvals_matrix = np.diag(eigvals[k])
+
+            # Decompose the diagonal matrix of eigenvalues
+            dim = (self.num_levels,) * self.num_qudits
+            components = paulis.components(eigvals_matrix, dim=dim)
+
+            # Compose the qudit matrices (term corresponding to I..IdI..I)
+            for iq, qid in enumerate(self._qudit_params.keys()):
+                indices = (0,) * iq + (slice(None),) + (0,) * (self.num_qudits - iq - 1)
+                qudit_matrix = paulis.compose(components[indices])
+                # Account for the lambda_0 normalization
+                # The actual Pauli terms are nu_0..0j0..0 (λ_0..λ_0 λ_j λ_0..λ_0 / 2^{s-1})
+                # but we computed sum_j nu_0..0j0..0 I..I λ_j I..I
+                qudit_matrix *= (np.sqrt(2. / self.num_levels) / 2) ** (self.num_qudits - 1)
+
+                diag = np.diag(qudit_matrix)
+                frame = diag[1:] - diag[0]
+
+                self.set_frame(qid, frequency=frame)
+
+        else:
+            raise ValueError(f'Global frame {frame} is not defined')
+
     def add_coupling(self, q1: Hashable, q2: Hashable, value: float) -> None:
         """Add a coupling term between two qudits."""
         self._coupling[frozenset({self._qudit_params[q1], self._qudit_params[q2]})] = value
+
+        self.set_global_frame(self.default_frame)
 
     def add_crosstalk(self, source: Hashable, target: Hashable, factor: complex) -> None:
         r"""Add a crosstalk term from the source channel to the target qudit.
@@ -445,8 +533,6 @@ class HamiltonianGenerator:
         """
         hdiag = qtp.Qobj()
 
-        num_qudits = len(self._qudit_params)
-
         for iq, params in enumerate(self._qudit_params.values()):
             frame = self._frame[params]
 
@@ -459,7 +545,7 @@ class HamiltonianGenerator:
             energy_offset = qudit_hfree - np.cumsum(np.concatenate((np.zeros(1), frame.frequency)))
             qudit_op = qtp.Qobj(inpt=np.diag(energy_offset))
 
-            ops = [qtp.qeye(self._num_levels)] * num_qudits
+            ops = [qtp.qeye(self._num_levels)] * self.num_qudits
             ops[iq] = qudit_op
 
             hdiag += qtp.tensor(ops)
@@ -489,10 +575,9 @@ class HamiltonianGenerator:
         hint = list()
         hstatic = qtp.Qobj()
 
-        num_qudits = len(self._qudit_params)
         params_list = list(self._qudit_params.values())
 
-        for iq1, iq2 in np.ndindex((num_qudits, num_qudits)):
+        for iq1, iq2 in np.ndindex((self.num_qudits, self.num_qudits)):
             if iq2 <= iq1:
                 continue
 
@@ -512,7 +597,7 @@ class HamiltonianGenerator:
                 ann1 = np.sqrt(l1 + 1) * qtp.basis(self._num_levels, l1) * qtp.basis(self._num_levels, l1 + 1).dag()
                 ann2 = np.sqrt(l2 + 1) * qtp.basis(self._num_levels, l2) * qtp.basis(self._num_levels, l2 + 1).dag()
 
-                ops = [qtp.qeye(self._num_levels)] * num_qudits
+                ops = [qtp.qeye(self._num_levels)] * self.num_qudits
                 ops[iq1] = ann1.dag()
                 ops[iq2] = ann2
 
@@ -579,8 +664,6 @@ class HamiltonianGenerator:
         hdrive = list()
         hstatic = qtp.Qobj()
 
-        num_qudits = len(self._qudit_params)
-
         # Construct the Qobj for each qudit/level first
         qops = list()
 
@@ -590,7 +673,7 @@ class HamiltonianGenerator:
             for level in range(self._num_levels - 1):
                 cre = np.sqrt(level + 1) * qtp.basis(self._num_levels, level + 1) * qtp.basis(self._num_levels, level).dag()
 
-                ops = [qtp.qeye(self._num_levels)] * num_qudits
+                ops = [qtp.qeye(self._num_levels)] * self.num_qudits
                 ops[iq] = cre
 
                 op = qtp.tensor(ops)
