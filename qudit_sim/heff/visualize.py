@@ -428,7 +428,7 @@ def _plot_ilogu_compos(axes, compos_data, num_qudits, num_paulis, limit_componen
     num_comp_paulis = comp_dim ** 2
 
     limit_components = np.unravel_index(limit_components_flat, (num_paulis,) * num_qudits)
-    labels = paulis.labels((num_sim_levels,) * num_qudits)[limit_components]
+    labels = paulis.labels((num_sim_levels,) * num_qudits, norm=False)[limit_components]
     compos_data_selected = compos_data[:, limit_components_flat - 1]
 
     iax = 0
@@ -548,7 +548,7 @@ def plot_amplitude_scan(
         nh = np.ceil(num_plots / nv).astype(int)
         fig, axes = plt.subplots(nv, nh, figsize=(16, 12))
 
-        prefixes = paulis.labels(comp_dim, symbol='')
+        prefixes = paulis.labels(comp_dim, symbol='', norm=False)
 
         iax = 0
 

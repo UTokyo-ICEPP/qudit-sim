@@ -23,7 +23,8 @@ where
     H_{\mathrm{int}} & = \sum_{j<k} J_{jk} \left( b_j^{\dagger} b_k + b_j b_k^{\dagger} \right), \\
     H_{\mathrm{d}} & = \sum_{jk} \alpha_{jk} \Omega_j \left( p_j(t) \cos (\nu_j t - \rho_{jk}) + q_j(t) \sin (\nu_j t - \rho_{jk}) \right)
                        \left( b_k^{\dagger} + b_k \right) \\
-                   & = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i(\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right) \left( b_k^{\dagger} + b_k \right)
+                   & = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i(\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right)
+                       \left( b_k^{\dagger} + b_k \right)
 
 with :math:`b_j^{\dagger}` and :math:`b_j` the creation and annihilation operators for qudit :math:`j` and
 
@@ -41,7 +42,8 @@ the drive Hamiltonian in the frequency domain:
 
 .. math::
 
-    H_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \int d\nu \left( \tilde{r}_j(\nu) e^{-i (\nu t - \rho_{jk})} + \mathrm{c.c.} \right) \left( b_k^{\dagger} + b_k \right)
+    H_{\mathrm{d}} = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \int d\nu \left( \tilde{r}_j(\nu) e^{-i (\nu t - \rho_{jk})}
+                      + \mathrm{c.c.} \right) \left( b_k^{\dagger} + b_k \right)
 
 Change of frame
 ===============
@@ -68,14 +70,16 @@ we first note that :math:`U_q` can be factored into commuting subsystem unitarie
 
 .. math::
 
-    U_q = \prod_j \exp \left\{ i \left[\left( \omega_j - \frac{\Delta_j}{2} \right) N_j + \frac{\Delta_j}{2} N_j^2 \right] t \right\} =: \prod_j e^{i h_j t}.
+    U_q = \prod_j \exp \left\{ i \left[\left( \omega_j - \frac{\Delta_j}{2} \right) N_j + \frac{\Delta_j}{2} N_j^2 \right] t \right\}
+        =: \prod_j e^{i h_j t}.
 
 Each :math:`h_j` commutes with :math:`b_k` and :math:`b_k^{\dagger}` if :math:`k \neq j`, so
 
 .. math::
 
     \tilde{H}_{\mathrm{int}} & = \sum_{j<k} J_{jk} \left( \tilde{b}_j^{\dagger} \tilde{b}_k + \tilde{b}_j \tilde{b}_k^{\dagger} \right) \\
-    \tilde{H}_{\mathrm{d}} & = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i(\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right) \left( \tilde{b}_k^{\dagger} + \tilde{b}_k \right)
+    \tilde{H}_{\mathrm{d}} & = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i(\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right)
+                               \left( \tilde{b}_k^{\dagger} + \tilde{b}_k \right)
 
 where
 
@@ -88,45 +92,113 @@ By definition :math:`b_j N_j = (N_j + 1) b_j`, which implies
 
 .. math::
 
-    b_j e^{-i h_j t} = \exp \left\{ -i \left[\left( \omega_j - \frac{\Delta_j}{2} \right) (N_j + 1) + \frac{\Delta_j}{2} (N_j + 1)^2) \right] t \right\} b_j
+    b_j e^{-i h_j t} = \exp \left\{ -i \left[\left( \omega_j - \frac{\Delta_j}{2} \right) (N_j + 1)
+                                             + \frac{\Delta_j}{2} (N_j + 1)^2) \right] t \right\} b_j
 
 and therefore
 
 .. math::
 
-    \tilde{b}_{j} & = \exp \left\{ i \left[\left( \omega_j - \frac{\Delta_j}{2} \right) (N_j - (N_j + 1)) + \frac{\Delta_j}{2} (N_j^2 - (N_j + 1)^2) \right] t \right\} b_j \\
+    \tilde{b}_{j} & = \exp \left\{ i \left[\left( \omega_j - \frac{\Delta_j}{2} \right) (N_j - (N_j + 1))
+                                           + \frac{\Delta_j}{2} (N_j^2 - (N_j + 1)^2) \right] t \right\} b_j \\
                   & = e^{-i(\omega_j + \Delta_j N_j) t} b_j.
 
 Similarly, :math:`b_j^{\dagger} N_j = (N_j - 1) b_j^{\dagger}` leads to
 
 .. math::
 
-    \tilde{b}_{j}^{\dagger} & = \exp \left\{ i \left[\left( \omega_j - \frac{\Delta_j}{2} \right) (N_j - (N_j - 1)) + \frac{\Delta_j}{2} (N_j^2 - (N_j - 1)^2) \right] t \right\} b_j^{\dagger} \\
+    \tilde{b}_{j}^{\dagger} & = \exp \left\{ i \left[\left( \omega_j - \frac{\Delta_j}{2} \right) (N_j - (N_j - 1))
+                                                     + \frac{\Delta_j}{2} (N_j^2 - (N_j - 1)^2) \right] t \right\} b_j^{\dagger} \\
                   & = e^{i(\omega_j + \Delta_j (N_j - 1)) t} b_j^{\dagger}.
 
 The interaction Hamiltonian in the qudit frame is therefore
 
 .. math::
 
-    \tilde{H}_{\mathrm{int}} & = \sum_{j<k} J_{jk} \left( e^{i (\omega_j - \omega_k) t} e^{i [\Delta_j (N_j - 1) - \Delta_k N_k] t} b_j^{\dagger} b_k + \mathrm{h.c.} \right) \\
-                             & = \sum_{j<k} J_{jk} \left( e^{i (\omega_j - \omega_k) t} \sum_{lm} e^{i (\Delta_j l - \Delta_k m) t} \sqrt{(l+1)(m+1)} | l + 1 \rangle_j \langle l |_j \otimes | m \rangle_k \langle m + 1 |_k + \mathrm{h.c.} \right).
+    \tilde{H}_{\mathrm{int}} & = \sum_{j<k} J_{jk} \left( e^{i (\omega_j - \omega_k) t} e^{i [\Delta_j (N_j - 1) - \Delta_k N_k] t}
+                                                          b_j^{\dagger} b_k + \mathrm{h.c.} \right) \\
+                             & = \sum_{j<k} J_{jk} \left( e^{i (\omega_j - \omega_k) t} \sum_{lm} e^{i (\Delta_j l - \Delta_k m) t}
+                                                          \sqrt{(l+1)(m+1)} | l + 1 \rangle_j \langle l |_j \otimes | m \rangle_k
+                                                          \langle m + 1 |_k + \mathrm{h.c.} \right).
 
-In the last line, we used the expansion of the annihilation operator :math:`b_j = \sum_{l} \sqrt{l+1} | l \rangle_j \langle l + 1 |_j` and its Hermitian conjugate.
+In the last line, we used the expansion of the annihilation operator :math:`b_j = \sum_{l} \sqrt{l+1} | l \rangle_j \langle l + 1 |_j`
+and its Hermitian conjugate.
 
 The drive Hamiltonian in the qudit frame is
 
 .. math::
 
-    \tilde{H}_{\mathrm{d}} & = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i(\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right) \left( e^{i(\omega_k + \Delta_k (N_k - 1))t} b_k^{\dagger} + \mathrm{h.c.} \right) \\
-                           & = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i(\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right) \sum_l \left( e^{i \omega_k t} e^{i \Delta_k l t} \sqrt{l+1} | l + 1 \rangle_k \langle l |_k + \mathrm{h.c.} \right).
+    \tilde{H}_{\mathrm{d}} & = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i(\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right)
+                               \left( e^{i(\omega_k + \Delta_k (N_k - 1))t} b_k^{\dagger} + \mathrm{h.c.} \right) \\
+                           & = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i(\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right)
+                               \sum_l \left( e^{i \omega_k t} e^{i \Delta_k l t} \sqrt{l+1} | l + 1 \rangle_k \langle l |_k + \mathrm{h.c.} \right).
 
-Mixed frame
------------
+Dressed frame
+-------------
+
+Even in the absense of a drive, :math:`\tilde{H}_{\mathrm{int}}` above actually causes slow phase drifts in the qudit frame. As it is difficult
+to see this from a time-dependent :math:`\tilde{H}_{\mathrm{int}}`, we move back once again to the lab frame and diagonalize
+:math:`H_{\mathrm{stat}} = H_0 + H_{\mathrm{int}}` as
+
+.. math::
+
+    H_{\mathrm{stat}} = V E V^{\dagger}.
+
+The unitary :math:`V` is chosen to be
+
+.. math::
+
+    V = I + \eta
+
+that minimizes :math:`|\eta|` while satisfying the diagonalization condition above. Given that :math:`H_{\mathrm{int}}` is off-diagonal and
+:math:`|H_{\mathrm{int}}| \ll |H_0|`, this results in
+
+.. math::
+
+    E = H_0 + \delta
+
+for some small diagonal :math:`\delta`.
+
+The time evolution by :math:`H_{\mathrm{stat}}` is
+
+.. math::
+
+    e^{-i H_{\mathrm{stat}} t} & = V e^{-iEt} V^{\dagger} \\
+                               & = e^{-iEt} + \eta e^{-iEt} + e^{-iEt} \eta^{\dagger} + \eta e^{-iEt} \eta^{\dagger}.
+
+Because :math:`\tilde{H}_{\mathrm{int}}` is the generator of time evolution in the qudit frame
+
+.. math::
+
+    & T \left[ \exp \left(-i \int_{0}^{t} dt' \tilde{H}_{\mathrm{int}} (t') \right) \right] U_q(0) |\psi(0)\rangle
+    = U_q(t) |\psi(t)\rangle \\
+    & = U_q(t) e^{-i H_{\mathrm{stat}} t} |\psi(0)\rangle.
+
+Therefore, for any free-Hamiltonian eigenstate :math:`|l\rangle`,
+
+.. math::
+
+    T \left[ \exp \left(-i \int_{0}^{t} dt' \tilde{H}_{\mathrm{int}} (t') \right) \right] |l\rangle
+    = e^{-i \delta_{l} t} |l\rangle + e^{i H_0 t} \left(\eta e^{-iEt} + e^{-iEt} \eta^{\dagger} + \eta e^{-iEt} \eta^{\dagger} \right) |l\rangle,
+
+where :math:`\delta_{l}` is the :math:`l`-th element of :math:`\delta`.
+
+To eliminate these phase drifts, we would like to work in the frame defined by :math:`U_E = e^{i E t}`. However, this mathematically trivial change
+of frame is not physically practical, because :math:`E` does not necessarily render itself to a sum of single-qudit operators, while all drive and
+readout are performed in terms of individual qudits. Therefore we fall back to a frame defined by :math:`U_d = e^{i D t}`, where
+
+.. math::
+
+    D = \sum_{j=1}^{n} \sum_{l} \left( \langle l |_j \otimes \langle 0 |^{\otimes n-1} E | l \rangle_j \otimes | 0 \rangle^{\otimes n-1} \right)
+        | l \rangle_j \langle l |_j,
+
+which eliminates the phase drifts of single-qudit excitations. This frame rotates at "dressed" frequencies, i.e., free-qudit frequencies
+shifted by the effects of inter-qudit interactions.
 
 General frame
 -------------
 
-We can move to an arbitrary frame specifying the frequency and phase offset for each level gap of each qudit. Let for qudit :math:`j` the frequency
+We can also move to an arbitrary frame specifying the frequency and phase offset for each level gap of each qudit. Let for qudit :math:`j` the frequency
 and the phase offset between level :math:`l` and :math:`l+1` be :math:`\xi_{j}^{l}` and :math:`\phi_{j}^{l}`, and :math:`\Xi_{j}^{l} := \sum_{m<l} \xi_{j}^{m}`,
 :math:`\Phi_{j}^{l} := \sum_{m<l} \phi_{j}^{m}`. Then the transformation unitary is
 
@@ -198,7 +270,6 @@ from dataclasses import dataclass
 import numpy as np
 import qutip as qtp
 
-import rqutils.paulis as paulis
 from .pulse import PulseSequence
 from .drive import DriveTerm, cos_freq, sin_freq
 
@@ -207,8 +278,8 @@ REL_FREQUENCY_EPSILON = 1.e-7
 @dataclass(frozen=True)
 class Frame:
     """Frame specification for a single level gap of a qudit."""
-    frequency: Optional[np.ndarray] = None
-    phase: Optional[np.ndarray] = None
+    frequency: np.ndarray
+    phase: np.ndarray
 
 @dataclass(frozen=True)
 class QuditParams:
@@ -235,7 +306,7 @@ class HamiltonianGenerator:
         num_levels: int = 2,
         qudits: Optional[Union[int, Sequence[int]]] = None,
         params: Optional[Dict[str, Any]] = None,
-        default_frame: str = 'mixed'
+        default_frame: str = 'dressed'
     ) -> None:
         self._num_levels = num_levels
 
@@ -303,15 +374,17 @@ class HamiltonianGenerator:
         """Drive terms for the qudit."""
         return list(self._drive[self._qudit_params[qudit_id]])
 
+    def frame(self, qudit_id: Hashable) -> Frame:
+        """Frame of the qudit."""
+        return self._frame[self._qudit_params[qudit_id]]
+
     def add_qudit(
         self,
         qubit_frequency: float,
         anharmonicity: float,
         drive_amplitude: float,
         qudit_id: Optional[Hashable] = None,
-        position: Optional[int] = None,
-        frame_frequency: Optional[np.ndarray] = None,
-        frame_phase: Optional[np.ndarray] = None,
+        position: Optional[int] = None
     ) -> None:
         """Add a qudit to the system.
 
@@ -321,8 +394,6 @@ class HamiltonianGenerator:
             drive_amplitude: Base drive amplitude in rad/s.
             qudit_id: Identifier for the qudit. If None, the position (order of addition) is used.
             position: If an integer, the qudit is inserted into the specified position.
-            frame_frequency: Frame frequency for all level spacings.
-            frame_phase: Frame phase offset for all level spacings.
         """
         params = QuditParams(qubit_frequency=qubit_frequency, anharmonicity=anharmonicity,
                              drive_amplitude=drive_amplitude)
@@ -349,9 +420,11 @@ class HamiltonianGenerator:
             self._qudit_params.update(qudit_params)
 
         self._drive[params] = list()
-        self._frame[params] = Frame(frequency=frame_frequency, phase=frame_phase)
 
         self.set_global_frame(self.default_frame)
+
+    def _qudit_frame_frequencies(self, params: QuditParams) -> np.ndarray:
+        return params.qubit_frequency + np.arange(self._num_levels - 1) * params.anharmonicity
 
     def set_frame(
         self,
@@ -365,14 +438,21 @@ class HamiltonianGenerator:
 
         Args:
             qudit_id: Qudit ID.
-            frequency: Frame frequency for each level gap.
+            frequency: Frame frequency for each level gap. If None, set to qudit-frame frequencies.
             phase: Frame phase shift, either as a single global value or an array specifying the
-                phase shift for each level gap.
+                phase shift for each level gap. If None, set to zero.
         """
-        if isinstance(phase, float):
-            phase = np.full(self.num_qudits, phase)
+        params = self._qudit_params[qudit_id]
 
-        self._frame[self._qudit_params[qudit_id]] = Frame(frequency=frequency, phase=phase)
+        if frequency is None:
+            frequency = self._qudit_frame_frequencies(params)
+
+        if phase is None:
+            phase = np.zeros(self._num_levels - 1)
+        elif isinstance(phase, float):
+            phase = np.full(self._num_levels - 1, phase)
+
+        self._frame[params] = Frame(frequency=frequency, phase=phase)
 
     def set_global_frame(self, frame: str) -> None:
         r"""Set frames for all qudits globally.
@@ -382,29 +462,14 @@ class HamiltonianGenerator:
         - 'qudit': Set frame frequencies to the individual qudit level gaps disregarding the couplings.
           Equivalent to calling `set_frame(qid, frequency=None, phase=None)` for all `qid`.
         - 'lab': Set frame frequencies to zero.
-        - 'mixed': Diagonalize the static Hamiltonian (in the lab frame) and set the frame frequencies
-          to the closest eigenvalues.
-
-        The mixed frame is determined by computing :math:`H_0 + H_{\mathrm{int}} = U D U^{\dagger}`,
-        where :math:`D` is the diagonal matrix of the Hamiltonian eigenvalues and :math:`U` is the
-        diagonalizing unitary. The ordering of the eigenvalues is indeterministic, but as long as the
-        couplings are perturbative, from
-
-        .. math::
-
-            H_{ij} = \sum_k U_{ik} D_{kk} U^{\dagger}_{kj}
-
-        we see that the eigenvalue that contributes the most to :math:`H_{ii}` is :math:`D_{kk}` where
-
-        .. math::
-
-            k = \underset{k}{\operatorname{argmax}} |U_{ik}|
+        - 'dressed': Diagonalize the static Hamiltonian (in the lab frame) and set the frame frequencies
+          to cancel the phase drifts of single-qudit excitations.
 
         Args:
-            frame: 'qudit', 'lab', or 'mixed'.
+            frame: 'qudit', 'lab', or 'dressed'.
         """
 
-        if frame == 'mixed' and len(self._coupling) == 0:
+        if frame == 'dressed' and len(self._coupling) == 0:
             frame = 'qudit'
 
         if frame == 'qudit':
@@ -415,7 +480,7 @@ class HamiltonianGenerator:
             for qid in self._qudit_params.keys():
                 self.set_frame(qid, frequency=np.zeros(self._num_levels - 1))
 
-        elif frame == 'mixed':
+        elif frame == 'dressed':
             # Move to the lab frame first to generate a fully static H0+Hint
             self.set_global_frame('lab')
 
@@ -425,26 +490,15 @@ class HamiltonianGenerator:
 
             # Row index of the biggest contributor to each column
             k = np.argmax(np.abs(unitary), axis=1)
-            # Reordered eigenvalue matrix
-            eigvals_matrix = np.diag(eigvals[k])
+            # Reordered eigenvalues (makes the corresponding change-of-basis unitary closest to identity)
+            eigvals = eigvals[k]
+            # Reshape the array to extract the single-qudit excitation subspaces
+            eigvals = eigvals.reshape((self.num_levels,) * self.num_qudits)
 
-            # Decompose the diagonal matrix of eigenvalues
-            dim = (self.num_levels,) * self.num_qudits
-            components = paulis.components(eigvals_matrix, dim=dim)
-
-            # Compose the qudit matrices (term corresponding to I..IdI..I)
             for iq, qid in enumerate(self._qudit_params.keys()):
                 indices = (0,) * iq + (slice(None),) + (0,) * (self.num_qudits - iq - 1)
-                qudit_matrix = paulis.compose(components[indices])
-                # Account for the lambda_0 normalization
-                # The actual Pauli terms are nu_0..0j0..0 (λ_0..λ_0 λ_j λ_0..λ_0 / 2^{s-1})
-                # but we computed sum_j nu_0..0j0..0 I..I λ_j I..I
-                qudit_matrix *= (np.sqrt(2. / self.num_levels) / 2) ** (self.num_qudits - 1)
-
-                diag = np.diag(qudit_matrix)
-                frame = diag[1:] - diag[0]
-
-                self.set_frame(qid, frequency=frame)
+                energies = eigvals[indices]
+                self.set_frame(qid, np.diff(energies))
 
         else:
             raise ValueError(f'Global frame {frame} is not defined')
@@ -525,6 +579,11 @@ class HamiltonianGenerator:
 
         return hamiltonian
 
+    def _qudit_hfree(self, params: QuditParams) -> np.ndarray:
+        hfree = np.arange(self._num_levels) * (params.qubit_frequency - params.anharmonicity / 2.)
+        hfree += np.square(np.arange(self._num_levels)) * params.anharmonicity / 2.
+        return hfree
+
     def generate_hdiag(self) -> qtp.Qobj:
         """Generate the diagonal term of the Hamiltonian.
 
@@ -536,14 +595,13 @@ class HamiltonianGenerator:
         for iq, params in enumerate(self._qudit_params.values()):
             frame = self._frame[params]
 
-            if frame.frequency is None:
-                # qudit frame -> free Hamiltonian is null
+            energy_offset = np.cumsum(self._qudit_frame_frequencies(params)) - np.cumsum(frame.frequency)
+            # If in qudit frame, energy_offset is zero for all levels
+            if np.allclose(energy_offset, np.zeros_like(energy_offset)):
                 continue
 
-            qudit_hfree = np.arange(self._num_levels) * (params.qubit_frequency - params.anharmonicity / 2.)
-            qudit_hfree += np.square(np.arange(self._num_levels)) * params.anharmonicity / 2.
-            energy_offset = qudit_hfree - np.cumsum(np.concatenate((np.zeros(1), frame.frequency)))
-            qudit_op = qtp.Qobj(inpt=np.diag(energy_offset))
+            diagonal = np.concatenate((np.zeros(1), energy_offset))
+            qudit_op = qtp.Qobj(inpt=np.diag(diagonal))
 
             ops = [qtp.qeye(self._num_levels)] * self.num_qudits
             ops[iq] = qudit_op
@@ -607,13 +665,10 @@ class HamiltonianGenerator:
                 for params, level, sign in [(p1, l1, 1.), (p2, l2, -1.)]:
                     frame = self._frame[params]
 
-                    if frame.phase is not None:
+                    if frame.phase[level] != 0.:
                         op *= np.exp(sign * 1.j * frame.phase[level])
 
-                    if frame.frequency is None:
-                        frequency += sign * (params.qubit_frequency + level * params.anharmonicity)
-                    else:
-                        frequency += sign * frame.frequency[level]
+                    frequency += sign * frame.frequency[level]
 
                 if abs(frequency) < REL_FREQUENCY_EPSILON * (p1.qubit_frequency + p2.qubit_frequency) * 0.5:
                     hstatic += coupling * (op + op.dag())
@@ -678,15 +733,10 @@ class HamiltonianGenerator:
 
                 op = qtp.tensor(ops)
 
-                if frame.phase is not None:
+                if frame.phase[level] != 0.:
                     op *= np.exp(1.j * frame.phase[level])
 
-                if frame.frequency is None:
-                    frame_frequency = params.qubit_frequency + level * params.anharmonicity
-                else:
-                    frame_frequency = frame.frequency[level]
-
-                qops.append((params, op, frame_frequency))
+                qops.append((params, op, frame.frequency[level]))
 
         # Loop over the drive channels
         for ch_params, drives in self._drive.items():
