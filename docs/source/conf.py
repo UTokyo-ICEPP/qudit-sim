@@ -12,6 +12,7 @@
 #
 import os
 import sys
+import importlib.metadata
 dn = os.path.dirname
 sys.path.insert(0, dn(dn(dn(os.path.abspath(__file__)))))
 
@@ -24,7 +25,7 @@ author = 'Yutaro Iiyama'
 
 # The full version, including alpha/beta/rc tags
 # TODO make this read setup.cfg
-release = '0.1.0'
+release = importlib.metadata.version(project)
 
 
 # -- General configuration ---------------------------------------------------

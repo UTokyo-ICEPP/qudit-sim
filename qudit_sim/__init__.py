@@ -1,6 +1,7 @@
 """Pulse simulation and Hamiltonian extraction"""
+import importlib.metadata
 
-__version__ = "1.0"
+__version__ = importlib.metadata.version('qudit-sim')
 
 from .hamiltonian import HamiltonianGenerator
 from .drive import DriveTerm
