@@ -121,7 +121,7 @@ def plot_components(
     xticks = np.char.add(np.char.add('$', labels), '$')
 
     ax.set_xticks(np.arange(nterms), labels=xticks[indices])
-    ax.set_ylabel(r'$\nu/(\mathrm{' + scale.frequency_unit + '})$')
+    ax.set_ylabel(r'$\nu (\mathrm{' + scale.frequency_unit + '})$')
 
     return fig
 

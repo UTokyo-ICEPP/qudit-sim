@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 import numpy as np
 
-from .util import FrequencyScale
+from .util import FrequencyScale, CallableCoefficient
 
 logger = logging.getLogger(__name__)
 
@@ -44,35 +44,6 @@ class PulseSequence(list):
         Returns:
             A 3-tuple of X and Y coefficients and the maximum frequency appearing in the term.
         """
-
-        if rwa:
-            def modulate(xy, frequency, phase_offset, time, pulse):
-                detuning = frequency - frame_frequency
-                def fun(t, args):
-                    envelope = drive_base * pulse(t - time, args)
-                    phase = detuning * t + phase_offset
-
-                    if xy == 'x':
-                        return envelope.real * np.cos(phase) + envelope.imag * np.sin(phase)
-                    else:
-                        return envelope.imag * np.cos(phase) - envelope.real * np.sin(phase)
-
-                return fun
-
-        else:
-            def modulate(xy, frequency, phase_offset, time, pulse):
-                def fun(t, args):
-                    double_envelope = 2. * drive_base * pulse(t - time, args)
-                    prefactor = double_envelope.real * np.cos(frequency * t + phase_offset)
-                    prefactor += double_envelope.imag * np.sin(frequency * t + phase_offset)
-
-                    if xy == 'x':
-                        return prefactor * np.cos(frame_frequency * t)
-                    else:
-                        return prefactor * np.sin(frame_frequency * t)
-
-                return fun
-
         funclist_x = []
         funclist_y = []
         timelist = []
@@ -99,8 +70,10 @@ class PulseSequence(list):
                 timelist.append(time)
                 time += inst.value
             elif isinstance(inst, Pulse):
-                funclist_x.append(modulate('x', frequency, phase_offset, time, inst))
-                funclist_y.append(modulate('y', frequency, phase_offset, time, inst))
+                funclist_x.append(inst.modulate(drive_base, frequency, phase_offset,
+                                                frame_frequency, time, 'x', rwa))
+                funclist_y.append(inst.modulate(drive_base, frequency, phase_offset,
+                                                frame_frequency, time, 'y', rwa))
                 timelist.append(time)
                 time += inst.duration
 
@@ -142,6 +115,55 @@ class Pulse:
         instance = copy.deepcopy(self)
         instance._scale(c)
         return instance
+
+    def modulate(
+        self,
+        drive_base: complex,
+        frequency: float,
+        phase_offset: float,
+        frame_frequency: float,
+        start_time: float,
+        symmetry: str,
+        rwa: bool
+    ) -> CallableCoefficient:
+        r"""Modulate the tone at the given amplitude and frequency with this pulse.
+
+        Args:
+            drive_base: Factor :math:`\alpha_{jk} e^{i \rho_{jk}} \frac{\Omega_j}{2}`.
+            frequency: Tone frequency.
+            phase_offset: Tone phase offset.
+            frame_frequency: Frequency of the observing frame.
+            start_time: Start time of the pulse.
+            symmetry: 'x' or 'y'.
+            rwa: Whether to apply the rotating-wave approximation.
+
+        Returns:
+            A function of time that returns the modulated signal.
+        """
+        if rwa:
+            if symmetry == 'x':
+                value = lambda envelope, phase: envelope.real * np.cos(phase) + envelope.imag * np.sin(phase)
+            else:
+                value = lambda envelope, phase: envelope.imag * np.cos(phase) - envelope.real * np.sin(phase)
+
+            def fun(t, args):
+                envelope = drive_base * self.__call__(t - start_time, args)
+                phase = (frequency - frame_frequency) * t + phase_offset
+                return value(envelope, phase)
+
+        else:
+            if symmetry == 'x':
+                frame_fn = np.cos
+            else:
+                frame_fn = np.sin
+
+            def fun(t, args):
+                double_envelope = 2. * drive_base * self.__call__(t - time, args)
+                phase = frequency * t + phase_offset
+                prefactor = double_envelope.real * np.cos(phase) + double_envelope.imag * np.sin(phase)
+                return prefactor * frame_fn(frame_frequency * t)
+
+        return fun
 
 
 class Gaussian(Pulse):

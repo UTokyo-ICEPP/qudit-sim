@@ -47,11 +47,14 @@ The representation in terms of :math:`X^{l}_{k}` and :math:`Y^{l}_{k}` operators
 - For a pure real or imaginary :math:`R_{jk}(t)`, on-resonant (:math:`\nu_j = \xi_k^{l}`) drive, the RWA Hamiltonian reduces to a single term.
 """
 
-from typing import Callable, Optional, Union
+from typing import Callable, Optional, Union, Tuple
 from dataclasses import dataclass
 import numpy as np
 
 from .pulse import PulseSequence
+from .util import CallableCoefficient
+
+HamiltonianCoefficient = Union[str, np.ndarray, CallableCoefficient]
 
 REL_FREQUENCY_EPSILON = 1.e-7
 
@@ -112,19 +115,19 @@ class DriveTerm:
         frequency: Carrier frequency of the drive. None is allowed if amplitude is a PulseSequence
             that starts with SetFrequency.
         amplitude: Function :math:`r(t)`.
-        phase: The phase value of `amplitude` when it is a str or a callable and is known to have
+        constant_phase: The phase value of `amplitude` when it is a str or a callable and is known to have
             a constant phase. None otherwise.
     """
     frequency: Optional[float] = None
     amplitude: Union[float, complex, str, np.ndarray, PulseSequence, Callable] = 1.+0.j
-    phase: Optional[float] = None
+    constant_phase: Optional[float] = None
 
     def generate_fn(
         self,
         frame_frequency: float,
         drive_base: complex,
         rwa: bool
-    ) -> tuple:
+    ) -> Tuple[HamiltonianCoefficient, Union[HamiltonianCoefficient, None], float]:
         r"""Generate the coefficients for X and Y drives.
 
         Args:
@@ -187,12 +190,12 @@ class DriveTerm:
             if is_resonant:
                 return f'({envelope}).real', f'({envelope}).imag'
 
-            elif self.phase is None:
+            elif self.constant_phase is None:
                 return (f'({envelope}).real * cos({detuning} * t) + ({envelope}).imag * sin({detuning} * t)',
                         f'({envelope}).imag * cos({detuning} * t) - ({envelope}).real * sin({detuning} * t)')
 
             else:
-                phase = np.angle(drive_base) + self.phase
+                phase = np.angle(drive_base) + self.constant_phase
                 return (f'abs({envelope}) * cos({phase} - ({detuning} * t))',
                         f'abs({envelope}) * sin({phase} - ({detuning} * t))')
 
@@ -212,7 +215,7 @@ class DriveTerm:
             if is_resonant:
                 return real_function(envelope), imag_function(envelope)
 
-            elif self.phase is None:
+            elif self.constant_phase is None:
                 cos = cos_freq(detuning)
                 sin = sin_freq(detuning)
                 real = real_function(envelope)
@@ -221,7 +224,7 @@ class DriveTerm:
                         diff_function(prod_function(imag, cos), prod_function(real, sin)))
 
             else:
-                phase = np.angle(drive_base) + self.phase
+                phase = np.angle(drive_base) + self.constant_phase
                 absf = abs_function(envelope)
                 return (prod_function(absf, cos_freq(-detuning, phase)),
                         prod_function(absf, sin_freq(-detuning, phase)))
@@ -249,11 +252,11 @@ class DriveTerm:
         elif isinstance(amplitude, str):
             double_envelope = f'{2. * drive_base} * ({amplitude})'
 
-            if self.phase is None:
+            if self.constant_phase is None:
                 prefactor = f'({double_envelope} * (cos({self.frequency} * t) - 1.j * sin({self.frequency} * t))).real'
 
             else:
-                phase = np.angle(drive_base) + self.phase
+                phase = np.angle(drive_base) + self.constant_phase
                 prefactor = f'abs({double_envelope}) * cos({phase} - ({self.frequency} * t))'
 
         elif isinstance(amplitude, np.ndarray):
@@ -264,11 +267,11 @@ class DriveTerm:
         elif callable(amplitude):
             double_envelope = scaled_function(2. * drive_base, amplitude)
 
-            if self.phase is None:
+            if self.constant_phase is None:
                 prefactor = real_function(prod_function(double_envelope, exp_freq(-self.frequency)))
 
             else:
-                phase = np.angle(drive_base) + self.phase
+                phase = np.angle(drive_base) + self.constant_phase
                 absf = abs_function(double_envelope)
                 prefactor = prod_function(absf, cos_freq(-self.frequency, phase))
 

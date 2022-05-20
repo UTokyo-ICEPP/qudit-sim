@@ -524,7 +524,7 @@ class HamiltonianGenerator:
         qudit_id: Hashable,
         frequency: Optional[float] = None,
         amplitude: Union[float, complex, str, np.ndarray, PulseSequence, Callable, None] = 1.+0.j,
-        phase: Optional[float] = None
+        constant_phase: Optional[float] = None
     ) -> None:
         r"""Add a drive term.
 
@@ -533,11 +533,16 @@ class HamiltonianGenerator:
             frequency: Carrier frequency of the drive. None is allowed if amplitude is a PulseSequence
                 that starts with SetFrequency.
             amplitude: Function `r(t)`.
-            phase: The phase value of `amplitude` when it is a str or a callable and is known to have
-                a constant phase. None otherwise.
+            constant_phase: The phase value of `amplitude` when it is a str or a callable and is known
+                to have a constant phase. None otherwise.
         """
-        drive = DriveTerm(frequency=frequency, amplitude=amplitude, phase=phase)
+        drive = DriveTerm(frequency=frequency, amplitude=amplitude, constant_phase=constant_phase)
         self._drive[self._qudit_params[qudit_id]].append(drive)
+
+    def clear_drive(self) -> None:
+        """Remove all drives."""
+        for drives in self._drive.values():
+            drives.clear()
 
     def generate(
         self,
@@ -853,14 +858,14 @@ class HamiltonianGenerator:
                 instance.add_drive(qudit_id=kwargs['qudit_id'],
                                    frequency=kwargs.get('frequency'),
                                    amplitude=value,
-                                   phase=kwargs.get('phase'))
+                                   constant_phase=kwargs.get('constant_phase'))
 
         elif scan_type == 'frequency':
             for value, instance in zip(values, copies):
                 instance.add_drive(qudit_id=kwargs['qudit_id'],
                                    frequency=value,
                                    amplitude=kwargs.get('amplitude', 1.+0.j),
-                                   phase=kwargs.get('phase'))
+                                   constant_phase=kwargs.get('constant_phase'))
 
         elif scan_type == 'coupling':
             for value, instance in zip(values, copies):

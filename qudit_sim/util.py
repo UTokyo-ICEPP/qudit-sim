@@ -1,10 +1,13 @@
-from typing import Union, Tuple
+from typing import Union, Tuple, Callable
 import enum
 from dataclasses import dataclass
 import numpy as np
 import qutip as qtp
 
 from rqutils.qprint import QPrintBraKet, LaTeXRepr
+
+# Type for the callable time-dependent Hamiltonian coefficient
+CallableCoefficient = Callable[[Union[float, np.ndarray], dict], Union[complex, np.ndarray]]
 
 @dataclass(frozen=True)
 class PulseSimResult:
