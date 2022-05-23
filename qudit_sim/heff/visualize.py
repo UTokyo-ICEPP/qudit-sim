@@ -581,7 +581,11 @@ def plot_amplitude_scan(
 
     fig.tight_layout()
 
-    return fig, coefficients, amp_scale, compo_scale
+    # Rescale the coefficients to original amplitude & components normalizations
+    coefficients *= compo_scale_omega
+    coefficients /= np.power(amp_scale_omega, np.arange(max_poly_order + 1))
+
+    return fig, coefficients
 
 
 def _plot_amplitude_scan_on(ax, amps_norm, compos_norm, plot_mask, max_poly_order, coefficients, prefix=''):
