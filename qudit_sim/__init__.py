@@ -9,6 +9,7 @@ from .pulse import (Gaussian, GaussianSquare, Drag, PulseSequence,
                     ShiftFrequency, ShiftPhase, SetFrequency, SetPhase, Delay)
 from .pulse_sim import pulse_sim
 from .find_heff import find_heff
-from .util import FrequencyScale, PulseSimResult, print_hamiltonian
+from .util import (FrequencyScale, PulseSimResult, print_hamiltonian,
+                   print_components, plot_components, gate_components)
 from .parallel import parallel_map
 from .config import config

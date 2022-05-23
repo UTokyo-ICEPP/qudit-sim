@@ -52,9 +52,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .pulse import PulseSequence
-from .util import CallableCoefficient
-
-HamiltonianCoefficient = Union[str, np.ndarray, CallableCoefficient]
+from .util import HamiltonianCoefficient
 
 REL_FREQUENCY_EPSILON = 1.e-7
 

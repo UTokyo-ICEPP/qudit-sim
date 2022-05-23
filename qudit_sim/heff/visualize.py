@@ -1,6 +1,6 @@
 """Visualization routines for effective Hamiltonian studies."""
 
-from typing import Optional, Tuple, List, Sequence
+from typing import Optional, Tuple, List, Sequence, Union
 import logging
 import numpy as np
 import h5py
@@ -11,129 +11,10 @@ from matplotlib.markers import MarkerStyle
 
 import rqutils.paulis as paulis
 from rqutils.math import matrix_exp, matrix_angle
-from rqutils.qprint import QPrintPauli, LaTeXRepr
+from rqutils.qprint import LaTeXRepr
 
 from ..util import FrequencyScale
 from .common import make_heff_t
-
-twopi = 2. * np.pi
-
-def print_components(
-    components: np.ndarray,
-    symbol: Optional[str] = None,
-    threshold: Optional[float] = None,
-    scale: Optional[FrequencyScale] = None
-) -> LaTeXRepr:
-    """Generate a LaTeX expression of the effective Hamiltonian from the Pauli components.
-
-    The dymamic range of the numerical values of the components is set by the maximum absolute
-    value. For example, if the maximum absolute value is between 1.e+6 and 1.e+9, the components
-    are expressed in MHz, with the minimum of 0.001 MHz. Pauli terms whose components have
-    absolute values below the threshold are ignored.
-
-    Args:
-        components: Array of Pauli components returned by find_heff
-        symbol: Symbol to use instead of :math:`\lambda` for the matrices.
-        threshold: Ignore terms with absolute components below this value.
-        scale: Manually set the scale.
-
-    Returns:
-        A LaTeX expression string for the effective Hamiltonian.
-    """
-    max_abs = np.amax(np.abs(components))
-
-    if scale is None:
-        scale = _find_scale(max_abs)
-
-    scale_omega = scale.pulsatance_value
-
-    if threshold is None:
-        threshold = scale_omega * 1.e-2
-
-    lhs_label = r'\frac{H_{\mathrm{eff}}}{\mathrm{%s}}' % scale.name
-
-    pobj = QPrintPauli(components / scale_omega,
-                       epsilon=(threshold / max_abs),
-                       lhs_label=lhs_label,
-                       symbol=symbol)
-
-    return LaTeXRepr(pobj.latex())
-
-
-def plot_components(
-    components: np.ndarray,
-    threshold: Optional[float] = None,
-    scale: Optional[FrequencyScale] = None,
-    ignore_identity: bool = True
-) -> mpl.figure.Figure:
-    """Plot the Hamiltonian components as a bar graph in the decreasing order in the absolute value.
-
-    The dymamic range of the numerical values of the components is set by the maximum absolute
-    value. For example, if the maximum absolute value is between 1.e+6 and 1.e+9, the components
-    are expressed in MHz, with the minimum of 0.001 MHz. Pauli terms whose components have
-    absolute values below the threshold are ignored.
-
-    Args:
-        components: Array of Pauli components returned by find_heff
-        threshold: Ignore terms with absolute components below this value.
-        scale: Manually set the scale.
-        ignore_identity: Ignore the identity term.
-
-    Returns:
-        A Figure object containing the bar graph.
-    """
-    components = components.copy()
-
-    max_abs = np.amax(np.abs(components))
-
-    if scale is None:
-        scale = _find_scale(max_abs)
-
-    scale_omega = scale.pulsatance_value
-
-    if threshold is None:
-        threshold = scale_omega * 1.e-2
-
-    # Negative threshold specified -> relative to max
-    if threshold < 0.:
-        threshold *= -max_abs
-
-    # Dividing by omega -> now everything is in terms of frequency (not angular)
-    components /= scale_omega
-    threshold /= scale_omega
-
-    if ignore_identity:
-        components.reshape(-1)[0] = 0.
-
-    flat_indices = np.argsort(-np.abs(components.reshape(-1)))
-    nterms = np.count_nonzero(np.abs(components) > threshold)
-    indices = np.unravel_index(flat_indices[:nterms], components.shape)
-
-    fig, ax = plt.subplots(1, 1)
-    ax.bar(np.arange(nterms), components[indices])
-
-    ax.axhline(0., color='black', linewidth=0.5)
-
-    pauli_dim = np.around(np.sqrt(components.shape)).astype(int)
-    labels = paulis.labels(pauli_dim, symbol='',
-                           delimiter=('' if pauli_dim[0] == 2 else ','))
-
-    xticks = np.char.add(np.char.add('$', labels), '$')
-
-    ax.set_xticks(np.arange(nterms), labels=xticks[indices])
-    ax.set_ylabel(r'$\nu (\mathrm{' + scale.frequency_unit + '})$')
-
-    return fig
-
-
-def _find_scale(val):
-    for scale in reversed(FrequencyScale):
-        omega = scale.pulsatance_value
-        if val > 0.1 * omega:
-            return scale
-
-    raise RuntimeError(f'Could not find a proper scale for value {val}')
-
 
 def inspect_leastsq_minimization(
     filename: str,
@@ -481,8 +362,8 @@ def plot_amplitude_scan(
     amplitudes: np.ndarray,
     components: Sequence,
     threshold: Optional[float] = None,
-    amp_scale: Optional[FrequencyScale] = None,
-    compo_scale: Optional[FrequencyScale] = None,
+    amp_scale: Union[FrequencyScale, None] = FrequencyScale.auto,
+    compo_scale: Union[FrequencyScale, None] = FrequencyScale.auto,
     max_poly_order: int = 4
 ) -> Tuple[mpl.figure.Figure, np.ndarray, FrequencyScale, FrequencyScale]:
     """Plot the result of the amplitude scan.
@@ -507,14 +388,14 @@ def plot_amplitude_scan(
     comp_dim = int(np.around(np.sqrt(components.shape[1])))
     num_paulis = comp_dim ** 2
 
-    if amp_scale is None:
-        amp_scale = _find_scale(np.amax(np.abs(amplitudes)))
+    if amp_scale is FrequencyScale.auto:
+        amp_scale = FrequencyScale.find_scale(np.amax(np.abs(amplitudes)))
 
     amp_scale_omega = amp_scale.pulsatance_value
     amps_norm = amplitudes / amp_scale_omega
 
-    if compo_scale is None:
-        compo_scale = _find_scale(np.amax(np.abs(components)))
+    if compo_scale is FrequencyScale.auto:
+        compo_scale = FrequencyScale.find_scale(np.amax(np.abs(components)))
 
     compo_scale_omega = compo_scale.pulsatance_value
     compos_norm = components / compo_scale_omega
