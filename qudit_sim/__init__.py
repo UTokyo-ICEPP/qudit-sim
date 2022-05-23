@@ -11,3 +11,4 @@ from .pulse_sim import pulse_sim
 from .find_heff import find_heff
 from .util import FrequencyScale, PulseSimResult, print_hamiltonian
 from .parallel import parallel_map
+from .config import config

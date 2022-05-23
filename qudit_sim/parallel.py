@@ -2,9 +2,11 @@
 
 from typing import Callable, List, Sequence, Tuple, Optional, Union, Any
 import time
-from multiprocessing import Process, Pipe, cpu_count
-from threading import Thread
+import multiprocessing
+import threading
 import logging
+
+from .config import config
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +50,11 @@ def _wait_procs(processes, results, max_num, wait=2):
         else:
             break
 
-def _process_wrapper(target, args, kwargs, conn):
+def _process_wrapper(target, args, kwargs, conn, proc_config=None):
+    if proc_config:
+        for key, value in proc_config.items():
+            setattr(config, key, value)
+
     result = target(*args, **kwargs)
     conn.send(result)
 
@@ -60,7 +66,6 @@ def parallel_map(
     common_args: Optional[tuple] = None,
     common_kwargs: Optional[dict] = None,
     arg_position: Optional[Union[int, Sequence[int]]] = None,
-    num_cpus: int = 0,
     thread_based: bool = False,
     log_level: int = logging.WARNING
 ) -> list:
@@ -90,7 +95,6 @@ def parallel_map(
         common_args: Positional arguments common to all invocation of the function.
         common_kwargs: Keyword arguments common to all invocation of the function.
         arg_position: Positions of each element of args in the function call.
-        num_cpus: Maximum number of processes to run concurrently.
         thread_based: Use threads instead of processes.
         log_level: logger level.
 
@@ -100,8 +104,9 @@ def parallel_map(
     original_log_level = logger.level
     logger.setLevel(log_level)
 
+    num_cpus = config.num_cpus
     if num_cpus <= 0:
-        num_cpus = cpu_count()
+        num_cpus = multiprocessing.cpu_count()
 
     assert num_cpus > 0, f'Invalid num_cpus value {num_cpus}'
 
@@ -170,12 +175,17 @@ def parallel_map(
         if thread_based:
             conn = ThreadConn()
             conn_recv = conn
-            proc_args = (target, a, k, conn)
-            process = Thread(target=_process_wrapper, args=proc_args, name=f'task{itask}')
+            # In thread-based parallelization, each thread sees only one GPU
+            jax_device_id = config.jax_devices[itask % len(config.jax_devices)]
+            proc_config = {'jax_devices': [jax_device_id]}
+            proc_args = (target, a, k, conn, proc_config)
+            process = threading.Thread(target=_process_wrapper, args=proc_args, name=f'task{itask}')
         else:
-            conn_recv, conn_send = Pipe()
-            proc_args = (target, a, k, conn_send)
-            process = Process(target=_process_wrapper, args=proc_args, name=f'task{itask}')
+            conn_recv, conn_send = multiprocessing.Pipe()
+            # JAX (or CUDA in general?) does not seem to work with multiprocessing
+            proc_config = {'jax_devices': []}
+            proc_args = (target, a, k, conn_send, proc_config)
+            process = multiprocessing.Process(target=_process_wrapper, args=proc_args, name=f'task{itask}')
 
         process.start()
         processes.append((process, itask, conn_recv))

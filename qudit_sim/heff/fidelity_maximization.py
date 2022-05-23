@@ -5,7 +5,8 @@ from functools import partial
 import numpy as np
 import jax
 import jax.numpy as jnp
-import jax.scipy.optimize as jsciopt
+#import jax.scipy.optimize as jsciopt
+import scipy.optimize as sciopt
 import optax
 import h5py
 
@@ -14,6 +15,7 @@ from rqutils.math import matrix_angle
 
 from .leastsq_minimization import leastsq_minimization
 from .common import get_ilogus_and_valid_it, heff_fidelity, compose_ueff
+from ..config import config
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +25,10 @@ def fidelity_maximization(
     dim: Tuple[int, ...],
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
-    jax_device_id: Optional[int] = None,
     optimizer: Union[optax.GradientTransformation, str] = optax.adam(0.05),
     init: Union[str, np.ndarray] = 'slope_estimate',
-    residual_adjust: bool = True,
+    l1_reg: float = 0.,
+    residual_adjust: int = 2,
     max_updates: int = 10000,
     convergence: float = 1.e-4,
     **kwargs
@@ -50,10 +52,10 @@ def fidelity_maximization(
         dim: Subsystem dimensions.
         save_result_to: File name (without an extension) to save the intermediate results to.
         log_level: Log level.
-        jax_device_id: If not None, use JAX on the specified device ID.
         optimizer: The optimizer object. An `optax.GradientTransformation` object or `'minuit'`.
         init: Parameter initialization method. `'slope_estimate'`, `'leastsq'`, or `'random'`.
-        residual_adjust: Whether to perform a linear fit with a floating intercept on the Pauli components of
+        l1_reg: L1 regularization coefficient. If not zero, adds a term `l1_reg * np.sum(np.abs(components))` to the loss function.
+        residual_adjust: Number of iterations for linear fits with floating intercepts on the Pauli components of
             :math:`i \mathrm{log} \left[U_{H}(t) U_{\mathrm{eff}}(t)^{\dagger}\right]` after the best-fit :math:`U_{\mathrm{eff}}(t)`
             is found.
         max_updates: Number of maximum gradient-descent iterations.
@@ -68,10 +70,11 @@ def fidelity_maximization(
     matrix_dim = np.prod(dim)
     assert time_evolution.shape == (tlist.shape[0], matrix_dim, matrix_dim), 'Inconsistent input shape'
 
-    if jax_device_id is None:
+    if not config.jax_devices:
         jax_device = None
     else:
-        jax_device = jax.devices()[jax_device_id]
+        # parallel.parallel_map sets jax_devices[0] to the ID of the GPU to be used in this thread
+        jax_device = jax.devices()[config.jax_devices[0]]
 
     ## Set up the Pauli product basis of the space of Hermitian operators
     basis = paulis.paulis(dim)
@@ -113,7 +116,11 @@ def fidelity_maximization(
     @partial(jax.jit, device=jax_device)
     def _loss_fn(time_evolution, heff_compos_norm, basis_list, tlist_norm):
         fidelity = heff_fidelity(time_evolution, heff_compos_norm, basis_list, tlist_norm, npmod=jnp)
-        return 1. - 1. / (tlist_norm.shape[0] + 1) - jnp.mean(fidelity)
+        loss = 1. - 1. / (tlist_norm.shape[0] + 1) - jnp.mean(fidelity)
+        if l1_reg != 0.:
+            loss += l1_reg * jnp.sum(jnp.abs(heff_compos_norm))
+
+        return loss
 
     if optimizer == 'minuit':
         from iminuit import Minuit
@@ -178,44 +185,53 @@ def fidelity_maximization(
 
         logger.info('Done after %d steps.', iup)
 
-        copt = params['c']
+        copt = np.array(params['c'])
 
     if not np.all(np.isfinite(copt)):
         raise ValueError('Optimized components not finite')
 
-    if residual_adjust:
-        logger.info('Adjusting the Pauli components obtained from a linear fit to the residuals..')
-
-        def fun(params, ydata):
-            return jnp.sum(jnp.square(tlist_norm * params[0] - ydata + params[1]))
-
-        @partial(jax.vmap, in_axes=(1, 0))
-        def fit_compos(ydata, c0):
-            res = jsciopt.minimize(fun, c0, args=(ydata,), method='BFGS')
-            return res.x[0], res.success
+    for iadj in range(residual_adjust):
+        logger.info(f'Adjusting the Pauli components obtained from a linear fit to the residuals (iteration {iadj})')
 
         ueff_dagger = compose_ueff(copt, basis_list, tlist_norm, phase_factor=1.)
-        target = jnp.matmul(time_evolution, ueff_dagger)
+        target = np.matmul(time_evolution, ueff_dagger)
 
         ilogtargets = -matrix_angle(target)
         ilogtarget_compos = paulis.components(ilogtargets, dim=dim).real
         ilogtarget_compos = ilogtarget_compos.reshape(tlist_norm.shape[0], -1)[:, 1:]
 
-        ## Do a linear fit to each component
-        dopt, success = fit_compos(ilogtarget_compos, jax.device_put(np.zeros(copt.shape + (2,)), device=jax_device))
+        # jax.scipy.optimize.minimize seems less tolerant than normal scipy equivalent
+        # -> Observed cases where fits that should converge didn't, so giving up on parallelization
+        #
+        # def fun(params, ydata):
+        #     return jnp.sum(jnp.square(tlist_norm * params[0] - ydata + params[1]))
 
-        failed = np.logical_not(success)
-        if np.any(failed):
-            failed_indices = np.nonzero(failed)[0]
-            # compos list has the first element (identity) removed -> add 1 to the indices before unraveling
-            failed_basis_indices = np.unravel_index(failed_indices + 1, basis.shape[:-2])
-            # convert to a list of tuples
-            failed_basis_indices = list(zip(*failed_basis_indices))
-            residual_values_str = ', '.join(f'{idx_tuple}: {np.max(np.abs(ilogtarget_compos[:, idx]))}'
-                                           for idx_tuple, idx in zip(failed_basis_indices, failed_indices))
-            logger.warning('Residual adjustment failed for components %s', residual_values_str)
+        # @partial(jax.vmap, in_axes=(1, 0))
+        # def fit_compos(ydata, c0):
+        #     res = jsciopt.minimize(fun, c0, args=(ydata,), method='BFGS')
+        #     return res.x[0], res.success
 
-        copt += dopt
+        # ## Do a linear fit to each component
+        # dopt, success = fit_compos(ilogtarget_compos, jax.device_put(np.zeros(copt.shape + (2,)), device=jax_device))
+
+        # failed = np.logical_not(success)
+        # if np.any(failed):
+        #     failed_indices = np.nonzero(failed)[0]
+        #     # compos list has the first element (identity) removed -> add 1 to the indices before unraveling
+        #     failed_basis_indices = np.unravel_index(failed_indices + 1, basis.shape[:-2])
+        #     # convert to a list of tuples
+        #     failed_basis_indices = list(zip(*failed_basis_indices))
+        #     residual_values_str = ', '.join(f'{idx_tuple}: {np.max(np.abs(ilogtarget_compos[:, idx]))}'
+        #                                    for idx_tuple, idx in zip(failed_basis_indices, failed_indices))
+        #     logger.warning('Residual adjustment failed for components %s', residual_values_str)
+
+        # copt += dopt
+
+        line = lambda t, slope, intercept: t * slope + intercept
+
+        for idx in np.arange(copt.shape[0]):
+            popt, _ = sciopt.curve_fit(line, tlist_norm, ilogtarget_compos[:, idx], p0=np.zeros(2))
+            copt[idx] += popt[0]
 
     heff_compos = np.concatenate(([0.], copt / tlist[-1])).reshape(basis.shape[:-2])
 

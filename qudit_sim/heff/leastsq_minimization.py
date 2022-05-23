@@ -20,6 +20,7 @@ else:
 import rqutils.paulis as paulis
 
 from .common import get_ilogus_and_valid_it, compose_ueff
+from ..config import config
 
 def leastsq_minimization(
     time_evolution: np.ndarray,
@@ -27,7 +28,6 @@ def leastsq_minimization(
     dim: Tuple[int, ...],
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
-    jax_device_id: Optional[int] = None,
     max_com: float = 20.,
     min_compo_ratio: float = 0.005,
     num_update_per_iteration: int = 0,
@@ -42,7 +42,6 @@ def leastsq_minimization(
         dim: Subsystem dimensions.
         save_result_to: File name (without an extension) to save the intermediate results to.
         log_level: Log level.
-        jax_device_id: If not None, use JAX on the specified device ID.
         max_com: Convergence condition.
         min_compo_ratio: Convergence condition.
         num_update_per_iteration: Number of components to update per iteration. If <= 0, all candidate components are updated.
@@ -57,9 +56,6 @@ def leastsq_minimization(
 
     matrix_dim = np.prod(dim)
     assert time_evolution.shape == (tlist.shape[0], matrix_dim, matrix_dim), 'Inconsistent input shape'
-
-    if jax_device_id is not None:
-        assert HAS_JAX, 'JAX is not installed'
 
     tsize = tlist.shape[0]
     tend = tlist[-1]
@@ -90,7 +86,7 @@ def leastsq_minimization(
     # Normalized tlist
     tlist_norm = tlist / tend
 
-    if jax_device_id is not None:
+    if config.jax_devices:
         npmod = jnp
         sciopt = jax.scipy.optimize
     else:
@@ -148,8 +144,8 @@ def leastsq_minimization(
     ## Output array
     heff_compos = np.zeros(basis_size)
 
-    if jax_device_id is not None:
-        jax_device = jax.devices()[jax_device_id]
+    if config.jax_devices:
+        jax_device = jax.devices()[confnig.jax_devices[0]]
 
         time_evolution = jax.device_put(time_evolution, device=jax_device)
         basis_list = jnp.device_put(basis_list, device=jax_device)

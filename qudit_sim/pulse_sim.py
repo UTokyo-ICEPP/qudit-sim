@@ -28,7 +28,6 @@ def pulse_sim(
     options: Optional[qtp.solver.Options] = None,
     progress_bar: Optional[qtp.ui.progressbar.BaseProgressBar] = None,
     save_result_to: Optional[str] = None,
-    num_cpus: int = 0,
     log_level: int = logging.WARNING
 ) -> Union[PulseSimResult, List[PulseSimResult]]:
     """Run a pulse simulation.
@@ -79,19 +78,23 @@ def pulse_sim(
 
         num_tasks = len(hgen)
 
-        kwarg_keys = ('logger_name',)
-        kwarg_values = list((f'{__name__}.{itask}',) for itask in range(num_tasks))
-
         if save_result_to:
             if not (os.path.exists(save_result_to) and os.path.isdir(save_result_to)):
                 os.makedirs(save_result_to)
 
-            kwarg_keys += ('save_result_to',)
-            for itask in range(num_tasks):
-                kwarg_values[itask] += (os.path.join(save_result_to, f'sim_{itask}'),)
+            save_result_path = lambda itask: os.path.join(save_result_to, f'sim_{itask}')
+        else:
+            save_result_path = lambda itask: None
+
+        kwarg_keys = ('logger_name', 'save_result_to')
+        kwarg_values = list()
+        for itask in range(num_tasks):
+            kwarg_values.append((
+                f'{__name__}.{itask}',
+                save_result_path(itask)))
 
         result = parallel_map(_run_single, args=hgen, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
-                              common_kwargs=common_kwargs, num_cpus=num_cpus, log_level=log_level)
+                              common_kwargs=common_kwargs, log_level=log_level)
 
     else:
         result = _run_single(hgen, psi0, tlist, rwa, keep_callable, kwargs, save_result_to)
@@ -108,7 +111,7 @@ def _run_single(
     rwa: bool,
     keep_callable: bool,
     kwargs: dict,
-    save_result_to: Optional[str] = None,
+    save_result_to: Union[str, None],
     logger_name: str = __name__
 ):
     """Run one pulse simulation."""
