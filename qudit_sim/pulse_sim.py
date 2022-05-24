@@ -17,10 +17,12 @@ from .parallel import parallel_map
 
 logger = logging.getLogger(__name__)
 
+TList = Union[np.ndarray, Tuple[int, int]]
+
 def pulse_sim(
     hgen: Union[HamiltonianGenerator, List[HamiltonianGenerator]],
     psi0: Optional[qtp.Qobj] = None,
-    tlist: Union[np.ndarray, Tuple[int, int]] = (10, 100),
+    tlist: Union[TList, List[TList]] = (10, 100),
     args: Optional[Any] = None,
     rwa: bool = True,
     keep_callable: bool = False,
@@ -51,7 +53,9 @@ def pulse_sim(
         hgen: Fully set up Hamiltonian generator or a list thereof.
         psi0: Initial state Qobj. Defaults to the identity operator appropriate for the given Hamiltonian.
         tlist: Time points to use in the simulation or a pair `(points_per_cycle, num_cycles)` where in the latter
-            case the cycle of the fastest oscillating term in the Hamiltonian will be used.
+            case the cycle of the fastest oscillating term in the Hamiltonian will be used. When `hgen` is a list,
+            this parameter can also be a list with the same length as `hgen` to specify different time points for each
+            HamiltonianGenerator.
         args: Second parameter passed to drive amplitude functions (if callable).
         rwa: Whether to use the rotating-wave approximation.
         keep_callable: Keep callable time-dependent Hamiltonian coefficients. Otherwise all callable coefficients
@@ -74,7 +78,7 @@ def pulse_sim(
         kwargs['args'] = args
 
     if isinstance(hgen, list):
-        common_kwargs = {'psi0': psi0, 'tlist': tlist, 'rwa': rwa, 'keep_callable': keep_callable, 'kwargs': kwargs}
+        common_kwargs = {'psi0': psi0, 'rwa': rwa, 'keep_callable': keep_callable, 'kwargs': kwargs}
 
         num_tasks = len(hgen)
 
@@ -87,11 +91,19 @@ def pulse_sim(
             save_result_path = lambda itask: None
 
         kwarg_keys = ('logger_name', 'save_result_to')
+
+        if isinstance(tlist, list):
+            kwarg_keys += ('tlist',)
+        else:
+            common_kwargs['tlist'] = tlist
+
         kwarg_values = list()
         for itask in range(num_tasks):
-            kwarg_values.append((
-                f'{__name__}.{itask}',
-                save_result_path(itask)))
+            values = (f'{__name__}.{itask}', save_result_path(itask))
+            if isinstance(tlist, list):
+                values += (tlist[itask],)
+
+            kwarg_values.append(values)
 
         result = parallel_map(_run_single, args=hgen, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
                               common_kwargs=common_kwargs, log_level=log_level)

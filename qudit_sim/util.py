@@ -94,23 +94,22 @@ def print_hamiltonian(
 def print_components(
     components: np.ndarray,
     symbol: Optional[str] = None,
-    threshold: Optional[float] = None,
-    scale: Union[FrequencyScale, None] = FrequencyScale.auto
+    precision: int = 3,
+    threshold: float = 1.e-3,
+    scale: Union[FrequencyScale, str, None] = FrequencyScale.auto
 ) -> LaTeXRepr:
-    """Generate a LaTeX expression of the effective Hamiltonian from the Pauli components.
-
-    The dymamic range of the numerical values of the components is set by the maximum absolute
-    value. For example, if the maximum absolute value is between 1.e+6 and 1.e+9, the components
-    are expressed in MHz, with the minimum of 0.001 MHz. Pauli terms whose components have
-    absolute values below the threshold are ignored.
+    r"""Generate a LaTeX expression of the effective Hamiltonian from the Pauli components.
 
     Args:
         components: Array of Pauli components returned by find_heff
         symbol: Symbol to use instead of :math:`\lambda` for the matrices.
-        threshold: Ignore terms with absolute components below this value.
+        precision: Number of digits below the decimal point to show.
+        threshold: Ignore terms with absolute components below this value relative to the given scale
+            (if >0) or to the maximum absolute component (if <0).
         scale: Normalize the components with the frequency scale. If None, components are taken
             to be dimensionless. If `FrequencyScale.auto`, scale is found from the maximum absolute
-            value of the components.
+            value of the components. String `'pi'` is also allowed, in which case the components are
+            normalized by :math:`\pi`.
 
     Returns:
         A LaTeX expression string for the effective Hamiltonian.
@@ -123,15 +122,19 @@ def print_components(
     if scale is None:
         scale_omega = 1.
         lhs_label = r'i \mathrm{log} U'
+    elif scale == 'pi':
+        scale_omega = np.pi
+        lhs_label = r'\frac{i \mathrm{log} U}{\pi}'
     else:
         scale_omega = scale.pulsatance_value
         lhs_label = r'\frac{H_{\mathrm{eff}}}{\mathrm{%s}}' % scale.name
 
-    if threshold is None:
-        threshold = scale_omega * 1.e-2
+    if threshold < 0.:
+        threshold *= -max_abs / scale_omega
 
     pobj = QPrintPauli(components / scale_omega,
-                       epsilon=(threshold / max_abs),
+                       amp_format=f'.{precision}f',
+                       epsilon=(threshold * scale_omega / max_abs),
                        lhs_label=lhs_label,
                        symbol=symbol)
 
@@ -140,23 +143,20 @@ def print_components(
 
 def plot_components(
     components: np.ndarray,
-    threshold: Optional[float] = None,
-    scale: Union[FrequencyScale, None] = FrequencyScale.auto,
+    threshold: float = 1.e-2,
+    scale: Union[FrequencyScale, str, None] = FrequencyScale.auto,
     ignore_identity: bool = True
 ) -> mpl.figure.Figure:
     """Plot the Hamiltonian components as a bar graph in the decreasing order in the absolute value.
 
-    The dymamic range of the numerical values of the components is set by the maximum absolute
-    value. For example, if the maximum absolute value is between 1.e+6 and 1.e+9, the components
-    are expressed in MHz, with the minimum of 0.001 MHz. Pauli terms whose components have
-    absolute values below the threshold are ignored.
-
     Args:
         components: Array of Pauli components returned by find_heff
-        threshold: Ignore terms with absolute components below this value.
+        threshold: Ignore terms with absolute components below this value relative to the given scale
+            (if >0) or to the maximum absolute component (if <0).
         scale: Normalize the components with the frequency scale. If None, components are taken
             to be dimensionless. If `FrequencyScale.auto`, scale is found from the maximum absolute
-            value of the components.
+            value of the components. String `'pi'` is also allowed, in which case the components are
+            normalized by :math:`\pi`.
         ignore_identity: Ignore the identity term.
 
     Returns:
@@ -172,23 +172,22 @@ def plot_components(
     if scale is None:
         scale_omega = 1.
         ylabel = r'$\nu$'
+    elif scale == 'pi':
+        scale_omega = np.pi
+        ylabel = r'$\nu/\pi$'
     else:
         scale_omega = scale.pulsatance_value
-        ylabel = r'$\nu (\mathrm{' + scale.frequency_unit + '})$'
-
-    if threshold is None:
-        threshold = scale_omega * 1.e-2
-
-    # Negative threshold specified -> relative to max
-    if threshold < 0.:
-        threshold *= -max_abs
+        ylabel = r'$\nu\,(\mathrm{' + scale.frequency_unit + '})$'
 
     # Dividing by omega -> now everything is in terms of frequency (not angular)
     components /= scale_omega
-    threshold /= scale_omega
 
     if ignore_identity:
         components.reshape(-1)[0] = 0.
+
+    # Negative threshold specified -> relative to max
+    if threshold < 0.:
+        threshold *= -max_abs / scale_omega
 
     flat_indices = np.argsort(-np.abs(components.reshape(-1)))
     nterms = np.count_nonzero(np.abs(components) > threshold)
