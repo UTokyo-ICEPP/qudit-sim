@@ -1,3 +1,5 @@
+"""Miscellaneous utility classes and functions."""
+
 from typing import Union, Tuple, Callable, List, Optional
 import enum
 from dataclasses import dataclass

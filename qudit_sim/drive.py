@@ -1,50 +1,11 @@
 r"""
-======================
-Hamiltonian drive term
-======================
+==========================================
+Drive Hamiltonian (:mod:`qudit_sim.drive`)
+==========================================
 
-The drive Hamiltonian for a given channel :math:`j`, qudit :math:`k`, level :math:`l` is
+.. currentmodule:: qudit_sim.drive
 
-.. math::
-
-    \tilde{H}_{\mathrm{d}}|_{jk}^{l} = \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i (\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right) \left( e^{i (\xi_k^{l} t + \phi_k^{l})} \sqrt{l+1} |l + 1 \rangle_k \langle l |_k  + \mathrm{h.c.} \right).
-
-Let
-
-.. math::
-
-    R_{jk}(t) = \alpha_{jk} e^{i\rho_{jk}} \frac{\Omega_j}{2} r_j(t)
-
-and
-
-.. math::
-
-    A^{l}_{k} & = e^{-i \phi^{l}_{k}} \sqrt{l + 1} | l \rangle_k \langle l + 1 |_k, \\
-    X^{l}_{k} & = A^{l\dagger}_{k} + A^{l}_{k} \\
-    Y^{l}_{k} & = i(A^{l\dagger}_{k} - A^{l}_{k}).
-
-Then the drive term above is
-
-.. math::
-
-    \tilde{H}_{\mathrm{d}}|_{jk}^{l} = & R_{jk}(t) e^{-i (\nu_j - \xi_k^{l}) t} A^{l\dagger}_{k} + R^{*}_{jk}(t) e^{i (\nu_j - \xi_k^{l}) t} A^{l}_{k}
-                                       + R^{*}_{jk}(t) e^{i (\nu_j + \xi_k^{l}) t} A^{l\dagger}_{k} + R_{jk}(t) e^{-i (\nu_j + \xi_k^{l}) t} A^{l}_{k} \\
-                                     = & \mathrm{Re}[R_{jk}(t) e^{-i (\nu_j - \xi_k^{l}) t} + R_{jk}(t) e^{-i (\nu_j + \xi_k^{l}) t}] X^{l}_{k}
-                                       + \mathrm{Im}[R_{jk}(t) e^{-i (\nu_j - \xi_k^{l}) t} - R_{jk}(t) e^{-i (\nu_j + \xi_k^{l}) t}] Y^{l}_{k} \\
-                                     = & 2 \mathrm{Re}[R_{jk}(t) e^{-i \nu_j t}] [\cos(\xi_k^{l} t) X^{l}_{k} + \sin(\xi_k^{l} t) Y^{l}_{k}].
-
-With the rotating-wave approximation we instead have
-
-.. math::
-
-    \bar{H}_{\mathrm{d}}|_{jk}^{l} = & R_{jk}(t) e^{-i (\nu_j - \xi_k^{l}) t} A^{l\dagger}_{k} + R^{*}_{jk}(t) e^{i (\nu_j - \xi_k^{l}) t} A^{l}_{k} \\
-                                     = & \mathrm{Re}[R_{jk}(t) e^{-i (\nu_j - \xi_k^{l}) t}] X^{l}_{k} + \mathrm{Im}[R_{jk}(t) e^{-i (\nu_j - \xi_k^{l}) t}] Y^{l}_{k}.
-
-The representation in terms of :math:`X^{l}_{k}` and :math:`Y^{l}_{k}` operators has several advantages over using :math:`A^{l}_{k}` and :math:`A^{l\dagger}_{k}`:
-
-- When :math:`r_j(t)` is a callable, QuTiP `sesolve` seems to run slightly faster when :math:`X` and :math:`Y` with real coefficients are passed as Hamiltonian terms.
-- The Hamiltonian is manifestly Hermitian.
-- For a pure real or imaginary :math:`R_{jk}(t)`, on-resonant (:math:`\nu_j = \xi_k^{l}`) drive, the RWA Hamiltonian reduces to a single term.
+See :ref:`drive-hamiltonian` for theoretical background.
 """
 
 from typing import Callable, Optional, Union, Tuple

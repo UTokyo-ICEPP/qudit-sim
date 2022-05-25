@@ -3,7 +3,7 @@ qudit-sim: Qudit pulse simulation and effective Hamiltonian analysis
 
 [Y. Iiyama](https://github.com/yiiyama)
 
-Qudit-sim is a tool for extracting effective Hamiltonians / gate unitaries of arbitrary microwave pulses applied to a system of statically coupled d-level quantum oscillators (qudits). Its intended usage is as a base for prototyping new pulse sequences that implement custom quantum gates involving more than two oscillator levels.
+`qudit-sim` is a tool for extracting effective Hamiltonians / gate unitaries of arbitrary microwave pulses applied to a system of statically coupled d-level quantum oscillators (qudits). Its intended usage is as a base for prototyping new pulse sequences that implement custom quantum gates involving more than two oscillator levels.
 
 Most of the heavy-lifting is done by [QuTiP](https://qutip.org) through its Schrodinger equation solver (`sesolve`). The main functions of this tool are to prepare the Hamiltonian object passed to `sesolve` from the input parameters, and to interpret the result of the simulation.
 
