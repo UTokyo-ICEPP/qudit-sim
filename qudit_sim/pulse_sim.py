@@ -35,13 +35,13 @@ def pulse_sim(
     """Run a pulse simulation.
 
     Generate the Hamiltonian terms from the HamiltonianGenerator, determine the time points for the simulation
-    if necessary, and run `qutip.sesolve`.
+    if necessary, and run ``qutip.sesolve``.
 
     .. rubric:: Implementation notes (why we return an original object instead of the QuTiP result)
 
     When the coefficients of the time-dependent Hamiltonian are compiled (preferred
     method), QuTiP creates a transient python module with file name generated from the code hash, PID, and the current time.
-    When running multiple simulations in parallel this is not strictly safe, and so we enclose `sesolve` in a context with
+    When running multiple simulations in parallel this is not strictly safe, and so we enclose ``sesolve`` in a context with
     a temporary directory in this function. The transient module is then deleted at the end of execution, but that in turn
     causes an error when this function is called in a subprocess and if we try to return the QuTiP result object directly
     through e.g. multiprocessing.Pipe. Somehow the result object tries to carry with it something defined in the transient
@@ -52,9 +52,9 @@ def pulse_sim(
     Args:
         hgen: Fully set up Hamiltonian generator or a list thereof.
         psi0: Initial state Qobj. Defaults to the identity operator appropriate for the given Hamiltonian.
-        tlist: Time points to use in the simulation or a pair `(points_per_cycle, num_cycles)` where in the latter
-            case the cycle of the fastest oscillating term in the Hamiltonian will be used. When `hgen` is a list,
-            this parameter can also be a list with the same length as `hgen` to specify different time points for each
+        tlist: Time points to use in the simulation or a pair ``(points_per_cycle, num_cycles)`` where in the latter
+            case the cycle of the fastest oscillating term in the Hamiltonian will be used. When ``hgen`` is a list,
+            this parameter can also be a list with the same length as ``hgen`` to specify different time points for each
             HamiltonianGenerator.
         args: Second parameter passed to drive amplitude functions (if callable).
         rwa: Whether to use the rotating-wave approximation.
@@ -64,6 +64,7 @@ def pulse_sim(
         options: QuTiP solver options.
         progress_bar: QuTiP progress bar.
         save_result_to: File name (without the extension) to save the simulation result to.
+        log_level: Log level.
 
     Returns:
         Result of the pulse simulation.

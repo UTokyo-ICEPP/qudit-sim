@@ -279,6 +279,6 @@ With the rotating-wave approximation we instead have
 
 The representation in terms of :math:`X^{l}_{k}` and :math:`Y^{l}_{k}` operators has several advantages over using :math:`A^{l}_{k}` and :math:`A^{l\dagger}_{k}`:
 
-- When :math:`r_j(t)` is a callable, QuTiP `sesolve` seems to run slightly faster when :math:`X` and :math:`Y` with real coefficients are passed as Hamiltonian terms.
+- When :math:`r_j(t)` is a callable, QuTiP ``sesolve`` seems to run slightly faster when :math:`X` and :math:`Y` with real coefficients are passed as Hamiltonian terms.
 - The Hamiltonian is manifestly Hermitian.
 - For a pure real or imaginary :math:`R_{jk}(t)`, on-resonant (:math:`\nu_j = \xi_k^{l}`) drive, the RWA Hamiltonian reduces to a single term.

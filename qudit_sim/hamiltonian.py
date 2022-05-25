@@ -6,23 +6,6 @@ Hamiltonian generator (:mod:`qudit_sim.hamiltonian`)
 .. currentmodule:: qudit_sim.hamiltonian
 
 See :doc:`/hamiltonian` for theoretical background.
-
-
-QuTiP implementation
-====================
-
-Time-dependent Hamiltonian in QuTiP is represented by a list of two-lists `[H, c(t)]` where `H` is a static Qobj and
-`c(t)` is the time-dependent coefficient of `H`. There must be one such two-list per distinct time dependency.
-As apparent from above, in the frame-transformed interaction Hamiltonian,
-each level combination of each pair of coupled qudits has its own frequency. Similarly, the drive Hamiltonian has a
-distinct frequency for each level of each qudit. Therefore the QuTiP Hamiltonian list typically contains a large number
-of entries.
-
-While `c(t)` can be a complex function (and therefore `H` be a non-Hermitian matrix), having `c(t)` real and `H` Hermitian
-seems to be advantageous in terms of calculation speed. Therefore, in our implementation, the Hamiltonian terms are split
-into symmetric (e.g. :math:`|l+1\rangle \langle l| + |l\rangle \langle l+1|`) and antisymmetric
-(e.g. :math:`i(|l+1\rangle \langle l| - |l\rangle \langle l+1|)`) parts whenever possible, with the corresponding time
-dependencies given by cosine and sine functions, respectively.
 """
 
 # TODO: Qubit optimization
@@ -61,13 +44,13 @@ class HamiltonianGenerator:
 
     Args:
         num_levels: Number of energy levels to consider.
-        qudits: If passing `params` to initialize the Hamiltonian, list of qudit numbers to include.
-        params: Hamiltonian parameters given by IBMQ `backend.configuration().hamiltonian['vars']`, optionally
-            augmented with `'crosstalk'`, which should be a `dict` of form `{(j, k): z}` specifying the crosstalk
-            factor `z` (complex corresponding to :math:`\alpha_{jk} e^{i\rho_{jk}}`) of drive on qudit `j` seen
-            by qudit `k`. `j` and `k` are qudit ids given in `qudits`.
-        default_frame: Default global frame to use. `set_global_frame(default_frame)` is executed each time
-            `add_qudit` or `add_coupling` is called.
+        qudits: If passing ``params`` to initialize the Hamiltonian, list of qudit numbers to include.
+        params: Hamiltonian parameters given by IBMQ ``backend.configuration().hamiltonian['vars']``, optionally
+            augmented with ``'crosstalk'``, which should be a ``dict`` of form ``{(j, k): z}`` specifying the crosstalk
+            factor ``z`` (complex corresponding to :math:`\alpha_{jk} e^{i\rho_{jk}}`) of drive on qudit :math:`j` seen
+            by qudit :math:`k`. :math:`j` and :math:`k` are qudit ids given in ``qudits``.
+        default_frame: Default global frame to use. ``set_global_frame(default_frame)`` is executed each time
+            ``add_qudit`` or ``add_coupling`` is called.
     """
     def __init__(
         self,

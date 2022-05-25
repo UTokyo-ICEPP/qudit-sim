@@ -8,5 +8,6 @@ Backend functions and classes
    :toctree: ../generated
    :recursive:
 
+   drive
    util
    parallel

@@ -15,7 +15,6 @@
    :caption: API Reference
 
    apidocs/frontend
-   apidocs/hamiltonian
    apidocs/heff
    apidocs/backend
 

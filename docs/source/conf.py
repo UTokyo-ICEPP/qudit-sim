@@ -67,7 +67,7 @@ html_static_path = ['_static']
 html_theme_options = {
     'display_version': True,
     'prev_next_buttons_location': 'bottom',
-    'collapse_navigation': True,
+    'collapse_navigation': False,
     'sticky_navigation': True,
     'navigation_depth': 2,
     'includehidden': True,

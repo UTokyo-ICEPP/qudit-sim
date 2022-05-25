@@ -1,12 +1,4 @@
-"""
-=============================================================
-Effective Hamiltonian extraction (:mod:`qudit_sim.find_heff`)
-=============================================================
-
-.. currentmodule:: qudit_sim.find_heff
-
-See :doc:`/heff` for theoretical background.
-"""
+"""Effective Hamiltonian extraction frontend."""
 
 from typing import Any, Dict, List, Sequence, Optional, Union
 import os
@@ -32,19 +24,20 @@ def find_heff(
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING
 ) -> Union[np.ndarray, List[np.ndarray]]:
-    r"""Run a pulse simulation with constant drives and extract the Pauli components of the effective Hamiltonian.
+    r"""Determine the effective Hamiltonian from the result of constant-drive simulations.
+
+    The input to this function must be the result of pulse_sim with constant drives.
 
     Args:
         sim_result: Result from pulse_sim.
         comp_dim: Dimensionality of the computational space.
-        method: Name of the function to use for Pauli component extraction. Currently possible values are
-            'fidelity' and 'leastsq'.
+        method: Pauli component extraction method. Currently possible values are 'fidelity' and 'leastsq'.
         method_params: Optional keyword arguments to pass to the extraction function.
-        save_result_to: File name (without the extension) to save the simulation and extraction results to.
-            Simulation result will not be saved when a list is passed as `drive_def`.
+        save_result_to: File name (without the extension) to save the extraction results to.
+        log_level: Log level.
 
     Returns:
-        An array of Pauli components or a list thereof (if a list is passed to `sim_result`).
+        An array of Pauli components or a list thereof (if a list is passed to ``sim_result``).
     """
     original_log_level = logger.level
     logger.setLevel(log_level)
