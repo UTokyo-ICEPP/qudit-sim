@@ -1,6 +1,6 @@
 """Pulse shape library."""
 
-from typing import List, Union, Optional
+from typing import List, Union, Optional, Any
 import copy
 import logging
 from dataclasses import dataclass
@@ -20,6 +20,12 @@ class PulseSequence(list):
     given to a single channel. In practice, the class is implemented as a subclass of Python
     list with a single additional function `generate_fn`.
     """
+
+    @property
+    def duration(self):
+        d = sum(inst.value for inst in self if isinstance(inst, Delay))
+        d += sum(inst.duration for inst in self if isinstance(inst, Pulse))
+        return d
 
     def generate_fn(
         self,
@@ -93,6 +99,46 @@ class PulseSequence(list):
 
         return fn_x, fn_y, max_frequency
 
+    def envelope(self, t: Union[float, np.ndarray], args: Any = None) -> np.ndarray:
+        """Return the envelope of the sequence as a function of time.
+
+        This function is mostly for visualization purposes. Phase and frequency information is lost in the
+        returned array.
+
+        Args:
+            t: Time or array of time points.
+
+        Returns:
+            Pulse sequence envelope (complex) as a function of time.
+        """
+        funclist = []
+        timelist = []
+
+        time = 0.
+
+        def make_shifted(pulse, start_time):
+            def fn(t):
+                return pulse(t - start_time, args)
+
+            return fn
+
+        for inst in self:
+            if isinstance(inst, Delay):
+                funclist.append(0.)
+                timelist.append(time)
+                time += inst.value
+            elif isinstance(inst, Pulse):
+                funclist.append(make_shifted(inst, time))
+                timelist.append(time)
+                time += inst.duration
+
+        timelist.append(time)
+
+        # piecewise determines the output dtype from tlist
+        t = np.asarray(t, dtype=np.float)
+        condlist = [((t >= start) & (t < end)) for start, end in zip(timelist[:-1], timelist[1:])]
+        return np.piecewise(t, condlist, funclist)
+
 
 class Pulse:
     """Base class for all pulse shapes.
@@ -105,7 +151,7 @@ class Pulse:
         assert duration > 0., 'Pulse duration must be positive'
         self.duration = duration
 
-    def __call__(self, t, args):
+    def __call__(self, t, args=None):
         raise NotImplementedError('Pulse is an ABC')
 
     def __mul__(self, c):
@@ -146,7 +192,7 @@ class Pulse:
             else:
                 value = lambda envelope, phase: envelope.imag * np.cos(phase) - envelope.real * np.sin(phase)
 
-            def fun(t, args):
+            def fun(t, args=None):
                 envelope = drive_base * self.__call__(t - start_time, args)
                 phase = (frequency - frame_frequency) * t + phase_offset
                 return value(envelope, phase)
@@ -157,8 +203,8 @@ class Pulse:
             else:
                 frame_fn = np.sin
 
-            def fun(t, args):
-                double_envelope = 2. * drive_base * self.__call__(t - time, args)
+            def fun(t, args=None):
+                double_envelope = 2. * drive_base * self.__call__(t - start_time, args)
                 phase = frequency * t + phase_offset
                 prefactor = double_envelope.real * np.cos(phase) + double_envelope.imag * np.sin(phase)
                 return prefactor * frame_fn(frame_frequency * t)
@@ -208,7 +254,7 @@ class Gaussian(Pulse):
             self.amp = np.asarray(amp, dtype=np.complex128)
             self.offset = 0.
 
-    def __call__(self, t, args):
+    def __call__(self, t, args=None):
         x = (t - self.center) / self.sigma
         return np.asarray(self.amp * (np.exp(-np.square(x) * 0.5) - self.offset),
                           dtype=np.complex128)
@@ -253,7 +299,7 @@ class GaussianSquare(Pulse):
     def _right_tail(self, t, args):
         return self.gauss_right(t - self.width, args)
 
-    def __call__(self, t, args):
+    def __call__(self, t, args=None):
         # piecewise determines the output dtype from the first argument
         tlist = np.asarray(t, dtype=np.complex128)
         return np.piecewise(tlist,
@@ -298,7 +344,7 @@ class Drag(Gaussian):
 
         self.beta = beta
 
-    def __call__(self, t, args):
+    def __call__(self, t, args=None):
         gauss = super().__call__(t, args)
         dgauss = -(t - self.center) / np.square(self.sigma) * gauss
 
