@@ -19,7 +19,7 @@ from .common import make_heff_t
 def inspect_leastsq_minimization(
     filename: str,
     threshold: float = 0.01,
-    tscale: FrequencyScale = FrequencyScale.MHz,
+    tscale: FrequencyScale = FrequencyScale.auto,
     align_ylim: bool = True,
     limit_components: Optional[List[Tuple]] = None
 ) -> List[mpl.figure.Figure]:
@@ -53,6 +53,9 @@ def inspect_leastsq_minimization(
 
     num_paulis = num_sim_levels ** 2
     basis_size = num_paulis ** num_qudits - 1
+
+    if tscale is FrequencyScale.auto:
+        tscale = FrequencyScale.find_time_scale(tlist[-1])
 
     tlist *= tscale.frequency_value
     compos /= tscale.frequency_value
@@ -148,7 +151,7 @@ def inspect_leastsq_minimization(
 def inspect_fidelity_maximization(
     filename: str,
     threshold: float = 0.01,
-    tscale: FrequencyScale = FrequencyScale.MHz,
+    tscale: FrequencyScale = FrequencyScale.auto,
     align_ylim: bool = False,
     limit_components: Optional[List[Tuple]] = None,
     digest: bool = True
@@ -187,6 +190,9 @@ def inspect_fidelity_maximization(
             grad = None
 
     num_paulis = num_sim_levels ** 2
+
+    if tscale is FrequencyScale.auto:
+        tscale = FrequencyScale.find_time_scale(tlist[-1])
 
     tlist *= tscale.frequency_value
     heff_compos /= tscale.frequency_value
@@ -362,25 +368,31 @@ def plot_amplitude_scan(
     amplitudes: np.ndarray,
     components: Sequence,
     threshold: Optional[float] = None,
-    amp_scale: Union[FrequencyScale, None] = FrequencyScale.auto,
-    compo_scale: Union[FrequencyScale, None] = FrequencyScale.auto,
+    amp_scale: FrequencyScale = FrequencyScale.auto,
+    compo_scale: FrequencyScale = FrequencyScale.auto,
     max_poly_order: int = 4
 ) -> Tuple[mpl.figure.Figure, np.ndarray, FrequencyScale, FrequencyScale]:
     """Plot the result of the amplitude scan.
 
     See the last example in examples/validation/heff.ipynb for how to prepare the inputs to this function.
 
+    This function performs polynomial fits to the amplitude dependences of the Pauli components and returns
+    the best-fit parameters as well as adds the fit curves to the plots. Amplitude variable in the polynomials
+    are normalized to O(1) to avoid numerical errors. The third and fourth return values of this function
+    represent the amplitude and component scales used for the normalization.
+
     Args:
         amplitudes: Array of drive amplitudes (assumed real)
         components: Returned list of effective Hamiltonian components from find_heff.
         threshold: Only plot components whose maximum is above this threshold. Defaults to
             `0.01 * compo_scale.pulsatance_value`.
-        amp_scale: Scale of the drive amplitude. If set to None, the value is determined from the values in `amplitudes`.
-        compo_scale: Scale of the components. If set to None, the value is determined from the global maximum of `abs(components)`.
+        amp_scale: Scale of the drive amplitude.
+        compo_scale: Scale of the components.
         max_poly_order: Maximum polynomial order for fitting the amplitude dependencies of the components.
 
     Returns:
-        A Figure, fit results (polynomial coefficients) as an array, amplitude scale, and components scale.
+        Plot Figure, polynomial coefficients from the fits, and the amplitude and components scale used to
+        normalize the amplitude variable in the polynomials.
     """
     components = np.asarray(components)
 
@@ -389,13 +401,13 @@ def plot_amplitude_scan(
     num_paulis = comp_dim ** 2
 
     if amp_scale is FrequencyScale.auto:
-        amp_scale = FrequencyScale.find_scale(np.amax(np.abs(amplitudes)))
+        amp_scale = FrequencyScale.find_energy_scale(np.amax(np.abs(amplitudes)))
 
     amp_scale_omega = amp_scale.pulsatance_value
     amps_norm = amplitudes / amp_scale_omega
 
     if compo_scale is FrequencyScale.auto:
-        compo_scale = FrequencyScale.find_scale(np.amax(np.abs(components)))
+        compo_scale = FrequencyScale.find_energy_scale(np.amax(np.abs(components)))
 
     compo_scale_omega = compo_scale.pulsatance_value
     compos_norm = components / compo_scale_omega
@@ -456,17 +468,14 @@ def plot_amplitude_scan(
     for ax in axes.reshape(-1)[:num_plots]:
         ax.set_ylim(ymin * 1.2, ymax * 1.2)
         ax.grid(True)
-        ax.set_xlabel(f'Drive amplitude (${amp_scale.frequency_unit}$)')
-        ax.set_ylabel(fr'$\nu/{compo_scale.frequency_unit}$')
+        # Since amp and nu are normalized by (2*pi*frequency), displayed values are frequencies
+        ax.set_xlabel(f'Drive amplitude ({amp_scale.frequency_unit})')
+        ax.set_ylabel(fr'$\nu$ ({compo_scale.frequency_unit})')
         ax.legend()
 
     fig.tight_layout()
 
-    # Rescale the coefficients to original amplitude & components normalizations
-    coefficients *= compo_scale_omega
-    coefficients /= np.power(amp_scale_omega, np.arange(max_poly_order + 1))
-
-    return fig, coefficients
+    return fig, coefficients, amp_scale, compo_scale
 
 
 def _plot_amplitude_scan_on(ax, amps_norm, compos_norm, plot_mask, max_poly_order, coefficients, prefix=''):

@@ -1,6 +1,6 @@
 r"""
 ====================================================
-Hamiltonian generator (:mod:`qudit_sim.hamiltonian`)
+Hamiltonian builder (:mod:`qudit_sim.hamiltonian`)
 ====================================================
 
 .. currentmodule:: qudit_sim.hamiltonian
@@ -39,8 +39,8 @@ class QuditParams:
     anharmonicity: float
     drive_amplitude: float
 
-class HamiltonianGenerator:
-    r"""Generator for a Hamiltonian with static transverse couplings and external drive terms.
+class HamiltonianBuilder:
+    r"""Hamiltonian with static transverse couplings and external drive terms.
 
     Args:
         num_levels: Number of energy levels to consider.
@@ -232,10 +232,10 @@ class HamiltonianGenerator:
                 self.set_frame(qid, frequency=np.zeros(self._num_levels - 1))
 
         elif frame == 'dressed':
-            # Move to the lab frame first to generate a fully static H0+Hint
+            # Move to the lab frame first to build a fully static H0+Hint
             self.set_global_frame('lab')
 
-            hamiltonian = self.generate_hdiag() + self.generate_hint()[0]
+            hamiltonian = self.build_hdiag() + self.build_hint()[0]
             eigvals, unitary = np.linalg.eigh(hamiltonian.full())
             # hamiltonian == unitary @ np.diag(eigvals) @ unitary.T.conjugate()
 
@@ -295,7 +295,7 @@ class HamiltonianGenerator:
         for drives in self._drive.values():
             drives.clear()
 
-    def generate(
+    def build(
         self,
         rwa: bool = True,
         compile_hint: bool = True,
@@ -314,9 +314,9 @@ class HamiltonianGenerator:
         Returns:
             A list of Hamiltonian terms that can be passed to qutip.sesolve.
         """
-        hstatic = self.generate_hdiag()
-        hint = self.generate_hint(compile_hint=compile_hint, tlist=tlist, args=args)
-        hdrive = self.generate_hdrive(rwa=rwa, tlist=tlist, args=args)
+        hstatic = self.build_hdiag()
+        hint = self.build_hint(compile_hint=compile_hint, tlist=tlist, args=args)
+        hdrive = self.build_hdrive(rwa=rwa, tlist=tlist, args=args)
 
         if hint and isinstance(hint[0], qtp.Qobj):
             hstatic += hint.pop(0)
@@ -340,8 +340,8 @@ class HamiltonianGenerator:
         hfree += np.square(np.arange(self._num_levels)) * params.anharmonicity / 2.
         return hfree
 
-    def generate_hdiag(self) -> qtp.Qobj:
-        """Generate the diagonal term of the Hamiltonian.
+    def build_hdiag(self) -> qtp.Qobj:
+        """Build the diagonal term of the Hamiltonian.
 
         Returns:
             A Qobj representing Hdiag. The object may be empty if the qudit frame is used.
@@ -366,13 +366,13 @@ class HamiltonianGenerator:
 
         return hdiag
 
-    def generate_hint(
+    def build_hint(
         self,
         compile_hint: bool = True,
         tlist: Optional[np.ndarray] = None,
         args: Optional[Dict[str, Any]] = None
     ) -> List:
-        """Generate the interaction Hamiltonian.
+        """Build the interaction Hamiltonian.
 
         Args:
             compile_hint: If True, interaction Hamiltonian terms are given as compilable strings.
@@ -453,13 +453,13 @@ class HamiltonianGenerator:
 
         return hint
 
-    def generate_hdrive(
+    def build_hdrive(
         self,
         rwa: bool = True,
         tlist: Optional[np.ndarray] = None,
         args: Optional[Dict[str, Any]] = None
     ) -> List:
-        """Generate the drive Hamiltonian.
+        """Build the drive Hamiltonian.
 
         Args:
             rwa: If True, apply the rotating-wave approximation.
@@ -498,7 +498,7 @@ class HamiltonianGenerator:
         for ch_params, drives in self._drive.items():
             for drive in drives:
                 if isinstance(drive.amplitude, np.ndarray) and tlist is None:
-                    raise RuntimeError('Time points array is needed to generate a Hamiltonian with array-based drive.')
+                    raise RuntimeError('Time points array is needed to build a Hamiltonian with array-based drive.')
 
                 # Loop over the driven operators
                 for params, creation_op, frame_frequency in qops:
@@ -556,7 +556,7 @@ class HamiltonianGenerator:
         points_per_cycle: int,
         num_cycles: int
     ) -> np.ndarray:
-        """Generate a list of time points using the maximum frequency in the Hamiltonian.
+        """Build a list of time points using the maximum frequency in the Hamiltonian.
 
         When the maximum frequency is 0 (i.e. single-qubit simulation with resonant drive), return the time
         range from 0 to 2pi/sqrt(tr(Hstat . Hstat) / 2^nq).
@@ -569,7 +569,7 @@ class HamiltonianGenerator:
             Array of time points.
         """
         if self.max_frequency == 0.:
-            hamiltonian = self.generate()
+            hamiltonian = self.build()
             if not hamiltonian:
                 raise RuntimeError('Cannot determine the tlist')
 
@@ -584,8 +584,8 @@ class HamiltonianGenerator:
         scan_type: str,
         values: Sequence,
         **kwargs
-    ) -> List['HamiltonianGenerator']:
-        """Generate a list of copies of self varied over a single attribute.
+    ) -> List['HamiltonianBuilder']:
+        """Build a list of copies of self varied over a single attribute.
 
         The argument `scan_type` determines which attribute to make variations over. Implemented scan types are
         - `'amplitude'`: Drive amplitudes. Elements of `values` are passed to the `amplitude` parameter of `add_drive`.

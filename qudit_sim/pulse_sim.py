@@ -11,7 +11,7 @@ import collections
 import numpy as np
 import qutip as qtp
 
-from .hamiltonian import HamiltonianGenerator
+from .hamiltonian import HamiltonianBuilder
 from .util import PulseSimResult
 from .parallel import parallel_map
 
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 TList = Union[np.ndarray, Tuple[int, int]]
 
 def pulse_sim(
-    hgen: Union[HamiltonianGenerator, List[HamiltonianGenerator]],
+    hgen: Union[HamiltonianBuilder, List[HamiltonianBuilder]],
     psi0: Optional[qtp.Qobj] = None,
     tlist: Union[TList, List[TList]] = (10, 100),
     args: Optional[Any] = None,
@@ -34,7 +34,7 @@ def pulse_sim(
 ) -> Union[PulseSimResult, List[PulseSimResult]]:
     """Run a pulse simulation.
 
-    Generate the Hamiltonian terms from the HamiltonianGenerator, determine the time points for the simulation
+    Build the Hamiltonian terms from the HamiltonianBuilder, determine the time points for the simulation
     if necessary, and run ``qutip.sesolve``.
 
     .. rubric:: Implementation notes (why we return an original object instead of the QuTiP result)
@@ -50,12 +50,12 @@ def pulse_sim(
     So, the solution was to just return a "sanitized" object, consisting of plain ndarrays.
 
     Args:
-        hgen: Fully set up Hamiltonian generator or a list thereof.
+        hgen: A HamiltonianBuilder or a list thereof.
         psi0: Initial state Qobj. Defaults to the identity operator appropriate for the given Hamiltonian.
         tlist: Time points to use in the simulation or a pair ``(points_per_cycle, num_cycles)`` where in the latter
             case the cycle of the fastest oscillating term in the Hamiltonian will be used. When ``hgen`` is a list,
             this parameter can also be a list with the same length as ``hgen`` to specify different time points for each
-            HamiltonianGenerator.
+            HamiltonianBuilder.
         args: Second parameter passed to drive amplitude functions (if callable).
         rwa: Whether to use the rotating-wave approximation.
         keep_callable: Keep callable time-dependent Hamiltonian coefficients. Otherwise all callable coefficients
@@ -118,7 +118,7 @@ def pulse_sim(
 
 
 def _run_single(
-    hgen: HamiltonianGenerator,
+    hgen: HamiltonianBuilder,
     psi0: Union[qtp.Qobj, None],
     tlist: Union[np.ndarray, Tuple[int, int]],
     rwa: bool,
@@ -138,25 +138,25 @@ def _run_single(
     ## Define the time points if necessary
 
     if isinstance(tlist, tuple):
-        # Need to generate Hint and Hdrive once to get the max frequencies
-        hgen.generate_hint()
-        hgen.generate_hdrive(rwa=rwa)
+        # Need to build Hint and Hdrive once to get the max frequencies
+        hgen.build_hint()
+        hgen.build_hdrive(rwa=rwa)
         tlist = hgen.make_tlist(*tlist)
 
     logger.info('Using %d time points from %.3e to %.3e', tlist.shape[0], tlist[0], tlist[-1])
 
-    ## Generate the Hamiltonian
+    ## Build the Hamiltonian
 
     if keep_callable:
         tlist_arg = dict()
     else:
         tlist_arg = {'tlist': tlist, 'args': kwargs.get('args')}
 
-    hamiltonian = hgen.generate(rwa=rwa, **tlist_arg)
+    hamiltonian = hgen.build(rwa=rwa, **tlist_arg)
 
     ## Run sesolve in a temporary directory
 
-    logger.info('Hamiltonian with %d terms generated. Starting simulation..', len(hamiltonian))
+    logger.info('Hamiltonian with %d terms built. Starting simulation..', len(hamiltonian))
 
     start = time.time()
 

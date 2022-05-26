@@ -3,7 +3,7 @@ import importlib.metadata
 
 __version__ = importlib.metadata.version('qudit-sim')
 
-from .hamiltonian import HamiltonianGenerator
+from .hamiltonian import HamiltonianBuilder
 from .pulse_sim import pulse_sim
 from .find_heff import find_heff
 from .util import (FrequencyScale, PulseSimResult,
