@@ -70,14 +70,12 @@ class FrequencyScale(enum.Enum):
 
     @classmethod
     def find_energy_scale(cls, val):
-        for scale in reversed(cls):
+        for scale in cls:
             if scale is cls.auto:
-                continue
+                raise RuntimeError(f'Could not find a proper energy scale for value {val}')
 
-            if val > scale.pulsatance_value:
+            if 0.1 * val < scale.pulsatance_value:
                 return scale
-
-        raise RuntimeError(f'Could not find a proper energy scale for value {val}')
 
     @classmethod
     def find_time_scale(cls, val):
@@ -85,7 +83,7 @@ class FrequencyScale(enum.Enum):
             if scale is cls.auto:
                 continue
 
-            if 0.1 * val < scale.time_value:
+            if val > scale.time_value:
                 return scale
 
         raise RuntimeError(f'Could not find a proper time scale for value {val}')
