@@ -39,6 +39,9 @@ class QuditParams:
     anharmonicity: float
     drive_amplitude: float
 
+class MaxFrequencyNotSet(Exception):
+    pass
+
 class HamiltonianBuilder:
     r"""Hamiltonian with static transverse couplings and external drive terms.
 
@@ -107,6 +110,9 @@ class HamiltonianBuilder:
     @property
     def max_frequency(self) -> float:
         """Maximum frequency appearing in this Hamiltonian."""
+        if self._max_frequency_int is None or self._max_frequency_drive is None:
+            raise MaxFrequencyNotSet('Call build_hint and build_hdrive first')
+
         return max(self._max_frequency_int, self._max_frequency_drive)
 
     def qudit_params(self, qudit_id: Hashable) -> QuditParams:
@@ -294,6 +300,8 @@ class HamiltonianBuilder:
         """Remove all drives."""
         for drives in self._drive.values():
             drives.clear()
+
+        self._max_frequency_drive = None
 
     def build(
         self,
@@ -554,30 +562,64 @@ class HamiltonianBuilder:
     def make_tlist(
         self,
         points_per_cycle: int,
-        num_cycles: int
+        num_cycles: Optional[int] = None,
+        duration: Optional[float] = None,
+        num_points: Optional[int] = None,
+        rwa: bool = True
     ) -> np.ndarray:
-        """Build a list of time points using the maximum frequency in the Hamiltonian.
+        r"""Build a list of time points using the maximum frequency in the Hamiltonian.
+
+        If the maximum frequency is not determined yet, ``self.build(rwa)`` is called first to compute one.
 
         When the maximum frequency is 0 (i.e. single-qubit simulation with resonant drive), return the time
-        range from 0 to 2pi/sqrt(tr(Hstat . Hstat) / 2^nq).
+        range from 0 to :math:`2 \pi / \sqrt{\mathrm{tr}(H_{\mathrm{stat}} H_{\mathrm{stat}}) / 2^{n}}.
+
+        Use one of ``num_cycles``, ``duration``, or `num_points` to specify the total number of time points.
 
         Args:
             points_per_cycle: Number of points per cycle at the highest frequency.
             num_cycles: Number of overall cycles.
+            duration: Maximum value of the tlist.
+            num_points: Total number of time points.
+            rwa: Whether to use the rotating wave approximation to find the maximum frequency.
 
         Returns:
             Array of time points.
         """
-        if self.max_frequency == 0.:
-            hamiltonian = self.build()
+        if len([p for p in [num_cycles, duration, num_points] if p is not None]) != 1:
+            raise RuntimeError('One and only one of num_cycles, duration, or num_points must be set')
+
+        try:
+            frequency = self.max_frequency
+
+        except MaxFrequencyNotSet:
+            self.build_hint()
+            self.build_hdrive(rwa=rwa)
+            frequency = self.max_frequency
+
+        if frequency == 0.:
+            hamiltonian = self.build(rwa=rwa)
             if not hamiltonian:
                 raise RuntimeError('Cannot determine the tlist')
 
             hstat = hamiltonian[0]
             amp2 = np.trace(hstat.full() @ hstat.full()).real / (2 ** self.num_qudits)
-            return np.linspace(0., 2. * np.pi / np.sqrt(amp2) * num_cycles, points_per_cycle * num_cycles)
-        else:
-            return np.linspace(0., 2. * np.pi / self.max_frequency * num_cycles, points_per_cycle * num_cycles)
+            frequency = np.sqrt(amp2)
+
+        cycle = 2. * np.pi / frequency
+
+        if num_cycles is not None:
+            duration = cycle * num_cycles
+            num_points = points_per_cycle * num_cycles
+
+        elif duration is not None:
+            num_points = int(points_per_cycle * duration / cycle)
+
+        elif num_points is not None:
+            duration = cycle * num_points / points_per_cycle
+
+        return np.linspace(0., duration, num_points)
+
 
     def make_scan(
         self,
