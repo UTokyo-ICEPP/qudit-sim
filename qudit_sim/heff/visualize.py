@@ -182,6 +182,7 @@ def inspect_fidelity_maximization(
         else:
             heff_compos = source['heff_compos'][()]
         final_fidelity = source['final_fidelity'][()]
+        adjustments = source['residual_adjustments'][()]
         try:
             loss = source['loss'][()]
             grad = source['grad'][()]
@@ -196,6 +197,7 @@ def inspect_fidelity_maximization(
 
     tlist *= tscale.frequency_value
     heff_compos /= tscale.frequency_value
+    adjustments /= tscale.frequency_value
 
     ilogus = -matrix_angle(time_evolution)
     ilogu_compos = paulis.components(ilogus, (num_sim_levels,) * num_qudits).real
@@ -235,16 +237,35 @@ def inspect_fidelity_maximization(
     _plot_ilogu_compos(axes, ilogu_compos, num_qudits, num_paulis, indices_ilogu, tlist, tscale,
                        comp_dim, align_ylim=align_ylim)
 
-    compo_line = axes[0].get_lines()[0]
+    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
     ## Add lines with slope=compo for terms above threshold
     for iax, basis_index_flat in enumerate(indices_ilogu):
         ax = axes[iax]
         basis_index = np.unravel_index(basis_index_flat, (num_paulis,) * num_qudits)
-        fit_line, = ax.plot(tlist, heff_compos[basis_index] * tlist)
+        ax.plot(tlist, heff_compos[basis_index] * tlist, color=colors[1])
 
-    fig.legend((compo_line, fit_line),
-               ('ilogU(t) component', '$H_{eff}t$ component'), 'upper right')
+        cumul_adj = 0.
+        for iadj in range(adjustments.shape[0] - 1, -1, -1):
+            adj = adjustments[(iadj,) + basis_index]
+            if adj != 0.:
+                cumul_adj += adj
+                ax.plot(tlist, (heff_compos[basis_index] - cumul_adj) * tlist,
+                        color=colors[(adjustments.shape[0] - iadj + 1) % len(colors)])
+
+    handles = []
+    labels = []
+    for icolor in range(2 + adjustments.shape[0]):
+        line = mpl.lines.Line2D([0.], [0.], color=colors[icolor % len(colors)])
+        handles.append(line)
+        if icolor == 0:
+            labels.append('ilogU(t) component')
+        elif icolor == 1:
+            labels.append('$H_{eff}t$ component')
+        else:
+            labels.append(f'pre-adjust {adjustments.shape[0] + 2 - icolor}')
+
+    fig.legend(handles, labels, 'upper right')
 
     ## Second figure: subtracted unitaries
     fig, axes = _make_figure(len(indices_ilogtarget))

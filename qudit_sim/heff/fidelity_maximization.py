@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 #import jax.scipy.optimize as jsciopt
 import scipy.optimize as sciopt
+import scipy.fft as scifft
 import optax
 import h5py
 
@@ -113,6 +114,7 @@ def fidelity_maximization(
     tlist_norm = jax.device_put(tlist[1:] / tlist[-1], device=jax_device)
 
     ## Loss minimization (fidelity maximization)
+    # Base loss function
     @partial(jax.jit, device=jax_device)
     def _loss_fn(time_evolution, heff_compos_norm, basis_list, tlist_norm):
         fidelity = heff_fidelity(time_evolution, heff_compos_norm, basis_list, tlist_norm, npmod=jnp)
@@ -143,6 +145,7 @@ def fidelity_maximization(
         copt = minimizer.values
 
     else:
+        # With optax we have access to intermediate results, so we save them
         if save_result_to:
             compo_values = np.zeros((max_updates, initial.shape[0]), dtype='f8')
             loss_values = np.zeros(max_updates, dtype='f8')
@@ -190,6 +193,11 @@ def fidelity_maximization(
     if not np.all(np.isfinite(copt)):
         raise ValueError('Optimized components not finite')
 
+    ## Residual adjustment (fidelity-maximizing copt is not necessarily the best set of parameters)
+    if save_result_to:
+        adjustments = np.zeros((residual_adjust,) + copt.shape)
+
+    # Adjustment is done iteratively
     for iadj in range(residual_adjust):
         logger.info(f'Adjusting the Pauli components obtained from a linear fit to the residuals (iteration {iadj})')
 
@@ -200,45 +208,63 @@ def fidelity_maximization(
         ilogtarget_compos = paulis.components(ilogtargets, dim=dim).real
         ilogtarget_compos = ilogtarget_compos.reshape(tlist_norm.shape[0], -1)[:, 1:]
 
-        # jax.scipy.optimize.minimize seems less tolerant than normal scipy equivalent
-        # -> Observed cases where fits that should converge didn't, so giving up on parallelization
-        #
-        # def fun(params, ydata):
-        #     return jnp.sum(jnp.square(tlist_norm * params[0] - ydata + params[1]))
+        line = lambda x, slope, intercept: slope * x + intercept
+        line_plus_ac = lambda x, slope, intercept, amp, freq, phase: line(x, slope, intercept) + amp * np.sin(freq * x + phase)
 
-        # @partial(jax.vmap, in_axes=(1, 0))
-        # def fit_compos(ydata, c0):
-        #     res = jsciopt.minimize(fun, c0, args=(ydata,), method='BFGS')
-        #     return res.x[0], res.success
-
-        # ## Do a linear fit to each component
-        # dopt, success = fit_compos(ilogtarget_compos, jax.device_put(np.zeros(copt.shape + (2,)), device=jax_device))
-
-        # failed = np.logical_not(success)
-        # if np.any(failed):
-        #     failed_indices = np.nonzero(failed)[0]
-        #     # compos list has the first element (identity) removed -> add 1 to the indices before unraveling
-        #     failed_basis_indices = np.unravel_index(failed_indices + 1, basis.shape[:-2])
-        #     # convert to a list of tuples
-        #     failed_basis_indices = list(zip(*failed_basis_indices))
-        #     residual_values_str = ', '.join(f'{idx_tuple}: {np.max(np.abs(ilogtarget_compos[:, idx]))}'
-        #                                    for idx_tuple, idx in zip(failed_basis_indices, failed_indices))
-        #     logger.warning('Residual adjustment failed for components %s', residual_values_str)
-
-        # copt += dopt
-
-        line = lambda t, slope, intercept: t * slope + intercept
+        xdata = tlist_norm
 
         for idx in np.arange(copt.shape[0]):
-            popt, _ = sciopt.curve_fit(line, tlist_norm, ilogtarget_compos[:, idx], p0=np.zeros(2))
-            copt[idx] += popt[0]
+            ydata = ilogtarget_compos[:, idx]
+
+            ## Try the AC + line curve first
+            # Find a rough estimate for the AC component
+            fourier = np.abs(scifft.fft(ydata))
+            dfourier = np.diff(fourier)
+
+            # First peak in the frequency spectrum
+            freq_idx = np.nonzero((dfourier[:-1] > 0.) & (dfourier[1:] < 0.))[0] + 1
+            if freq_idx.shape[0] == 0:
+                freq_idx = [0]
+
+            freq_est = freq_idx[0] / xdata[-1] * np.pi * 2.
+
+            amp_est = (np.amax(ydata) - np.amin(ydata)) * 0.5
+
+            p0 = [0., 0., amp_est, freq_est, 0.]
+
+            popt, _ = sciopt.curve_fit(line_plus_ac, xdata, ydata, p0=p0)
+
+            mean_abs_diff = np.mean(np.abs(ydata - line_plus_ac(xdata, *popt)))
+            if mean_abs_diff < 1.e-2 * amp_est:
+                # Mean absolute difference is less than a percent of the amplitude estimate
+                # -> consider fit as OK
+                copt[idx] += popt[0]
+                if save_result_to:
+                    adjustments[iadj, idx] = popt[0]
+
+                continue
+
+            ## Fallback to a simple line fit
+            p0 = [0., 0.]
+
+            popt, cov = sciopt.curve_fit(line, xdata, ydata, p0=p0)
+
+            if np.all(np.isfinite(cov)):
+                copt[idx] += popt[0]
+                if save_result_to:
+                    adjustments[iadj, idx] = popt[0]
 
     heff_compos = np.concatenate(([0.], copt / tlist[-1])).reshape(basis.shape[:-2])
 
     if save_result_to:
         final_fidelity = np.concatenate(([1.], heff_fidelity(time_evolution, heff_compos, basis, tlist[1:])))
+        residual_adjustments = np.zeros((residual_adjust,) + basis.shape[:-2])
+        if residual_adjust > 0:
+            residual_adjustments.reshape(residual_adjust, -1)[:, 1:] = adjustments / tlist[-1]
+
         with h5py.File(f'{save_result_to}_ext.h5', 'w') as out:
             out.create_dataset('final_fidelity', data=final_fidelity)
+            out.create_dataset('residual_adjustments', data=residual_adjustments)
             if optimizer != 'minuit':
                 out.create_dataset('compos', data=compo_values[:num_updates])
                 out.create_dataset('loss', data=loss_values[:num_updates])
