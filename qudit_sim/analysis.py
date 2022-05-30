@@ -1,6 +1,7 @@
 """Hamiltonian and gate analysis routines."""
 
 from typing import Union, Tuple, List, Optional, Dict, Hashable
+import logging
 import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -11,6 +12,7 @@ from rqutils.qprint import QPrintBraKet, QPrintPauli, LaTeXRepr
 import rqutils.paulis as paulis
 
 from .util import HamiltonianCoefficient, FrequencyScale, PulseSimResult
+from .hamiltonian import HamiltonianBuilder
 from .pulse_sim import pulse_sim
 from .find_heff import find_heff
 
@@ -41,6 +43,7 @@ def print_hamiltonian(
 
 def print_components(
     components: np.ndarray,
+    uncertainties: Optional[np.ndarray] = None,
     symbol: Optional[str] = None,
     precision: int = 3,
     threshold: float = 1.e-3,
@@ -49,7 +52,8 @@ def print_components(
     r"""Compose a LaTeX expression of the effective Hamiltonian from the Pauli components.
 
     Args:
-        components: Array of Pauli components returned by find_heff
+        components: Array of Pauli components returned by find_heff.
+        uncertainties: Array of component uncertainties.
         symbol: Symbol to use instead of :math:`\lambda` for the matrices.
         precision: Number of digits below the decimal point to show.
         threshold: Ignore terms with absolute components below this value relative to the given scale
@@ -91,6 +95,7 @@ def print_components(
 
 def plot_components(
     components: np.ndarray,
+    uncertainties: Optional[np.ndarray] = None,
     threshold: float = 1.e-2,
     scale: Union[FrequencyScale, str, None] = FrequencyScale.auto,
     ignore_identity: bool = True
@@ -98,7 +103,8 @@ def plot_components(
     """Plot the Hamiltonian components as a bar graph in the decreasing order in the absolute value.
 
     Args:
-        components: Array of Pauli components returned by find_heff
+        components: Array of Pauli components returned by find_heff.
+        uncertainties: Array of component uncertainties.
         threshold: Ignore terms with absolute components below this value relative to the given scale
             (if >0) or to the maximum absolute component (if <0).
         scale: Normalize the components with the frequency scale. If None, components are taken
@@ -110,8 +116,6 @@ def plot_components(
     Returns:
         A Figure object containing the bar graph.
     """
-    components = components.copy()
-
     max_abs = np.amax(np.abs(components))
 
     if scale is FrequencyScale.auto:
@@ -129,10 +133,13 @@ def plot_components(
         ylabel = r'$\nu\,(\mathrm{' + scale.frequency_unit + '})$'
 
     # Dividing by omega -> now everything is in terms of frequency (not angular)
-    components /= scale_omega
+    # Note: Don't use /=!
+    components = components / scale_omega
+    uncertainties = uncertainties / scale_omega
 
     if ignore_identity:
         components.reshape(-1)[0] = 0.
+        uncertainties.reshape(-1)[0] = 0.
 
     # Negative threshold specified -> relative to max
     if threshold < 0.:
@@ -143,7 +150,7 @@ def plot_components(
     indices = np.unravel_index(flat_indices[:nterms], components.shape)
 
     fig, ax = plt.subplots(1, 1)
-    ax.bar(np.arange(nterms), components[indices])
+    ax.bar(np.arange(nterms), components[indices], yerr=(uncertainties[indices] / 2.))
 
     ax.axhline(0., color='black', linewidth=0.5)
 
@@ -200,39 +207,46 @@ def heff_analysis(
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Run a full effective Hamiltonian analysis.
-    
+    r"""Run a full effective Hamiltonian analysis.
+
+    Given a HamiltonianBuilder object with the full specification offrequencies and couplings but
+    no drive information, add constant drive terms, run the effective Hamiltonian extraction from
+    simulations with several different durations, and compute the average and uncertainties of the
+    :math:`H_{\mathrm{eff}}` components.
+
+    The
+
     Args:
         hgen: Hamiltonian with no drive term.
         drive_def: A list of drive term specifications (qudit id, frequency, amplitude).
-        
+
     Returns:
         An array of effective Hamiltonian components and another array representing their
         uncertainties.
     """
     max_frequency = 0.
-    
+
     for qudit_id, frequency, amplitude in drive_def:
         hgen.add_drive(qudit_id, frequency=frequency, amplitude=amplitude)
         max_frequency = max(max_frequency, frequency)
-        
+
     cycle = 2. * np.pi / max_frequency
     durations = np.linspace(num_drive_cycles[0] * cycle, num_drive_cycles[1] * cycle, num_drive_cycles[2])
-    
+
     tlist = list({'points_per_cycle': 8, 'duration': duration} for duration in durations)
-    
+
     sim_results = pulse_sim(hgen, tlist, rwa=False, save_result_to=save_result_to, log_level=log_level)
 
     components_list = find_heff(sim_results, comp_dim=comp_dim, method=method, method_params=method_params,
                                 save_result_to=save_result_to, log_level=log_level)
-                                
+
     components_list = np.array(components_list)
 
     # duration-weighted average of components (longer-time simulation result is preferred)
     components = np.sum(components_list.reshape(durations.shape[0], -1) * durations[:, None], axis=0)
     components /= np.sum(durations)
     components = components.reshape(components_list.shape[1:])
-    
+
     uncertainties = np.amax(components_list, axis=0) - np.amin(components_list, axis=0)
 
     return components, uncertainties

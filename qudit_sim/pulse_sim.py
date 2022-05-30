@@ -37,7 +37,7 @@ def pulse_sim(
 
     Build the Hamiltonian terms from the HamiltonianBuilder, determine the time points for the simulation
     if necessary, and run ``qutip.sesolve``.
-    
+
     All parameters except ``options``, ``progress_bar``, ``save_result_to``, and ``log_level`` can be given as lists to
     trigger a parallel (multiprocess) execution of ``sesolve``. If more than one parameter is a list, their lengths must
     be identical, and all parameters are "zipped" together to form the argument lists of individual single simulation jobs.
@@ -74,24 +74,24 @@ def pulse_sim(
     """
     original_log_level = logger.level
     logger.setLevel(log_level)
-    
+
     num_tasks = None
     zip_list = []
-    
+
     parallel_params = [hgen, tlist, psi0, args, e_ops, rwa, keep_callable]
-    
+
     for param in parallel_params:
         if isinstance(param, list):
             if num_tasks is None:
                 num_tasks = len(param)
             elif num_tasks != len(param):
                 raise ValueError('Lists with inconsistent lengths passed as arguments')
-                
+
             zip_list.append(param)
-            
+
         else:
             zip_list.append(None)
-            
+
     if num_tasks is None:
         result = _run_single(hgen, tlist, psi0, args, e_ops, rwa, keep_callable, options=options,
                              progress_bar=progress_bar, save_result_to=save_result_to, log_level=log_level)
@@ -100,8 +100,8 @@ def pulse_sim(
         for iparam, param in enumerate(parallel_params):
             if zip_list[iparam] is None:
                 zip_list[iparam] = [param] * num_tasks
-                
-        args = list(zip(zip_list))
+
+        args = list(zip(*zip_list))
 
         common_kwargs = {'options': options, 'log_level': log_level}
 
@@ -116,11 +116,7 @@ def pulse_sim(
         kwarg_keys = ('logger_name', 'save_result_to')
         kwarg_values = list()
         for itask in range(num_tasks):
-            values = (f'{__name__}.{itask}', save_result_path(itask))
-            if isinstance(tlist, list):
-                values += (tlist[itask],)
-
-            kwarg_values.append(values)
+            kwarg_values.append((f'{__name__}.{itask}', save_result_path(itask)))
 
         result = parallel_map(_run_single, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
                               common_kwargs=common_kwargs, log_level=log_level)
@@ -141,7 +137,7 @@ def _run_single(
     options: Optional[qtp.solver.Options] = None,
     progress_bar: Optional[qtp.ui.progressbar.BaseProgressBar] = None,
     save_result_to: Optional[str] = None,
-    log_level: int = logging.WARNING
+    log_level: int = logging.WARNING,
     logger_name: str = __name__
 ):
     """Run one pulse simulation."""
@@ -168,14 +164,14 @@ def _run_single(
         tlist_arg = {'tlist': tlist, 'args': args}
 
     hamiltonian = hgen.build(rwa=rwa, **tlist_arg)
-    
+
     ## Define the initial state if necessary
 
     if psi0 is None:
         psi0 = qtp.tensor([qtp.qeye(hgen.num_levels)] * hgen.num_qudits)
-        
+
     ## Other arguments to sesolve
-    
+
     kwargs = {'args': args, 'e_ops': e_ops, 'options': options, 'progress_bar': progress_bar}
 
     ## Run sesolve in a temporary directory

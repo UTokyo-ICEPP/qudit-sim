@@ -125,7 +125,7 @@ def parallel_map(
             kwargs = list(dict(zip(kwarg_keys, values)) for values in kwarg_values)
 
         if arg_list is not None:
-            assert len(arg_list) == len(kwarg_values)
+            assert len(arg_list) == len(kwarg_values), f'Inconsistent argument lengths: {len(arg_list)} != {len(kwarg_values)}'
 
             arg_list = list((a, k) for (a, _), k in zip(arg_list, kwargs))
 
