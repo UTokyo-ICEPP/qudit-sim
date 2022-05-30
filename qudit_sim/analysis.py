@@ -1,6 +1,6 @@
 """Hamiltonian and gate analysis routines."""
 
-from typing import Union, Tuple, List, Optional
+from typing import Union, Tuple, List, Optional, Dict, Hashable
 import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -11,6 +11,8 @@ from rqutils.qprint import QPrintBraKet, QPrintPauli, LaTeXRepr
 import rqutils.paulis as paulis
 
 from .util import HamiltonianCoefficient, FrequencyScale, PulseSimResult
+from .pulse_sim import pulse_sim
+from .find_heff import find_heff
 
 def print_hamiltonian(
     hamiltonian: List[Union[qtp.Qobj, Tuple[qtp.Qobj, HamiltonianCoefficient]]],
@@ -186,3 +188,51 @@ def _single_gate_components(sim_result, comp_dim):
         components = paulis.truncate(components, (comp_dim,) * len(sim_result.dim))
 
     return components
+
+
+def heff_analysis(
+    hgen: HamiltonianBuilder,
+    drive_def: List[Tuple[Hashable, float, complex]],
+    comp_dim: int = 2,
+    method: str = 'fidelity',
+    method_params: Optional[Dict] = None,
+    num_drive_cycles: Tuple[int, int, int] = (500, 1000, 20),
+    save_result_to: Optional[str] = None,
+    log_level: int = logging.WARNING
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Run a full effective Hamiltonian analysis.
+    
+    Args:
+        hgen: Hamiltonian with no drive term.
+        drive_def: A list of drive term specifications (qudit id, frequency, amplitude).
+        
+    Returns:
+        An array of effective Hamiltonian components and another array representing their
+        uncertainties.
+    """
+    max_frequency = 0.
+    
+    for qudit_id, frequency, amplitude in drive_def:
+        hgen.add_drive(qudit_id, frequency=frequency, amplitude=amplitude)
+        max_frequency = max(max_frequency, frequency)
+        
+    cycle = 2. * np.pi / max_frequency
+    durations = np.linspace(num_drive_cycles[0] * cycle, num_drive_cycles[1] * cycle, num_drive_cycles[2])
+    
+    tlist = list({'points_per_cycle': 8, 'duration': duration} for duration in durations)
+    
+    sim_results = pulse_sim(hgen, tlist, rwa=False, save_result_to=save_result_to, log_level=log_level)
+
+    components_list = find_heff(sim_results, comp_dim=comp_dim, method=method, method_params=method_params,
+                                save_result_to=save_result_to, log_level=log_level)
+                                
+    components_list = np.array(components_list)
+
+    # duration-weighted average of components (longer-time simulation result is preferred)
+    components = np.sum(components_list.reshape(durations.shape[0], -1) * durations[:, None], axis=0)
+    components /= np.sum(durations)
+    components = components.reshape(components_list.shape[1:])
+    
+    uncertainties = np.amax(components_list, axis=0) - np.amin(components_list, axis=0)
+
+    return components, uncertainties

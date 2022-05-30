@@ -17,16 +17,17 @@ from .parallel import parallel_map
 
 logger = logging.getLogger(__name__)
 
-TList = Union[np.ndarray, Tuple[int, int]]
+TList = Union[np.ndarray, Tuple[int, int], Dict[str, Union[int, float]]]
+EOps = Sequence[qtp.Qobj]
 
 def pulse_sim(
     hgen: Union[HamiltonianBuilder, List[HamiltonianBuilder]],
-    psi0: Optional[qtp.Qobj] = None,
     tlist: Union[TList, List[TList]] = (10, 100),
+    psi0: Optional[Union[qtp.Qobj, List[qtp.Qobj]]] = None,
     args: Optional[Any] = None,
-    rwa: bool = True,
-    keep_callable: bool = False,
-    e_ops: Optional[Sequence[Any]] = None,
+    e_ops: Optional[Union[EOps, List[EOps]]] = None,
+    rwa: Union[bool, List[bool]] = True,
+    keep_callable: Union[bool, List[bool]] = False,
     options: Optional[qtp.solver.Options] = None,
     progress_bar: Optional[qtp.ui.progressbar.BaseProgressBar] = None,
     save_result_to: Optional[str] = None,
@@ -36,6 +37,10 @@ def pulse_sim(
 
     Build the Hamiltonian terms from the HamiltonianBuilder, determine the time points for the simulation
     if necessary, and run ``qutip.sesolve``.
+    
+    All parameters except ``options``, ``progress_bar``, ``save_result_to``, and ``log_level`` can be given as lists to
+    trigger a parallel (multiprocess) execution of ``sesolve``. If more than one parameter is a list, their lengths must
+    be identical, and all parameters are "zipped" together to form the argument lists of individual single simulation jobs.
 
     .. rubric:: Implementation notes (why we return an original object instead of the QuTiP result)
 
@@ -51,16 +56,14 @@ def pulse_sim(
 
     Args:
         hgen: A HamiltonianBuilder or a list thereof.
-        psi0: Initial state Qobj. Defaults to the identity operator appropriate for the given Hamiltonian.
         tlist: Time points to use in the simulation or a pair ``(points_per_cycle, num_cycles)`` where in the latter
-            case the cycle of the fastest oscillating term in the Hamiltonian will be used. When ``hgen`` is a list,
-            this parameter can also be a list with the same length as ``hgen`` to specify different time points for each
-            HamiltonianBuilder.
+            case the cycle of the fastest oscillating term in the Hamiltonian will be used.
+        psi0: Initial state Qobj. Defaults to the identity operator appropriate for the given Hamiltonian.
         args: Second parameter passed to drive amplitude functions (if callable).
+        e_ops: List of observables passed to the QuTiP solver.
         rwa: Whether to use the rotating-wave approximation.
         keep_callable: Keep callable time-dependent Hamiltonian coefficients. Otherwise all callable coefficients
             are converted to arrays before simulation execution for efficiency (no loss of accuracy observed so far).
-        e_ops: List of observables passed to the QuTiP solver.
         options: QuTiP solver options.
         progress_bar: QuTiP progress bar.
         save_result_to: File name (without the extension) to save the simulation result to.
@@ -71,17 +74,36 @@ def pulse_sim(
     """
     original_log_level = logger.level
     logger.setLevel(log_level)
+    
+    num_tasks = None
+    zip_list = []
+    
+    parallel_params = [hgen, tlist, psi0, args, e_ops, rwa, keep_callable]
+    
+    for param in parallel_params:
+        if isinstance(param, list):
+            if num_tasks is None:
+                num_tasks = len(param)
+            elif num_tasks != len(param):
+                raise ValueError('Lists with inconsistent lengths passed as arguments')
+                
+            zip_list.append(param)
+            
+        else:
+            zip_list.append(None)
+            
+    if num_tasks is None:
+        result = _run_single(hgen, tlist, psi0, args, e_ops, rwa, keep_callable, options=options,
+                             progress_bar=progress_bar, save_result_to=save_result_to, log_level=log_level)
 
-    ## kwargs passed directly to sesolve
+    else:
+        for iparam, param in enumerate(parallel_params):
+            if zip_list[iparam] is None:
+                zip_list[iparam] = [param] * num_tasks
+                
+        args = list(zip(zip_list))
 
-    kwargs = {'e_ops': e_ops, 'options': options, 'progress_bar': progress_bar}
-    if args is not None:
-        kwargs['args'] = args
-
-    if isinstance(hgen, list):
-        common_kwargs = {'psi0': psi0, 'rwa': rwa, 'keep_callable': keep_callable, 'kwargs': kwargs}
-
-        num_tasks = len(hgen)
+        common_kwargs = {'options': options, 'log_level': log_level}
 
         if save_result_to:
             if not (os.path.exists(save_result_to) and os.path.isdir(save_result_to)):
@@ -92,12 +114,6 @@ def pulse_sim(
             save_result_path = lambda itask: None
 
         kwarg_keys = ('logger_name', 'save_result_to')
-
-        if isinstance(tlist, list):
-            kwarg_keys += ('tlist',)
-        else:
-            common_kwargs['tlist'] = tlist
-
         kwarg_values = list()
         for itask in range(num_tasks):
             values = (f'{__name__}.{itask}', save_result_path(itask))
@@ -106,11 +122,8 @@ def pulse_sim(
 
             kwarg_values.append(values)
 
-        result = parallel_map(_run_single, args=hgen, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
+        result = parallel_map(_run_single, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
                               common_kwargs=common_kwargs, log_level=log_level)
-
-    else:
-        result = _run_single(hgen, psi0, tlist, rwa, keep_callable, kwargs, save_result_to)
 
     logger.setLevel(original_log_level)
 
@@ -119,29 +132,31 @@ def pulse_sim(
 
 def _run_single(
     hgen: HamiltonianBuilder,
+    tlist: TList,
     psi0: Union[qtp.Qobj, None],
-    tlist: Union[np.ndarray, Tuple[int, int]],
+    args: Any,
+    e_ops: EOps,
     rwa: bool,
     keep_callable: bool,
-    kwargs: dict,
-    save_result_to: Union[str, None],
+    options: Optional[qtp.solver.Options] = None,
+    progress_bar: Optional[qtp.ui.progressbar.BaseProgressBar] = None,
+    save_result_to: Optional[str] = None,
+    log_level: int = logging.WARNING
     logger_name: str = __name__
 ):
     """Run one pulse simulation."""
     logger = logging.getLogger(logger_name)
 
-    ## Define the initial state if necessary
-
-    if psi0 is None:
-        psi0 = qtp.tensor([qtp.qeye(hgen.num_levels)] * hgen.num_qudits)
-
     ## Define the time points if necessary
 
-    if isinstance(tlist, tuple):
+    if isinstance(tlist, tuple) or isinstance(tlist, dict):
         # Need to build Hint and Hdrive once to get the max frequencies
         hgen.build_hint()
         hgen.build_hdrive(rwa=rwa)
-        tlist = hgen.make_tlist(*tlist)
+        if isinstance(tlist, tuple):
+            tlist = hgen.make_tlist(points_per_cycle=tlist[0], num_cycles=tlist[1])
+        else:
+            tlist = hgen.make_tlist(**tlist)
 
     logger.info('Using %d time points from %.3e to %.3e', tlist.shape[0], tlist[0], tlist[-1])
 
@@ -150,9 +165,18 @@ def _run_single(
     if keep_callable:
         tlist_arg = dict()
     else:
-        tlist_arg = {'tlist': tlist, 'args': kwargs.get('args')}
+        tlist_arg = {'tlist': tlist, 'args': args}
 
     hamiltonian = hgen.build(rwa=rwa, **tlist_arg)
+    
+    ## Define the initial state if necessary
+
+    if psi0 is None:
+        psi0 = qtp.tensor([qtp.qeye(hgen.num_levels)] * hgen.num_qudits)
+        
+    ## Other arguments to sesolve
+    
+    kwargs = {'args': args, 'e_ops': e_ops, 'options': options, 'progress_bar': progress_bar}
 
     ## Run sesolve in a temporary directory
 
