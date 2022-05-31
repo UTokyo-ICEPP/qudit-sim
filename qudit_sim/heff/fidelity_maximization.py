@@ -107,7 +107,8 @@ def fidelity_maximization(
         elif init == 'random':
             init = (np.random.random(basis_list.shape) * 2. - 1.) / tlist[-1]
 
-    initial = jax.device_put(init * tlist[-1], device=jax_device)
+    initial = np.stack((init * tlist[-1], np.zeros_like(init)), axis=0)
+    initial = jax.device_put(initial, device=jax_device)
 
     ## Working arrays (index 0 is trivial and in fact causes the grad to diverge)
     time_evolution = jax.device_put(time_evolution[1:], device=jax_device)
@@ -116,8 +117,8 @@ def fidelity_maximization(
     ## Loss minimization (fidelity maximization)
     # Base loss function
     @partial(jax.jit, device=jax_device)
-    def _loss_fn(time_evolution, heff_compos_norm, basis_list, tlist_norm):
-        fidelity = heff_fidelity(time_evolution, heff_compos_norm, basis_list, tlist_norm, npmod=jnp)
+    def _loss_fn(time_evolution, params, basis_list, tlist_norm):
+        fidelity = heff_fidelity(time_evolution, params[0], basis_list, tlist_norm, params[1], npmod=jnp)
         loss = 1. - 1. / (tlist_norm.shape[0] + 1) - jnp.mean(fidelity)
         if l1_reg != 0.:
             loss += l1_reg * jnp.sum(jnp.abs(heff_compos_norm))
@@ -127,8 +128,10 @@ def fidelity_maximization(
     if optimizer == 'minuit':
         from iminuit import Minuit
 
-        loss_fn = jax.jit(lambda c: _loss_fn(time_evolution, c, basis_list, tlist_norm),
-                          device=jax_device)
+        @partial(jax.jit, device=jax_device)
+        def loss_fn(params):
+            return _loss_fn(time_evolution, params, basis_list, tlist_norm)
+
         grad = jax.jit(jax.grad(loss_fn), device=jax_device)
 
         minimizer = Minuit(loss_fn, initial, grad=grad)
@@ -142,36 +145,40 @@ def fidelity_maximization(
 
         num_updates = minimizer.nfcn
 
-        copt = minimizer.values
+        copt = minimizer.values[0]
 
     else:
         # With optax we have access to intermediate results, so we save them
         if save_result_to:
-            compo_values = np.zeros((max_updates, initial.shape[0]), dtype='f8')
+            compo_values = np.zeros((max_updates,) + initial.shape, dtype='f8')
             loss_values = np.zeros(max_updates, dtype='f8')
-            grad_values = np.zeros((max_updates, initial.shape[0]), dtype='f8')
+            grad_values = np.zeros((max_updates,) + initial.shape, dtype='f8')
 
-        loss_fn = jax.jit(lambda params: _loss_fn(time_evolution, params['c'], basis_list, tlist_norm),
-                          device=jax_device)
+        @partial(jax.jit, device=jax_device)
+        def loss_fn(opt_params):
+            return _loss_fn(time_evolution, opt_params['c'], basis_list, tlist_norm)
+
         loss_and_grad = jax.jit(jax.value_and_grad(loss_fn), device=jax_device)
 
         @jax.jit
-        def step(params, opt_state):
-            loss, gradient = loss_and_grad(params)
+        def step(opt_params, opt_state):
+            loss, gradient = loss_and_grad(opt_params)
             updates, opt_state = optimizer.update(gradient, opt_state)
-            params = optax.apply_updates(params, updates)
-            return params, opt_state, loss, gradient
+            new_params = optax.apply_updates(opt_params, updates)
+            return new_params, opt_state, loss, gradient
 
         logger.info('Starting maximization loop..')
+        logger.info(initial.shape)
 
-        params = {'c': initial}
-        opt_state = optimizer.init(params)
+        opt_params = {'c': initial}
+        opt_state = optimizer.init(opt_params)
 
         for iup in range(max_updates):
-            new_params, opt_state, loss, gradient = step(params, opt_state)
+            new_params, opt_state, loss, gradient = step(opt_params, opt_state)
 
             if save_result_to:
-                compo_values[iup] = params['c'] / tlist[-1]
+                compo_values[iup] = opt_params['c']
+                compo_values[iup][0] /= tlist[-1]
                 loss_values[iup] = loss
                 grad_values[iup] = gradient['c']
 
@@ -182,13 +189,13 @@ def fidelity_maximization(
             if max_grad < convergence:
                 break
 
-            params = new_params
+            opt_params = new_params
 
         num_updates = iup + 1
 
         logger.info('Done after %d steps.', iup)
 
-        copt = np.array(params['c'])
+        copt = np.array(opt_params['c'][0])
 
     if not np.all(np.isfinite(copt)):
         raise ValueError('Optimized components not finite')
