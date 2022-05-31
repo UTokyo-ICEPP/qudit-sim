@@ -194,8 +194,35 @@ def fidelity_maximization(
         raise ValueError('Optimized components not finite')
 
     ## Residual adjustment (fidelity-maximizing copt is not necessarily the best set of parameters)
+    ## We would like to extract the linear trend in the components of ilog[U_eff^dag U_H].
+    ## Because a line fit can get confused by oscillations in the components, we work in the frequency domain.
+    ## Objective:
+    ##   For each component C, find the slope that minimizes sum_k |FFT(C)_k - FFT(slope * t + intercept)_k|^2
+    ## From the normalization of tlist_norm:
+    ## t = n / (N-1)
+    ## FFT(slope * t + intercept)_k = N * delta_k0 * (intercept + 1/2 * slope)
+    ##                              + 1/2 N/(N-1) * (1 - delta_k0) * slope * [-1 + i * cos(k pi / N) / sin(k pi / N)]
+    ## The AC components of FFT(C) is concentrated in the first ~tenth of the spectrum (i.e. up to the drive frequency)
+    ## so we adjust the objective to minimizing sum_{k=1/5N}^{k=4/5N}
+    ## Furthermore, since C and line are both real, their transforms are symmetric: FFT_k = FFT*_{N-k}
+    ## -> minimize sum_{k=1/5N}^{1/2N}
+    ## Because of the lower k cutoff, the intercept is gone from the loss function:
+    ##   L = sum_k |FFT(C)_k - 1/2 N/(N-1) * slope * [-1 + i cot(k pi / N)]|^2
+    ##     = sum_k [(ReF_k + 1/2 N/(N-1) * slope)^2 + (ImF_k - 1/2 N/(N-1) * slope * cot(k pi / N))^2]
+    ## At this point, there is no more a need for a numerical optimization:
+    ##   dL/dslope = N/(N-1) sum_k [(ReF_k + 1/2 N/(N-1) * slope) - cot(k pi / N) (ImF_k - 1/2 N/(N-1) * slope * cot(k pi / N))]
+    ##   dL/dslope = 0 <=> slope = -[sum_k (ReF_k - cot ImF_k)] / [1/2 N/(N-1) sum_k (1 + cot^2)]
+    ## If we power-suppress both Fourier transforms at each k to further suppress local peaks
+    ##   (slope)^(1/n) = -[sum_k (ReF_k^(1/n) - cot^(1/n) ImF_K^(1/n))] / [(1/2 N/(N-1))^(1/n) sum_k (1 + cot^(2/n))]
     if save_result_to:
         adjustments = np.zeros((residual_adjust,) + copt.shape)
+
+    if residual_adjust > 0:
+        # Get the discrete Fourier transform of a line with:
+        # - The first and last 20% of samples removed to cut out the AC components
+        # - Absolute values taken to the power of 1/4 to suppress the AC peaks
+        nsamp = tlist_norm.shape[0]
+        line_dft = _line_dft(nsamp, nsamp // 5, nsamp - nsamp // 5, 0.25)
 
     # Adjustment is done iteratively
     for iadj in range(residual_adjust):
@@ -208,51 +235,61 @@ def fidelity_maximization(
         ilogtarget_compos = paulis.components(ilogtargets, dim=dim).real
         ilogtarget_compos = ilogtarget_compos.reshape(tlist_norm.shape[0], -1)[:, 1:]
 
-        line = lambda x, slope, intercept: slope * x + intercept
-        line_plus_ac = lambda x, slope, intercept, amp, freq, phase: line(x, slope, intercept) + amp * np.sin(freq * x + phase)
+        # Prepend the T=0 components
+        compos = np.concatenate((np.zeros(ilogtarget_compos.shape[1]), ilogtarget_compos), axis=0)
 
-        xdata = tlist_norm
+        # scipy FFT handles multiple arrays "in parallel" (likely serial internally)
+        ydata = scifft.fft(compos.T)
+
+        # Find the
 
         for idx in np.arange(copt.shape[0]):
-            ydata = ilogtarget_compos[:, idx]
+            loss_fn = lambda params: np.sum(np.square(params[0] * _line_dft - fydata))
+            jac = lambda params: np.sum(2. * _line_dft * (params[0] * _line_dft - fydata)).reshape(1)
+            res = sciopt.minimize(loss_fn, [0.], jac=jac)
 
-            ## Try the AC + line curve first
-            # Find a rough estimate for the AC component
-            fourier = np.abs(scifft.fft(ydata))
-            dfourier = np.diff(fourier)
-
-            # First peak in the frequency spectrum
-            freq_idx = np.nonzero((dfourier[:-1] > 0.) & (dfourier[1:] < 0.))[0] + 1
-            if freq_idx.shape[0] == 0:
-                freq_idx = [0]
-
-            freq_est = freq_idx[0] / xdata[-1] * np.pi * 2.
-
-            amp_est = (np.amax(ydata) - np.amin(ydata)) * 0.5
-
-            p0 = [0., 0., amp_est, freq_est, 0.]
-
-            popt, _ = sciopt.curve_fit(line_plus_ac, xdata, ydata, p0=p0)
-
-            mean_abs_diff = np.mean(np.abs(ydata - line_plus_ac(xdata, *popt)))
-            if mean_abs_diff < 1.e-2 * amp_est:
-                # Mean absolute difference is less than a percent of the amplitude estimate
-                # -> consider fit as OK
-                copt[idx] += popt[0]
+            if res.success:
+                copt[idx] += res.x[0]
                 if save_result_to:
-                    adjustments[iadj, idx] = popt[0]
+                    adjustments[iadj, idx] = res.x[0]
 
-                continue
+#             ## Try the AC + line curve first
+#             # Find a rough estimate for the AC component
+#             fourier = np.abs(scifft.fft(ydata))
+#             dfourier = np.diff(fourier)
 
-            ## Fallback to a simple line fit
-            p0 = [0., 0.]
+#             # First peak in the frequency spectrum
+#             freq_idx = np.nonzero((dfourier[:-1] > 0.) & (dfourier[1:] < 0.))[0] + 1
+#             if freq_idx.shape[0] == 0:
+#                 freq_idx = [0]
 
-            popt, cov = sciopt.curve_fit(line, xdata, ydata, p0=p0)
+#             freq_est = freq_idx[0] / xdata[-1] * np.pi * 2.
 
-            if np.all(np.isfinite(cov)):
-                copt[idx] += popt[0]
-                if save_result_to:
-                    adjustments[iadj, idx] = popt[0]
+#             amp_est = (np.amax(ydata) - np.amin(ydata)) * 0.5
+
+#             p0 = [0., 0., amp_est, freq_est, 0.]
+
+#             popt, _ = sciopt.curve_fit(line_plus_ac, xdata, ydata, p0=p0)
+
+#             mean_abs_diff = np.mean(np.abs(ydata - line_plus_ac(xdata, *popt)))
+#             if mean_abs_diff < 1.e-2 * amp_est:
+#                 # Mean absolute difference is less than a percent of the amplitude estimate
+#                 # -> consider fit as OK
+#                 copt[idx] += popt[0]
+#                 if save_result_to:
+#                     adjustments[iadj, idx] = popt[0]
+
+#                 continue
+
+#             ## Fallback to a simple line fit
+#             p0 = [0., 0.]
+
+#             popt, cov = sciopt.curve_fit(line, xdata, ydata, p0=p0)
+
+#            if np.all(np.isfinite(cov)):
+#                copt[idx] += popt[0]
+#                if save_result_to:
+#                    adjustments[iadj, idx] = popt[0]
 
     heff_compos = np.concatenate(([0.], copt / tlist[-1])).reshape(basis.shape[:-2])
 
@@ -273,3 +310,13 @@ def fidelity_maximization(
     logger.setLevel(original_log_level)
 
     return heff_compos
+
+
+def _line_dft(nsamp, begin, end, power):
+    line_dft = np.empty(end - begin, dtype=np.complex)
+    line_dft.real = np.full(end - begin, -np.power(0.5 * nsamp, power))
+
+    theta = np.pi * np.arange(begin, end) / nsamp
+    line_dft.imag = np.power(0.5 * nsamp * np.abs(np.cos(theta)) / np.sin(theta), power) * np.sign(np.cos(theta))
+
+    return line_dft
