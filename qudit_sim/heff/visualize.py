@@ -3,6 +3,7 @@
 from typing import Optional, Tuple, List, Sequence, Union
 import logging
 import numpy as np
+from IPython.display import Latex
 import h5py
 import scipy.optimize as sciopt
 import matplotlib as mpl
@@ -11,7 +12,6 @@ from matplotlib.markers import MarkerStyle
 
 import rqutils.paulis as paulis
 from rqutils.math import matrix_exp, matrix_angle
-from rqutils.qprint import LaTeXRepr
 
 from ..util import FrequencyScale
 from .common import make_heff_t
@@ -583,7 +583,7 @@ def print_amplitude_scan(
     coefficients: np.ndarray,
     amp_scale: FrequencyScale,
     compo_scale: FrequencyScale
-) -> LaTeXRepr:
+) -> Latex:
     """Print a LaTeX expression of the amplitude scan fit results.
 
     Args:
@@ -641,6 +641,6 @@ def print_amplitude_scan(
         lines.append(line)
 
     linebreak = r' \\ '
-    expr = LaTeXRepr(fr'\begin{{align}}{linebreak.join(lines)}\end{{align}} A: amplitude in $\mathrm{{{amp_scale.frequency_unit}}}$')
+    expr = Latex(fr'\begin{{align}}{linebreak.join(lines)}\end{{align}} A: amplitude in $\mathrm{{{amp_scale.frequency_unit}}}$')
 
     return expr

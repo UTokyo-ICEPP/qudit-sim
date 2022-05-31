@@ -7,8 +7,15 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import qutip as qtp
 
+try:
+    from IPython.display import Latex
+except ImportError:
+    has_ipython = False
+else:
+    has_ipython = True
+
 from rqutils.math import matrix_angle
-from rqutils.qprint import QPrintBraKet, QPrintPauli, LaTeXRepr
+from rqutils.qprint import QPrintBraKet, QPrintPauli
 import rqutils.paulis as paulis
 
 from .util import HamiltonianCoefficient, FrequencyScale, PulseSimResult
@@ -19,7 +26,7 @@ from .find_heff import find_heff
 def print_hamiltonian(
     hamiltonian: List[Union[qtp.Qobj, Tuple[qtp.Qobj, HamiltonianCoefficient]]],
     phase_norm: Tuple[float, str]=(np.pi, 'π')
-) -> LaTeXRepr:
+) -> Union[Latex, str]:
     """IPython printer of the Hamiltonian list built by HamiltonianBuilder.
 
     Args:
@@ -27,18 +34,21 @@ def print_hamiltonian(
         phase_norm: Normalization for displayed phases.
 
     Returns:
-        A representation object for a LaTeX ``align`` expression with one Hamiltonian term per line.
+        A representation object for a LaTeX ``align`` expression or an expression string, with one Hamiltonian term per line.
     """
-    lines = []
+    exprs = []
     start = 0
     if isinstance(hamiltonian[0], qtp.Qobj):
-        lines.append(QPrintBraKet(hamiltonian[0].full(), dim=hamiltonian[0].dims[0], lhs_label=r'H_{\mathrm{static}} &').latex(env=None))
+        exprs.append(QPrintBraKet(hamiltonian[0].full(), dim=hamiltonian[0].dims[0], lhs_label=r'H_{\mathrm{static}} &'))
         start += 1
 
     for iterm, term in enumerate(hamiltonian[start:]):
-        lines.append(QPrintBraKet(term[0], dim=term[0].dims[0], lhs_label=f'H_{{{iterm}}} &', amp_norm=(1., fr'[\text{{{term[1]}}}]*'), phase_norm=phase_norm).latex(env=None))
+        exprs.append(QPrintBraKet(term[0], dim=term[0].dims[0], lhs_label=f'H_{{{iterm}}} &', amp_norm=(1., fr'[\text{{{term[1]}}}]*'), phase_norm=phase_norm))
 
-    return LaTeXRepr(r'\begin{align}' + r' \\ '.join(lines) + r'\end{align}')
+    if has_ipython:
+        return Latex(r'\begin{align}' + r' \\ '.join(expr.latex(env=None) for expr in exprs) + r'\end{align}')
+    else:
+        return '\n'.join(str(expr) for expr in exprs)
 
 
 def print_components(
@@ -48,7 +58,7 @@ def print_components(
     precision: int = 3,
     threshold: float = 1.e-3,
     scale: Union[FrequencyScale, str, None] = FrequencyScale.auto
-) -> LaTeXRepr:
+) -> Union[Latex, str]:
     r"""Compose a LaTeX expression of the effective Hamiltonian from the Pauli components.
 
     Args:
@@ -64,7 +74,7 @@ def print_components(
             normalized by :math:`\pi`.
 
     Returns:
-        A LaTeX expression string for the effective Hamiltonian.
+        A representation object for a LaTeX expression or an expression string for the effective Hamiltonian.
     """
     max_abs = np.amax(np.abs(components))
 
@@ -81,16 +91,39 @@ def print_components(
         scale_omega = scale.pulsatance_value
         lhs_label = r'\frac{H_{\mathrm{eff}}}{\mathrm{%s}}' % scale.frequency_unit
 
-    if threshold < 0.:
-        threshold *= -max_abs / scale_omega
+    components = components / scale_omega
+    max_abs /= scale_omega
 
-    pobj = QPrintPauli(components / scale_omega,
-                       amp_format=f'.{precision}f',
-                       epsilon=(threshold * scale_omega / max_abs),
-                       lhs_label=lhs_label,
-                       symbol=symbol)
+    if threshold > 0.:
+        amp_cutoff = threshold / max_abs
+    else:
+        amp_cutoff = -threshold / scale_omega
 
-    return LaTeXRepr(pobj.latex())
+    if uncertainties is not None:
+        selected = np.nonzero(np.abs(components) > amp_cutoff * max_abs)
+        unc = np.zeros_like(uncertainties)
+        unc[selected] = uncertainties[selected] / scale_omega
+
+        central = QPrintPauli(components, amp_format=f'.{precision}f',
+                              amp_cutoff=amp_cutoff, symbol=symbol)
+
+        uncert = QPrintPauli(unc, amp_format=f'.{precision}f',
+                             amp_cutoff=0., symbol=symbol)
+
+        if has_ipython:
+            return Latex(fr'\begin{{split}} {lhs_label} & = {central.latex(env=None)} \\'
+                         + fr' & \pm {uncert.latex(env=None)} \end{{split}}')
+        else:
+            return f'{lhs_label}  = {central}\n{" " * len(lhs_label)} +- {uncert}'
+
+    else:
+        pobj = QPrintPauli(components, amp_format=f'.{precision}f', amp_cutoff=amp_cutoff,
+                           lhs_label=lhs_label, symbol=symbol)
+
+        if has_ipython:
+            return Latex(pobj.latex())
+        else:
+            return str(pobj)
 
 
 def plot_components(
@@ -150,7 +183,7 @@ def plot_components(
     indices = np.unravel_index(flat_indices[:nterms], components.shape)
 
     fig, ax = plt.subplots(1, 1)
-    ax.bar(np.arange(nterms), components[indices], yerr=(uncertainties[indices] / 2.))
+    ax.bar(np.arange(nterms), components[indices], yerr=uncertainties[indices])
 
     ax.axhline(0., color='black', linewidth=0.5)
 
