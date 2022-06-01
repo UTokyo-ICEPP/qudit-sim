@@ -14,139 +14,7 @@ import rqutils.paulis as paulis
 from rqutils.math import matrix_exp, matrix_angle
 
 from ..util import FrequencyScale
-from .common import make_heff_t
-
-def inspect_leastsq_minimization(
-    filename: str,
-    threshold: float = 0.01,
-    tscale: FrequencyScale = FrequencyScale.auto,
-    align_ylim: bool = True,
-    limit_components: Optional[List[Tuple]] = None
-) -> List[mpl.figure.Figure]:
-    r"""Inspect the results of least-squares effective Hamiltonian extraction.
-
-    Args:
-        filename: The HDF5 file name produced by `find_heff`.
-        threshold: Ignore components of :math:`i \mathrm{log} U(t)` with absolute value (in radians) below this value.
-        tscale: Time scale for the horizontal axes.
-        align_ylim: Align the ranges of vertical axes.
-        limit_components: Plot only the components included in this list.
-
-    Returns:
-        A list of figures (one per fit iteration).
-    """
-    with h5py.File(filename, 'r') as source:
-        num_qudits = source['num_qudits'][()]
-        num_sim_levels = source['num_sim_levels'][()]
-        comp_dim = source['comp_dim'][()]
-        tlist = source['tlist'][()]
-        ilogvs = source['ilogvs'][()]
-        max_com = source['max_com'][()]
-        min_compo_ratio = source['min_compo_ratio'][()]
-        num_update_per_iteration = source['num_update_per_iteration'][()]
-        ilogu_compos = source['ilogu_compos'][()]
-        last_valid_it = source['last_valid_it'][()]
-        heff_compos = source['heff_compos'][()]
-        compos = source['compos'][()]
-        success = source['fit_success'][()]
-        com = source['com'][()]
-
-    num_paulis = num_sim_levels ** 2
-    basis_size = num_paulis ** num_qudits - 1
-
-    if tscale is FrequencyScale.auto:
-        tscale = FrequencyScale.find_time_scale(tlist[-1])
-
-    tlist *= tscale.frequency_value
-    compos /= tscale.frequency_value
-    heff_compos /= tscale.frequency_value
-
-    num_loops = ilogu_compos.shape[0]
-
-    max_heff_compo = np.amax(np.abs(heff_compos), axis=1, keepdims=True)
-    max_heff_compo = np.repeat(max_heff_compo, basis_size, axis=1)
-    compo_ratio = np.zeros_like(compos)
-    np.divide(np.abs(compos), max_heff_compo, out=compo_ratio, where=(max_heff_compo > 0.))
-
-    is_update_candidate = success & (com < max_com)
-    compo_nonnegligible = (compo_ratio > min_compo_ratio)
-    is_update_candidate[1:] &= compo_nonnegligible[1:] | (last_valid_it[1:, None] != tlist.shape[0])
-    num_candidates = np.count_nonzero(is_update_candidate[iloop], axis=1)
-    num_candidates = np.minimum(num_update_per_iteration, num_candidates)
-    masked_compos = np.where(is_update_candidate, np.abs(compos), 0.)
-    sorted_compos = -np.sort(-masked_compos)
-    compo_mins = np.where(num_candidates < num_basis,
-                          sorted_compos[np.arange(num_loops), num_candidates],
-                          0.)
-    selected = (masked_compos > compo_mins[:, None])
-
-    log_com = np.zeros_like(com)
-    np.log10(com, out=log_com, where=(com > 0.))
-    log_cr = np.ones_like(compo_ratio) * np.amin(compo_ratio, where=(compo_ratio > 0.), initial=np.amax(compo_ratio))
-    np.log10(compo_ratio, out=log_cr, where=(compo_ratio > 0.))
-
-    if limit_components is not None:
-        tuple_of_indices = tuple(np.array(index[i] for index in limit_components) for i in range(len(limit_components[0])))
-        limit_components = np.ravel_multi_index(tuple_of_indices, (num_paulis,) * num_qudits)
-        limit_components = np.sort(limit_components)
-
-    figures = []
-
-    for iloop in range(num_loops):
-        if limit_components is None:
-            # Make a list of tuples from a tuple of arrays
-            indices_loop = np.nonzero(np.amax(np.abs(ilogu_compos[iloop]), axis=0) > threshold)[0] + 1
-            indices_loop = np.concatenate([np.array([0]), indices_loop])
-        else:
-            indices_loop = limit_components
-
-        fig, axes = _make_figure(len(indices_iter) + 2)
-        figures.append(fig)
-        fig.suptitle(f'Iteration {iloop} (last_valid_it {last_valid_it[iloop]})', fontsize=24)
-
-        ## First row: global digest plots
-        # log(cr) versus log(com)
-        ax = axes[0]
-
-        ax.set_xlabel(r'$log_{10}(com)$')
-        if iloop == 0:
-            ax.hist(log_com[iloop])
-            ax.axvline(np.log10(max_com), color='red')
-        else:
-            ax.set_ylabel(r'$log_{10}(cr)$')
-            ax.scatter(log_com[iloop], log_cr[iloop])
-            ax.axvline(np.log10(max_com), color='red')
-            ax.axhline(np.log10(min_compo_ratio), color='red')
-
-        # ilogvs
-        ax = axes[1]
-        ax.set_xlabel(f't ({tscale.time_unit})')
-        ax.plot(tlist, np.sort(ilogvs[iloop], axis=1))
-
-        ## individual pauli components
-        _plot_ilogu_compos(axes[2:], compos, num_qudits, num_paulis, indices_loop, tlist, tscale, comp_dim)
-
-        for iax, basis_index_flat in enumerate(indices_loop):
-            ax = axes[iax]
-
-            ymin, ymax = ax.ylim()
-
-            ibase = basis_index_flat - 1
-
-            # Show cumul-over-max and compo ratio values
-            ax.text(tlist[10], ymin + (ymax - ymin) * 0.1, f'com {com[iloop, ibase]:.3f} cr {compo_ratio[iloop, ibase]:.3f}')
-
-            # Draw the fit line for successful fits
-            if success[iloop, ibase]:
-                ax.plot(tlist, compos[ibase] * tlist)
-
-            if selected[iloop, ibase]:
-                ax.tick_params(color='magenta', labelcolor='magenta')
-                for spine in ax.spines.values():
-                    spine.set(edgecolor='magenta')
-
-    return figures
-
+from .common import make_heff_t, heff_fidelity
 
 def inspect_fidelity_maximization(
     filename: str,
@@ -170,7 +38,6 @@ def inspect_fidelity_maximization(
     Returns:
         A list of two (three if digest=True) figures.
     """
-
     with h5py.File(filename, 'r') as source:
         num_qudits = int(source['num_qudits'][()])
         num_sim_levels = int(source['num_sim_levels'][()])
@@ -178,11 +45,10 @@ def inspect_fidelity_maximization(
         time_evolution = source['time_evolution'][()]
         tlist = source['tlist'][()]
         if num_sim_levels != comp_dim:
-            heff_compos = source['heff_compos_original'][()]
+            components = source['components_original'][()]
         else:
-            heff_compos = source['heff_compos'][()]
-        final_fidelity = source['final_fidelity'][()]
-        adjustments = source['residual_adjustments'][()]
+            components = source['components'][()]
+
         try:
             loss = source['loss'][()]
             grad = source['grad'][()]
@@ -190,27 +56,31 @@ def inspect_fidelity_maximization(
             loss = None
             grad = None
 
+    dim = (num_sim_levels,) * num_qudits
     num_paulis = num_sim_levels ** 2
+    pauli_dim = (num_paulis,) * num_qudits
 
     if tscale is FrequencyScale.auto:
         tscale = FrequencyScale.find_time_scale(tlist[-1])
 
     tlist *= tscale.frequency_value
-    heff_compos /= tscale.frequency_value
+    components[0] /= tscale.frequency_value
     adjustments /= tscale.frequency_value
 
     ilogus = -matrix_angle(time_evolution)
-    ilogu_compos = paulis.components(ilogus, (num_sim_levels,) * num_qudits).real
+    ilogu_compos = paulis.components(ilogus, dim=dim).real
     ilogu_compos = ilogu_compos.reshape(tlist.shape[0], -1)[:, 1:]
 
-    heff = paulis.compose(heff_compos, (num_sim_levels,) * num_qudits)
+    heff = paulis.compose(components[0], dim=dim)
     heff_t = make_heff_t(heff, tlist)
+    heff_t += paulis.compose(components[1], dim=dim)
+
     ueff_dagger = matrix_exp(1.j * heff_t, hermitian=-1)
 
     target = np.matmul(time_evolution, ueff_dagger)
     ilogtargets, ilogvs = matrix_angle(target, with_diagonals=True)
     ilogtargets *= -1.
-    ilogtarget_compos = paulis.components(ilogtargets, (num_sim_levels,) * num_qudits).real
+    ilogtarget_compos = paulis.components(ilogtargets, dim=dim).real
     ilogtarget_compos = ilogtarget_compos.reshape(tlist.shape[0], -1)[:, 1:]
 
     if limit_components is None:
@@ -220,8 +90,9 @@ def inspect_fidelity_maximization(
         indices_ilogtarget = np.nonzero(np.amax(np.abs(ilogtarget_compos), axis=0) > threshold)[0] + 1
         indices_ilogtarget = np.concatenate([np.array([0]), indices_ilogtarget])
     else:
-        tuple_of_indices = tuple([index[i] for index in limit_components] for i in range(len(limit_components[0])))
-        limit_components = np.ravel_multi_index(tuple_of_indices, (num_paulis,) * num_qudits)
+        tuple_of_indices = tuple([index[i] for index in limit_components]
+                                 for i in range(len(limit_components[0])))
+        limit_components = np.ravel_multi_index(tuple_of_indices, pauli_dim)
         limit_components = np.sort(limit_components)
 
         indices_ilogu = limit_components
@@ -234,37 +105,28 @@ def inspect_fidelity_maximization(
     figures.append(fig)
     fig.suptitle(r'Original time evolution vs $H_{eff}$', fontsize=24)
 
-    _plot_ilogu_compos(axes, ilogu_compos, num_qudits, num_paulis, indices_ilogu, tlist, tscale,
+    _plot_ilogu_compos(axes, ilogu_compos, num_qudits, num_sim_levels, indices_ilogu, tlist, tscale,
                        comp_dim, align_ylim=align_ylim)
-
-    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
     ## Add lines with slope=compo for terms above threshold
     for iax, basis_index_flat in enumerate(indices_ilogu):
         ax = axes[iax]
-        basis_index = np.unravel_index(basis_index_flat, (num_paulis,) * num_qudits)
-        ax.plot(tlist, heff_compos[basis_index] * tlist, color=colors[1])
+        basis_index = np.unravel_index(basis_index_flat, pauli_dim)
+        central = components[(0,) + basis_index] * tlist
+        line = ax.plot(tlist, central)
+        ax.plot(tlist, central - components[(2,) + basis_index], ls='--', color=line.color)
+        ax.plot(tlist, central + components[(2,) + basis_index], ls='--', color=line.color)
 
-        cumul_adj = 0.
-        for iadj in range(adjustments.shape[0] - 1, -1, -1):
-            adj = adjustments[(iadj,) + basis_index]
-            if adj != 0.:
-                cumul_adj += adj
-                ax.plot(tlist, (heff_compos[basis_index] - cumul_adj) * tlist,
-                        color=colors[(adjustments.shape[0] - iadj + 1) % len(colors)])
+    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
-    handles = []
-    labels = []
-    for icolor in range(2 + adjustments.shape[0]):
-        line = mpl.lines.Line2D([0.], [0.], color=colors[icolor % len(colors)])
-        handles.append(line)
-        if icolor == 0:
-            labels.append('ilogU(t) component')
-        elif icolor == 1:
-            labels.append('$H_{eff}t$ component')
-        else:
-            labels.append(f'pre-adjust {adjustments.shape[0] + 2 - icolor}')
-
+    handles = [
+        mpl.lines.Line2D([0.], [0.], color=colors[0]),
+        mpl.lines.Line2D([0.], [0.], color=colors[1])
+    ]
+    labels = [
+        'ilogU(t) component',
+        '$H_{eff}t$ component $\pm$ offset'
+    ]
     fig.legend(handles, labels, 'upper right')
 
     ## Second figure: subtracted unitaries
@@ -273,8 +135,8 @@ def inspect_fidelity_maximization(
     fig.suptitle('Unitary-subtracted time evolution', fontsize=24)
 
     ## Plot individual pauli components
-    _plot_ilogu_compos(axes, ilogtarget_compos, num_qudits, num_paulis, indices_ilogtarget, tlist, tscale,
-                       comp_dim, align_ylim=align_ylim)
+    _plot_ilogu_compos(axes, ilogtarget_compos, num_qudits, num_sim_levels, indices_ilogtarget,
+                       tlist, tscale, comp_dim, align_ylim=align_ylim)
 
     if digest:
         ## Third figure: fit digest plots
@@ -283,6 +145,8 @@ def inspect_fidelity_maximization(
         fig.suptitle('Fit metrics', fontsize=24)
 
         # fidelity
+        final_fidelity = heff_fidelity(time_evolution, components[0], components[1],
+                                       paulis.paulis(dim), tlist)
         ax = axes[0]
         ax.set_title('Final fidelity')
         ax.set_xlabel(f't ({tscale.time_unit})')
@@ -329,14 +193,16 @@ def _make_figure(num_axes, nxmin=4, nxmax=12):
     return fig, axes.reshape(-1)
 
 
-def _plot_ilogu_compos(axes, compos_data, num_qudits, num_paulis, limit_components_flat, tlist, tscale, comp_dim, align_ylim=False):
+def _plot_ilogu_compos(axes, compos_data, num_qudits, num_sim_levels, limit_components_flat, tlist, tscale, comp_dim, align_ylim=False):
     # compos_data: shape (T, num_basis - 1)
     # limit_components_flat
-    num_sim_levels = np.around(np.sqrt(num_paulis)).astype(int)
+    num_paulis = num_sim_levels ** 2
     num_comp_paulis = comp_dim ** 2
+    dim = (num_sim_levels,) * num_qudits
+    pauli_dim = (num_paulis,) * num_qudits
 
-    limit_components = np.unravel_index(limit_components_flat, (num_paulis,) * num_qudits)
-    labels = paulis.labels((num_sim_levels,) * num_qudits, norm=False)[limit_components]
+    limit_components = np.unravel_index(limit_components_flat, pauli_dim)
+    labels = paulis.labels(dim, norm=False)[limit_components]
     compos_data_selected = compos_data[:, limit_components_flat - 1]
 
     iax = 0
@@ -416,9 +282,10 @@ def plot_amplitude_scan(
         normalize the amplitude variable in the polynomials.
     """
     components = np.asarray(components)
+    heff_compos = components[:, 0]
 
-    num_qudits = len(components.shape) - 1 # first dimension: amplitudes
-    comp_dim = int(np.around(np.sqrt(components.shape[1])))
+    num_qudits = len(heff_compos.shape) - 1 # first dim: amplitudes
+    comp_dim = int(np.around(np.sqrt(heff_compos.shape[1])))
     num_paulis = comp_dim ** 2
 
     if amp_scale is FrequencyScale.auto:
@@ -428,10 +295,10 @@ def plot_amplitude_scan(
     amps_norm = amplitudes / amp_scale_omega
 
     if compo_scale is FrequencyScale.auto:
-        compo_scale = FrequencyScale.find_energy_scale(np.amax(np.abs(components)))
+        compo_scale = FrequencyScale.find_energy_scale(np.amax(np.abs(heff_compos)))
 
     compo_scale_omega = compo_scale.pulsatance_value
-    compos_norm = components / compo_scale_omega
+    compos_norm = heff_compos / compo_scale_omega
 
     if threshold is None:
         threshold = compo_scale_omega * 1.e-2

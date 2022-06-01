@@ -1,28 +1,36 @@
 """Effective Hamiltonian extraction frontend."""
 
-from typing import Any, Dict, List, Sequence, Optional, Union
+from typing import Any, Dict, List, Tuple, Sequence, Optional, Union
 import os
+from functools import partial
 import logging
 logging.basicConfig(level=logging.INFO)
 
 import numpy as np
 import h5py
+import jax
+import jax.numpy as jnp
+import optax
 
 import rqutils.paulis as paulis
+from rqutils.math import matrix_angle
 
 from .util import PulseSimResult
+from .config import config
 from .parallel import parallel_map
-from .heff.common import heff_fidelity
+from .heff.common import get_ilogus_and_valid_it, heff_fidelity, compose_ueff
 
 logger = logging.getLogger(__name__)
 
 def find_heff(
     sim_result: Union[PulseSimResult, List[PulseSimResult]],
     comp_dim: int = 2,
-    method: str = 'fidelity',
-    method_params: Optional[Dict] = None,
+    optimizer: str = 'adam',
+    optimizer_args: Any = 0.05,
+    max_updates: int = 10000,
+    convergence: float = 1.e-5,
     save_result_to: Optional[str] = None,
-    log_level: int = logging.WARNING
+    log_level: int = logging.WARNING,
 ) -> Union[np.ndarray, List[np.ndarray]]:
     r"""Determine the effective Hamiltonian from the result of constant-drive simulations.
 
@@ -42,15 +50,11 @@ def find_heff(
     original_log_level = logger.level
     logger.setLevel(log_level)
 
-    ## Extraction function parameters
-    if method_params is None:
-        method_params = dict()
-
     if isinstance(sim_result, list):
-        common_kwargs = {'method': method, 'comp_dim': comp_dim, 'method_params': method_params,
-                         'log_level': log_level}
-
         num_tasks = len(sim_result)
+
+        common_kwargs = {'comp_dim': comp_dim, 'optimizer': optimizer, 'optimizer_args': optimizer_args,
+                         'max_updates': max_updates, 'convergence': convergence, 'log_level': log_level}
 
         if save_result_to:
             if not (os.path.exists(save_result_to) and os.path.isdir(save_result_to)):
@@ -70,64 +74,253 @@ def find_heff(
                 f'{__name__}.{itask}',
                 save_result_path(itask)))
 
-        heff_compos = parallel_map(_run_single, args=args, kwarg_keys=kwarg_keys,
-                                   kwarg_values=kwarg_values, common_kwargs=common_kwargs,
-                                   log_level=log_level, thread_based=True)
+        components = parallel_map(_run_single, args=args, kwarg_keys=kwarg_keys,
+                                  kwarg_values=kwarg_values, common_kwargs=common_kwargs,
+                                  log_level=log_level, thread_based=True)
 
     else:
-        heff_compos = _run_single(sim_result.states, sim_result.times, sim_result.dim,
-                                  method=method, comp_dim=comp_dim, method_params=method_params,
-                                  save_result_to=save_result_to, log_level=log_level)
+        components = _run_single(sim_result.states, sim_result.times, sim_result.dim,
+                                 comp_dim=comp_dim, optimizer=optimizer, optimizer_args=optimizer_args,
+                                 max_updates=max_updates, convergence=convergence,
+                                 save_result_to=save_result_to, log_level=log_level)
 
     logger.setLevel(original_log_level)
 
-    return heff_compos
+    return components
 
 
 def _run_single(
-    states: np.ndarray,
+    time_evolution: np.ndarray,
     tlist: np.ndarray,
     dim: tuple,
-    method: str,
     comp_dim: int,
-    method_params: dict,
+    optimizer: str,
+    optimizer_args: Any,
+    max_updates: int,
+    convergence: float,
     save_result_to: Union[str, None],
-    logger_name: str = __name__,
-    log_level: int = logging.WARNING
+    log_level: int,
+    logger_name: str = __name__
 ):
     logger = logging.getLogger(logger_name)
 
-    if method == 'leastsq':
-        from .heff import leastsq_minimization
-        extraction_fn = leastsq_minimization
-    elif method == 'fidelity':
-        from .heff import fidelity_maximization
-        extraction_fn = fidelity_maximization
-
-    heff_compos = extraction_fn(states, tlist, dim, save_result_to=save_result_to,
-                                log_level=log_level, **method_params)
-
-    if dim[0] != comp_dim:
-        heff_compos_original = heff_compos
-        heff_compos = paulis.truncate(heff_compos, (comp_dim,) * len(dim))
-    else:
-        heff_compos_original = None
+    matrix_dim = np.prod(dim)
+    assert time_evolution.shape == (tlist.shape[0], matrix_dim, matrix_dim), 'Inconsistent input shape'
 
     if save_result_to:
         with h5py.File(f'{save_result_to}.h5', 'w') as out:
             out.create_dataset('num_qudits', data=len(dim))
             out.create_dataset('num_sim_levels', data=dim[0])
             out.create_dataset('comp_dim', data=comp_dim)
-            out.create_dataset('time_evolution', data=states)
+            out.create_dataset('time_evolution', data=time_evolution)
             out.create_dataset('tlist', data=tlist)
-            out.create_dataset('heff_compos', data=heff_compos)
-            if heff_compos_original is not None:
-                out.create_dataset('heff_compos_original', data=heff_compos_original)
 
-            with h5py.File(f'{save_result_to}_ext.h5', 'r') as source:
-                for key in source.keys():
-                    out.create_dataset(key, data=source[key])
+    heff_compos, offset_compos = _fidelity_maximization(time_evolution,
+                                                        tlist,
+                                                        dim,
+                                                        optimizer,
+                                                        optimizer_args,
+                                                        max_updates,
+                                                        convergence,
+                                                        save_result_to)
 
-            os.unlink(f'{save_result_to}_ext.h5')
+    offset_range = _offset_range_estimation(time_evolution,
+                                            tlist,
+                                            dim,
+                                            heff_compos,
+                                            offset_compos)
 
-    return heff_compos
+    components = np.stack((heff_compos, offset_compos, offset_range), axis=0)
+
+    if dim[0] != comp_dim:
+        reduced_dim = (comp_dim,) * len(dim)
+        components_original = components
+        components = paulis.truncate(components, reduced_dim)
+    else:
+        components_original = None
+
+    if save_result_to:
+        with h5py.File(f'{save_result_to}.h5', 'a') as out:
+            out.create_dataset('components', data=components)
+            if components_original is not None:
+                out.create_dataset('components_original', data=components_original)
+
+    return components
+
+
+def _fidelity_maximization(
+    time_evolution: np.ndarray,
+    tlist: np.ndarray,
+    dim: Tuple[int, ...],
+    optimizer: str,
+    optimizer_args: Any,
+    max_updates: int,
+    convergence: float,
+    save_result_to: Union[str, None]
+) -> Tuple[np.ndarray, np.ndarray]:
+    if not config.jax_devices:
+        jax_device = None
+    else:
+        # parallel.parallel_map sets jax_devices[0] to the ID of the GPU to be used in this thread
+        jax_device = jax.devices()[config.jax_devices[0]]
+
+    ## Time normalization: make tlist equivalent to arange(len(tlist)) / len(tlist)
+    time_norm = tlist[-1] + tlist[1]
+
+    ## Set up the Pauli product basis of the space of Hermitian operators
+    basis = paulis.paulis(dim)
+    # Flattened list of basis operators excluding the identity operator
+    basis_list = jax.device_put(basis.reshape(-1, *basis.shape[-2:])[1:], device=jax_device)
+
+    ## Set the initial parameter values
+    ilogus, _, last_valid_it = get_ilogus_and_valid_it(time_evolution)
+    if last_valid_it <= 1:
+        raise RuntimeError('Failed to obtain an initial estimate of the slopes')
+
+    ilogu_compos = paulis.components(ilogus, dim=dim).real.reshape(-1)[1:]
+    init = ilogu_compos[last_valid_it - 1] / tlist[last_valid_it - 1]
+
+    # Reshape and truncate the components array to match the basis_list
+    init = init.reshape(-1)[1:]
+
+    ## Stack the initial parameter values
+    # initial[0]: init multiplied by time_norm
+    # initial[1]: offset components (initialized to zero)
+    initial = np.stack((init * time_norm, np.zeros_like(init)), axis=0)
+    initial = jax.device_put(initial, device=jax_device)
+
+    ## Working arrays
+    time_evolution = jax.device_put(time_evolution, device=jax_device)
+    tlist_norm = jax.device_put(tlist / time_norm, device=jax_device)
+
+    @partial(jax.jit, device=jax_device)
+    def _loss_fn(heff_compos, offset_compos):
+        fidelity = heff_fidelity(time_evolution, heff_compos, offset_compos, basis_list, tlist_norm,
+                                 npmod=jnp)
+        return -jnp.mean(fidelity)
+
+    if optimizer == 'minuit':
+        from iminuit import Minuit
+
+        @partial(jax.jit, device=jax_device)
+        def loss_fn(params):
+            return _loss_fn(params[0], params[1])
+
+        grad = jax.jit(jax.grad(loss_fn), device=jax_device)
+
+        minimizer = Minuit(loss_fn, initial, grad=grad)
+        minimizer.strategy = 0
+
+        logger.info('Running MIGRAD..')
+
+        minimizer.migrad()
+
+        logger.info('Done.')
+
+        num_updates = minimizer.nfcn
+
+        compos_norm = minimizer.values[0]
+        offset_compos = minimizer.values[1]
+
+    else:
+        ## Set up the optimizer, loss & grad functions, and the parameter update function
+        if not isinstance(optimizer_args, tuple):
+            optimizer_args = (optimizer_args,)
+
+        grad_trans = getattr(optax, optimizer)(*optimizer_args)
+
+        @partial(jax.jit, device=jax_device)
+        def loss_fn(opt_params):
+            return _loss_fn(opt_params['c'][0], opt_params['c'][1])
+
+        loss_and_grad = jax.jit(jax.value_and_grad(loss_fn), device=jax_device)
+
+        @jax.jit
+        def step(opt_params, opt_state):
+            loss, gradient = loss_and_grad(opt_params)
+            updates, opt_state = grad_trans.update(gradient, opt_state)
+            new_params = optax.apply_updates(opt_params, updates)
+            return new_params, opt_state, loss, gradient
+
+        ## With optax we have access to intermediate results, so we save them
+        if save_result_to:
+            compo_values = np.zeros((max_updates,) + initial.shape, dtype='f8')
+            loss_values = np.zeros(max_updates, dtype='f8')
+            grad_values = np.zeros((max_updates,) + initial.shape, dtype='f8')
+
+        ## Start the fidelity maximization loop
+        logger.info('Starting maximization loop..')
+
+        opt_params = {'c': initial}
+        opt_state = grad_trans.init(opt_params)
+
+        for iup in range(max_updates):
+            new_params, opt_state, loss, gradient = step(opt_params, opt_state)
+
+            if save_result_to:
+                compo_values[iup] = opt_params['c']
+                compo_values[iup][0] /= time_norm
+                loss_values[iup] = loss
+                grad_values[iup] = gradient['c']
+
+            max_grad = np.amax(np.abs(gradient['c']))
+
+            logger.debug('Iteration %d: loss %f max_grad %f', iup, loss, max_grad)
+
+            if max_grad < convergence:
+                break
+
+            opt_params = new_params
+
+        num_updates = iup + 1
+
+        logger.info('Done after %d steps.', num_updates)
+
+        compos_norm = np.array(opt_params['c'][0])
+        offset_compos = np.array(opt_params['c'][1])
+
+        if save_result_to:
+            with h5py.File(f'{save_result_to}.h5', 'a') as out:
+                out.create_dataset('compos', data=compo_values[:num_updates])
+                out.create_dataset('loss', data=loss_values[:num_updates])
+                out.create_dataset('grad', data=grad_values[:num_updates])
+
+    if not np.all(np.isfinite(compos_norm)) or not np.all(np.isfinite(offset_compos)):
+        raise ValueError('Optimized components not finite')
+
+    ## Recover the shape and normalization of the components arrays before returning
+    heff_compos = np.concatenate(([0.], compos_norm / time_norm)).reshape(basis.shape[:-2])
+
+    offset_compos = np.concatenate(([0.], offset_compos)).reshape(basis.shape[:-2])
+
+    return heff_compos, offset_compos
+
+
+def _offset_range_estimation(
+    time_evolution: np.ndarray,
+    tlist: np.ndarray,
+    dim: Tuple[int, ...],
+    heff_compos: np.ndarray,
+    offset_compos: np.ndarray,
+    save_result_to: Union[str, None]
+) -> np.ndarray:
+    time_norm = tlist[-1] + tlist[1]
+
+    ## Set up the Pauli product basis of the space of Hermitian operators
+    basis = paulis.paulis(dim)
+    # Flattened list of basis operators excluding the identity operator
+    basis_list = basis.reshape(-1, *basis.shape[-2:])[1:]
+
+    # Normalize the tlist and compos
+    tlist = tlist / time_norm
+    heff_compos = heff_compos * time_norm
+
+    ueff_dagger = compose_ueff(heff_compos, offset_compos, basis_list, tlist, phase_factor=1.)
+    target = np.matmul(time_evolution, ueff_dagger)
+    ilogtargets = -matrix_angle(target)
+    ilogtarget_compos = paulis.components(ilogtargets, dim=dim).real
+
+    offset_range = np.amax(ilogtarget_compos, axis=0) - np.amin(ilogtarget_compos, axis=0)
+    offset_range /= 2.
+
+    return offset_range
