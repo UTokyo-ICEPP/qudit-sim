@@ -1,6 +1,7 @@
 """Effective Hamiltonian extraction frontend."""
 
 from typing import Any, Dict, List, Tuple, Sequence, Optional, Union
+from types import ModuleType
 import os
 from functools import partial
 import logging
@@ -12,13 +13,13 @@ import jax
 import jax.numpy as jnp
 import optax
 
+from rqutils import ArrayType
 import rqutils.paulis as paulis
-from rqutils.math import matrix_angle
+from rqutils.math import matrix_exp, matrix_angle
 
 from .util import PulseSimResult
 from .config import config
 from .parallel import parallel_map
-from .heff.common import get_ilogus_and_valid_it, heff_fidelity, compose_ueff
 
 logger = logging.getLogger(__name__)
 
@@ -172,13 +173,25 @@ def _fidelity_maximization(
     # Flattened list of basis operators excluding the identity operator
     basis_list = jax.device_put(basis.reshape(-1, *basis.shape[-2:])[1:], device=jax_device)
 
-    ## Set the initial parameter values
-    ilogus, _, last_valid_it = get_ilogus_and_valid_it(time_evolution)
-    if last_valid_it <= 1:
+    ## Set the initial Heff values from a rough slope estimate
+    # Compute ilog(U(t))
+    ilogus, ilogvs = matrix_angle(time_evolution, with_diagonals=True)
+    ilogus *= -1.
+
+    # Find the first t where an eigenvalue does a 2pi jump
+    last_valid_tidx = ilogus.shape[0]
+    for ilogv_ext in [np.amin(ilogvs, axis=1), -np.amax(ilogvs, axis=1)]:
+        margin = 0.1
+        hits_minus_pi = np.asarray(ilogv_ext < -np.pi + margin).nonzero()[0]
+        if len(hits_minus_pi) != 0:
+            last_valid_tidx = min(last_valid_tidx, hits_minus_pi[0])
+
+    if last_valid_tidx <= 1:
         raise RuntimeError('Failed to obtain an initial estimate of the slopes')
 
     ilogu_compos = paulis.components(ilogus, dim=dim).real.reshape(-1)[1:]
-    init = ilogu_compos[last_valid_it - 1] / tlist[last_valid_it - 1]
+
+    init = ilogu_compos[last_valid_tidx - 1] / tlist[last_valid_tidx - 1]
 
     # Reshape and truncate the components array to match the basis_list
     init = init.reshape(-1)[1:]
@@ -195,8 +208,8 @@ def _fidelity_maximization(
 
     @partial(jax.jit, device=jax_device)
     def _loss_fn(heff_compos, offset_compos):
-        fidelity = heff_fidelity(time_evolution, heff_compos, offset_compos, basis_list, tlist_norm,
-                                 npmod=jnp)
+        fidelity = heff_fidelity(time_evolution, heff_compos, offset_compos, tlist_norm,
+                                 basis_list=basis_list, npmod=jnp)
         return -jnp.mean(fidelity)
 
     if optimizer == 'minuit':
@@ -304,19 +317,7 @@ def _offset_range_estimation(
     offset_compos: np.ndarray,
     save_result_to: Union[str, None]
 ) -> np.ndarray:
-    time_norm = tlist[-1] + tlist[1]
-
-    ## Set up the Pauli product basis of the space of Hermitian operators
-    basis = paulis.paulis(dim)
-    # Flattened list of basis operators excluding the identity operator
-    basis_list = basis.reshape(-1, *basis.shape[-2:])[1:]
-
-    # Normalize the tlist and compos
-    tlist = tlist / time_norm
-    heff_compos = heff_compos * time_norm
-
-    ueff_dagger = compose_ueff(heff_compos, offset_compos, basis_list, tlist, phase_factor=1.)
-    target = np.matmul(time_evolution, ueff_dagger)
+    target = unitary_subtraction(time_evolution, heff_compos, offset_compos, tlist)
     ilogtargets = -matrix_angle(target)
     ilogtarget_compos = paulis.components(ilogtargets, dim=dim).real
 
@@ -324,3 +325,43 @@ def _offset_range_estimation(
     offset_range /= 2.
 
     return offset_range
+
+
+def unitary_subtraction(
+    time_evolution: ArrayType,
+    heff_compos: ArrayType,
+    offset_compos: ArrayType,
+    tlist: ArrayType,
+    basis_list: Optional[ArrayType] = None,
+    npmod: ModuleType = np
+) -> ArrayType:
+    if isinstance(basis_list, type(None)):
+        heff = paulis.compose(heff_compos, npmod=npmod)
+        offset = paulis.compose(offset_compos, npmod=npmod)
+    else:
+        basis_list = basis_list.reshape(-1, *basis_list.shape[-2:])
+        heff = npmod.tensordot(basis_list, heff_compos.reshape(-1), (0, 0))
+        offset = npmod.tensordot(basis_list, offset_compos.reshape(-1), (0, 0))
+
+    hermitian = heff[None, ...] * tlist[:, None, None]
+    hermitian += offset
+    unitary = matrix_exp(1.j * hermitian, hermitian=-1, npmod=npmod)
+
+    return npmod.matmul(time_evolution, unitary)
+
+
+def heff_fidelity(
+    time_evolution: ArrayType,
+    heff_compos: ArrayType,
+    offset_compos: ArrayType,
+    tlist: ArrayType,
+    basis_list: Optional[ArrayType] = None,
+    npmod: ModuleType = np
+) -> ArrayType:
+    target = unitary_subtraction(time_evolution, heff_compos, offset_compos, tlist,
+                                 basis_list=basis_list, npmod=npmod)
+
+    tr_target = npmod.trace(target, axis1=1, axis2=2)
+    fidelity = (npmod.square(tr_target.real) + npmod.square(tr_target.imag)) / (target.shape[-1] ** 2)
+
+    return fidelity

@@ -1,6 +1,6 @@
-"""Visualization routines for effective Hamiltonian studies."""
+"""Effective Hamiltonian analysis."""
 
-from typing import Optional, Tuple, List, Sequence, Union
+from typing import Tuple, List, Optional, Dict, Hashable
 import logging
 import numpy as np
 from IPython.display import Latex
@@ -11,10 +11,100 @@ import matplotlib.pyplot as plt
 from matplotlib.markers import MarkerStyle
 
 import rqutils.paulis as paulis
-from rqutils.math import matrix_exp, matrix_angle
+from rqutils.math import matrix_angle
 
+from ..hamiltonian import HamiltonianBuilder
+from ..pulse_sim import pulse_sim
+from ..find_heff import find_heff, heff_fidelity
 from ..util import FrequencyScale
-from .common import make_heff_t, heff_fidelity
+
+def heff_analysis(
+    hgen: HamiltonianBuilder,
+    drive_def: List[Tuple[Hashable, float, complex]],
+    comp_dim: int = 2,
+    method: str = 'fidelity',
+    method_params: Optional[Dict] = None,
+    num_drive_cycles: Tuple[int, int, int] = (500, 1000, 20),
+    save_result_to: Optional[str] = None,
+    log_level: int = logging.WARNING
+) -> Tuple[np.ndarray, np.ndarray]:
+    r"""Run a full effective Hamiltonian analysis.
+
+    Given a HamiltonianBuilder object with the full specification offrequencies and couplings but
+    no drive information, add constant drive terms, run the effective Hamiltonian extraction from
+    simulations with several different durations, and compute the average and uncertainties of the
+    :math:`H_{\mathrm{eff}}` components.
+
+    The
+
+    Args:
+        hgen: Hamiltonian with no drive term.
+        drive_def: A list of drive term specifications (qudit id, frequency, amplitude).
+
+    Returns:
+        An array of effective Hamiltonian components and another array representing their
+        uncertainties.
+    """
+    max_frequency = 0.
+
+    for qudit_id, frequency, amplitude in drive_def:
+        hgen.add_drive(qudit_id, frequency=frequency, amplitude=amplitude)
+        max_frequency = max(max_frequency, frequency)
+
+    cycle = 2. * np.pi / max_frequency
+    durations = np.linspace(num_drive_cycles[0] * cycle, num_drive_cycles[1] * cycle, num_drive_cycles[2])
+
+    tlist = list({'points_per_cycle': 8, 'duration': duration} for duration in durations)
+
+    sim_results = pulse_sim(hgen, tlist, rwa=False, save_result_to=save_result_to, log_level=log_level)
+
+    components_list = find_heff(sim_results, comp_dim=comp_dim, method=method, method_params=method_params,
+                                save_result_to=save_result_to, log_level=log_level)
+
+    components = np.array(components_list)
+
+    # duration-weighted average of Heff, offset, and offset range components
+    # (longer-time simulation result is preferred)
+    components_avg = np.sum(components.reshape(durations.shape[0], -1) * durations[:, None], axis=0)
+    components_avg /= np.sum(durations)
+    components_avg = components_avg.reshape(components.shape)
+
+    uncertainties = np.amax(components, axis=0) - np.amin(components, axis=0)
+
+    return components, uncertainties
+
+
+def fidelity_loss(
+    time_evolution: np.ndarray,
+    components: np.ndarray,
+    tlist: np.ndarray
+) -> np.ndarray:
+    """Compute the loss in the mean fidelity when each component is set to zero.
+
+    Args:
+        time_evolution: Time evolution unitary as a function of time.
+        components: Pauli components.
+        tlist: Time points.
+
+    Returns:
+        An array with the shape of Pauli basis, with elements corresponding to the loss in mean
+        fidelity when the respective components are set to zero.
+    """
+    best_fidelity = np.mean(heff_fidelity(time_evolution, components[0], components[1], tlist))
+
+    fid_loss = np.zeros_like(components[0])
+
+    for idx in np.ndindex(fid_loss.shape):
+        test_heff = components[0].copy()
+        test_heff[idx] = 0.
+        test_offset = components[1].copy()
+        test_offset[idx] = 0.
+        test_fidelity = np.mean(heff_fidelity(time_evolution, test_heff, test_offset, tlist))
+
+        fid_loss[idx] = best_fidelity - test_fidelity
+
+    return fid_loss
+
 
 def inspect_fidelity_maximization(
     filename: str,
@@ -71,13 +161,8 @@ def inspect_fidelity_maximization(
     ilogu_compos = paulis.components(ilogus, dim=dim).real
     ilogu_compos = ilogu_compos.reshape(tlist.shape[0], -1)[:, 1:]
 
-    heff = paulis.compose(components[0], dim=dim)
-    heff_t = make_heff_t(heff, tlist)
-    heff_t += paulis.compose(components[1], dim=dim)
+    target = unitary_subtraction(time_evolution, components[0], components[1], tlist)
 
-    ueff_dagger = matrix_exp(1.j * heff_t, hermitian=-1)
-
-    target = np.matmul(time_evolution, ueff_dagger)
     ilogtargets, ilogvs = matrix_angle(target, with_diagonals=True)
     ilogtargets *= -1.
     ilogtarget_compos = paulis.components(ilogtargets, dim=dim).real
@@ -145,8 +230,7 @@ def inspect_fidelity_maximization(
         fig.suptitle('Fit metrics', fontsize=24)
 
         # fidelity
-        final_fidelity = heff_fidelity(time_evolution, components[0], components[1],
-                                       paulis.paulis(dim), tlist)
+        final_fidelity = heff_fidelity(time_evolution, components[0], components[1], tlist)
         ax = axes[0]
         ax.set_title('Final fidelity')
         ax.set_xlabel(f't ({tscale.time_unit})')
