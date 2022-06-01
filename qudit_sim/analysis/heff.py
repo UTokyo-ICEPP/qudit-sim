@@ -15,7 +15,8 @@ from rqutils.math import matrix_angle
 
 from ..hamiltonian import HamiltonianBuilder
 from ..pulse_sim import pulse_sim
-from ..find_heff import find_heff, heff_fidelity
+from ..find_heff import find_heff
+from ..heff_tools import unitary_subtraction, heff_fidelity
 from ..util import FrequencyScale
 
 def heff_analysis(
@@ -106,7 +107,7 @@ def fidelity_loss(
     return fid_loss
 
 
-def inspect_fidelity_maximization(
+def inspect_heff_fit(
     filename: str,
     threshold: float = 0.01,
     tscale: FrequencyScale = FrequencyScale.auto,
