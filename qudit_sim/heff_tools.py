@@ -29,6 +29,11 @@ def unitary_subtraction(
     return npmod.matmul(time_evolution, unitary)
 
 
+def trace_norm_squared(unitary: ArrayType, npmod: ModuleType = np) -> ArrayType:
+    norm_tr = npmod.trace(unitary, axis1=-2, axis2=-1) / unitary.shape[-1]
+    return npmod.square(norm_tr.real) + npmod.square(norm_tr.imag)
+
+
 def heff_fidelity(
     time_evolution: ArrayType,
     heff_compos: ArrayType,
@@ -40,7 +45,6 @@ def heff_fidelity(
     target = unitary_subtraction(time_evolution, heff_compos, offset_compos, tlist,
                                  basis_list=basis_list, npmod=npmod)
 
-    tr_target = npmod.trace(target, axis1=1, axis2=2)
-    fidelity = (npmod.square(tr_target.real) + npmod.square(tr_target.imag)) / (target.shape[-1] ** 2)
+    fidelity = trace_norm_squared(target, npmod=npmod)
 
     return fidelity

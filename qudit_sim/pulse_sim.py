@@ -1,6 +1,7 @@
 """Pulse simulation frontend."""
 
 from typing import Any, Dict, List, Tuple, Sequence, Optional, Union
+import typing
 import os
 import tempfile
 import logging
@@ -79,9 +80,10 @@ def pulse_sim(
     zip_list = []
 
     parallel_params = [hgen, tlist, psi0, args, e_ops, rwa, keep_callable]
+    element_types = [HamiltonianBuilder, (np.ndarray, tuple, dict), qtp.Qobj, None, Sequence, bool, bool]
 
-    for param in parallel_params:
-        if isinstance(param, list):
+    for param, typ in zip(parallel_params, element_types):
+        if isinstance(param, list) and (typ is None or all(isinstance(elem, typ) for elem in param)):
             if num_tasks is None:
                 num_tasks = len(param)
             elif num_tasks != len(param):

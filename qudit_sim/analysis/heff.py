@@ -1,14 +1,21 @@
 """Effective Hamiltonian analysis."""
 
-from typing import Tuple, List, Optional, Dict, Hashable
+from typing import Tuple, List, Sequence, Optional, Dict, Hashable, Union, Any
 import logging
 import numpy as np
-from IPython.display import Latex
 import h5py
 import scipy.optimize as sciopt
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.markers import MarkerStyle
+
+try:
+    get_ipython()
+except NameError:
+    has_ipython = False
+else:
+    has_ipython = True
+    from IPython.display import Latex
 
 import rqutils.paulis as paulis
 from rqutils.math import matrix_angle
@@ -18,13 +25,16 @@ from ..pulse_sim import pulse_sim
 from ..find_heff import find_heff
 from ..heff_tools import unitary_subtraction, heff_fidelity
 from ..util import FrequencyScale
+from .decompositions import print_components
 
 def heff_analysis(
     hgen: HamiltonianBuilder,
     drive_def: List[Tuple[Hashable, float, complex]],
     comp_dim: int = 2,
-    method: str = 'fidelity',
-    method_params: Optional[Dict] = None,
+    optimizer: str = 'adam',
+    optimizer_args: Any = 0.05,
+    max_updates: int = 10000,
+    convergence: float = 1.e-4,
     num_drive_cycles: Tuple[int, int, int] = (500, 1000, 20),
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING
@@ -59,20 +69,22 @@ def heff_analysis(
 
     sim_results = pulse_sim(hgen, tlist, rwa=False, save_result_to=save_result_to, log_level=log_level)
 
-    components_list = find_heff(sim_results, comp_dim=comp_dim, method=method, method_params=method_params,
+    components_list = find_heff(sim_results, comp_dim=comp_dim, optimizer=optimizer,
+                                optimizer_args=optimizer_args, max_updates=max_updates,
+                                convergence=convergence,
                                 save_result_to=save_result_to, log_level=log_level)
 
-    components = np.array(components_list)
+    components_list = np.array(components_list)
 
     # duration-weighted average of Heff, offset, and offset range components
     # (longer-time simulation result is preferred)
-    components_avg = np.sum(components.reshape(durations.shape[0], -1) * durations[:, None], axis=0)
+    components_avg = np.sum(components_list.reshape(durations.shape[0], -1) * durations[:, None], axis=0)
     components_avg /= np.sum(durations)
-    components_avg = components_avg.reshape(components.shape)
+    components_avg = components_avg.reshape(components_list.shape[1:])
 
-    uncertainties = np.amax(components, axis=0) - np.amin(components, axis=0)
+    uncertainties = np.amax(components_list, axis=0) - np.amin(components_list, axis=0)
 
-    return components, uncertainties
+    return components_avg, uncertainties
 
 
 def fidelity_loss(
@@ -105,6 +117,49 @@ def fidelity_loss(
         fid_loss[idx] = best_fidelity - test_fidelity
 
     return fid_loss
+
+
+def print_heff_fit_result(
+    components: np.ndarray,
+    symbol: Optional[str] = None,
+    precision: int = 3,
+    threshold: float = 1.e-3,
+    scale: FrequencyScale = FrequencyScale.auto
+) -> Union[Latex, str]:
+    r"""Compose a LaTeX expression of the effective Hamiltonian from the Pauli components.
+
+    Args:
+        components: Array of Pauli components returned by find_heff.
+        uncertainties: Array of component uncertainties.
+        symbol: Symbol to use instead of :math:`\lambda` for the matrices.
+        precision: Number of digits below the decimal point to show.
+        threshold: Ignore terms with absolute components below this value relative to the given scale
+            (if >0) or to the maximum absolute component (if <0).
+        scale: Normalize the components with the frequency scale. If None, components are taken
+            to be dimensionless. If `FrequencyScale.auto`, scale is found from the maximum absolute
+            value of the components. String `'pi'` is also allowed, in which case the components are
+            normalized by :math:`\pi`.
+
+    Returns:
+        A representation object for a LaTeX expression or an expression string for the effective Hamiltonian.
+    """
+    if scale is FrequencyScale.auto:
+        max_abs = np.amax(np.abs(components[0]))
+        scale = FrequencyScale.find_energy_scale(max_abs)
+
+    heff_lhs = r'\frac{H_{\mathrm{eff}}}{2\pi\,\mathrm{%s}}' % scale.frequency_unit
+    offset_lhs = r'\Theta_{\mathrm{off}}'
+
+    overall = r'i \mathrm{log} U_{\mathrm{eff}}(t) = H_{\mathrm{eff}} t + \Theta_{\mathrm{off}}'
+    heff = print_components(components[0], symbol=symbol, precision=precision, threshold=threshold,
+                            scale=scale, lhs_label=heff_lhs)
+    offset = print_components(components[1], uncertainties=components[2], symbol=symbol, precision=precision,
+                              threshold=threshold, scale=None, lhs_label=offset_lhs)
+
+    if has_ipython:
+        return Latex(fr'\begin{{split}} {overall} \end{{split}} {heff.data} {offset.data}')
+    else:
+        return f'{overall}\n{heff}\n{offset}'
 
 
 def inspect_heff_fit(
@@ -156,7 +211,6 @@ def inspect_heff_fit(
 
     tlist *= tscale.frequency_value
     components[0] /= tscale.frequency_value
-    adjustments /= tscale.frequency_value
 
     ilogus = -matrix_angle(time_evolution)
     ilogu_compos = paulis.components(ilogus, dim=dim).real
@@ -191,6 +245,8 @@ def inspect_heff_fit(
     figures.append(fig)
     fig.suptitle(r'Original time evolution vs $H_{eff}$', fontsize=24)
 
+    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+
     _plot_ilogu_compos(axes, ilogu_compos, num_qudits, num_sim_levels, indices_ilogu, tlist, tscale,
                        comp_dim, align_ylim=align_ylim)
 
@@ -199,11 +255,9 @@ def inspect_heff_fit(
         ax = axes[iax]
         basis_index = np.unravel_index(basis_index_flat, pauli_dim)
         central = components[(0,) + basis_index] * tlist
-        line = ax.plot(tlist, central)
-        ax.plot(tlist, central - components[(2,) + basis_index], ls='--', color=line.color)
-        ax.plot(tlist, central + components[(2,) + basis_index], ls='--', color=line.color)
-
-    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+        ax.plot(tlist, central)
+        ax.plot(tlist, central - components[(2,) + basis_index], ls='--', color=colors[1])
+        ax.plot(tlist, central + components[(2,) + basis_index], ls='--', color=colors[1])
 
     handles = [
         mpl.lines.Line2D([0.], [0.], color=colors[0]),
@@ -223,6 +277,13 @@ def inspect_heff_fit(
     ## Plot individual pauli components
     _plot_ilogu_compos(axes, ilogtarget_compos, num_qudits, num_sim_levels, indices_ilogtarget,
                        tlist, tscale, comp_dim, align_ylim=align_ylim)
+
+    ## Add offset bands
+    for iax, basis_index_flat in enumerate(indices_ilogtarget):
+        ax = axes[iax]
+        basis_index = np.unravel_index(basis_index_flat, pauli_dim)
+        ax.axhline(components[(2,) + basis_index], ls='--', color=colors[1])
+        ax.axhline(-components[(2,) + basis_index], ls='--', color=colors[1])
 
     if digest:
         ## Third figure: fit digest plots
@@ -403,7 +464,7 @@ def plot_amplitude_scan(
 
     # Array for polynomial fit results
 
-    coefficients = np.zeros(components.shape[1:] + (max_poly_order + 1,), dtype=float)
+    coefficients = np.zeros(heff_compos.shape[1:] + (max_poly_order + 1,), dtype=float)
 
     if num_qudits > 1 and num_above_threshold > 6:
         # Which Pauli components of the first qudit have plots to draw?
@@ -560,7 +621,7 @@ def print_amplitude_scan(
         if np.allclose(coefficients[index], np.zeros(poly_order)):
             continue
 
-        line = fr'\frac{{\nu_{{{basis_labels[index]}}}}}{{\mathrm{{{compo_scale.frequency_unit}}}}} &='
+        line = fr'\frac{{\nu_{{{basis_labels[index]}}}}}{{2\pi\,\mathrm{{{compo_scale.frequency_unit}}}}} &='
 
         for order, p in enumerate(coefficients[index]):
             if p == 0.:
@@ -593,6 +654,6 @@ def print_amplitude_scan(
         lines.append(line)
 
     linebreak = r' \\ '
-    expr = Latex(fr'\begin{{align}}{linebreak.join(lines)}\end{{align}} A: amplitude in $\mathrm{{{amp_scale.frequency_unit}}}$')
+    expr = Latex(fr'\begin{{align}}{linebreak.join(lines)}\end{{align}} A: amplitude in $2\pi\,\mathrm{{{amp_scale.frequency_unit}}}$')
 
     return expr

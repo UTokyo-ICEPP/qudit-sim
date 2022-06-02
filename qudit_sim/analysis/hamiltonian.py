@@ -5,15 +5,16 @@ import numpy as np
 import qutip as qtp
 
 try:
-    from IPython.display import Latex
-except ImportError:
+    get_ipython()
+except NameError:
     has_ipython = False
 else:
     has_ipython = True
+    from IPython.display import Latex
 
 from rqutils.qprint import QPrintBraKet
 
-from .util import HamiltonianCoefficient
+from ..util import HamiltonianCoefficient
 
 def print_hamiltonian(
     hamiltonian: List[Union[qtp.Qobj, Tuple[qtp.Qobj, HamiltonianCoefficient]]],

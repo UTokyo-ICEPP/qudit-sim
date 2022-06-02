@@ -13,11 +13,12 @@ import jax.numpy as jnp
 import optax
 
 import rqutils.paulis as paulis
-from rqutils.math import matrix_angle
+from rqutils.math import matrix_exp, matrix_angle
 
 from .util import PulseSimResult
 from .config import config
 from .parallel import parallel_map
+from .heff_tools import unitary_subtraction, trace_norm_squared
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ def find_heff(
     optimizer: str = 'adam',
     optimizer_args: Any = 0.05,
     max_updates: int = 10000,
-    convergence: float = 1.e-5,
+    convergence: float = 1.e-4,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
 ) -> Union[np.ndarray, List[np.ndarray]]:
@@ -114,20 +115,21 @@ def _run_single(
             out.create_dataset('time_evolution', data=time_evolution)
             out.create_dataset('tlist', data=tlist)
 
-    heff_compos, offset_compos = _fidelity_maximization(time_evolution,
-                                                        tlist,
-                                                        dim,
-                                                        optimizer,
-                                                        optimizer_args,
-                                                        max_updates,
-                                                        convergence,
-                                                        save_result_to)
+    heff_compos, offset_compos = _maximize_fidelity(time_evolution,
+                                                    tlist,
+                                                    dim,
+                                                    optimizer,
+                                                    optimizer_args,
+                                                    max_updates,
+                                                    convergence,
+                                                    save_result_to)
 
-    offset_range = _offset_range_estimation(time_evolution,
-                                            tlist,
-                                            dim,
-                                            heff_compos,
-                                            offset_compos)
+    offset_range = _estimate_offset_range(time_evolution,
+                                          tlist,
+                                          dim,
+                                          heff_compos,
+                                          offset_compos,
+                                          save_result_to)
 
     components = np.stack((heff_compos, offset_compos, offset_range), axis=0)
 
@@ -147,7 +149,10 @@ def _run_single(
     return components
 
 
-def _fidelity_maximization(
+_vexpm = jax.vmap(jax.scipy.linalg.expm, in_axes=0, out_axes=0)
+_matexp = partial(matrix_exp, hermitian=-1, npmod=jnp)
+
+def _maximize_fidelity(
     time_evolution: np.ndarray,
     tlist: np.ndarray,
     dim: Tuple[int, ...],
@@ -170,6 +175,8 @@ def _fidelity_maximization(
     basis = paulis.paulis(dim)
     # Flattened list of basis operators excluding the identity operator
     basis_list = jax.device_put(basis.reshape(-1, *basis.shape[-2:])[1:], device=jax_device)
+    # Matrix size of the Pauli products
+    matrix_dim = np.prod(dim)
 
     ## Set the initial Heff values from a rough slope estimate
     # Compute ilog(U(t))
@@ -187,7 +194,7 @@ def _fidelity_maximization(
     if last_valid_tidx <= 1:
         raise RuntimeError('Failed to obtain an initial estimate of the slopes')
 
-    ilogu_compos = paulis.components(ilogus, dim=dim).real.reshape(-1)[1:]
+    ilogu_compos = paulis.components(ilogus, dim=dim).real
 
     init = ilogu_compos[last_valid_tidx - 1] / tlist[last_valid_tidx - 1]
 
@@ -204,10 +211,28 @@ def _fidelity_maximization(
     time_evolution = jax.device_put(time_evolution, device=jax_device)
     tlist_norm = jax.device_put(tlist / time_norm, device=jax_device)
 
+    ## Loss function
+    offdiagonals = np.nonzero(paulis.symmetry(dim).reshape(-1)[1:])
+
     @partial(jax.jit, device=jax_device)
     def _loss_fn(heff_compos, offset_compos):
-        fidelity = heff_fidelity(time_evolution, heff_compos, offset_compos, tlist_norm,
-                                 basis_list=basis_list, npmod=jnp)
+        # The following basically computes the same thing as heff_tools.heff_fidelity.
+        # We need to reimplement the fidelity calculation here because the gradient
+        # diverges when matrix_exp is used with a diagonal hermitian where some parameters
+        # only control off-diagonal elements.
+
+        components = heff_compos[None, :] * tlist_norm[:, None] + offset_compos
+        is_diagonal = ~jnp.any(components.T[offdiagonals], axis=0)
+        has_diagonal = jnp.any(is_diagonal)
+
+        mat = 1.j * jnp.tensordot(components, basis_list, (1, 0))
+
+        unitary = jax.lax.cond(has_diagonal, _vexpm, _matexp, mat)
+
+        target = jnp.matmul(time_evolution, unitary)
+
+        fidelity = trace_norm_squared(target, npmod=jnp)
+
         return -jnp.mean(fidelity)
 
     if optimizer == 'minuit':
@@ -307,7 +332,7 @@ def _fidelity_maximization(
     return heff_compos, offset_compos
 
 
-def _offset_range_estimation(
+def _estimate_offset_range(
     time_evolution: np.ndarray,
     tlist: np.ndarray,
     dim: Tuple[int, ...],

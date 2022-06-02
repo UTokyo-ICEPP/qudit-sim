@@ -6,17 +6,18 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 
 try:
-    from IPython.display import Latex
-except ImportError:
+    get_ipython()
+except NameError:
     has_ipython = False
 else:
     has_ipython = True
+    from IPython.display import Latex
 
 from rqutils.math import matrix_angle
 from rqutils.qprint import QPrintPauli
 import rqutils.paulis as paulis
 
-from .util import FrequencyScale, PulseSimResult
+from ..util import FrequencyScale, PulseSimResult
 
 def print_components(
     components: np.ndarray,
@@ -24,6 +25,7 @@ def print_components(
     symbol: Optional[str] = None,
     precision: int = 3,
     threshold: float = 1.e-3,
+    lhs_label: Optional[str] = None,
     scale: Union[FrequencyScale, str, None] = FrequencyScale.auto
 ) -> Union[Latex, str]:
     r"""Compose a LaTeX expression of the effective Hamiltonian from the Pauli components.
@@ -50,13 +52,16 @@ def print_components(
 
     if scale is None:
         scale_omega = 1.
-        lhs_label = r'i \mathrm{log} U'
+        if lhs_label is None:
+            lhs_label = r'i \mathrm{log} U'
     elif scale == 'pi':
         scale_omega = np.pi
-        lhs_label = r'\frac{i \mathrm{log} U}{\pi}'
+        if lhs_label is None:
+            lhs_label = r'\frac{i \mathrm{log} U}{\pi}'
     else:
         scale_omega = scale.pulsatance_value
-        lhs_label = r'\frac{H_{\mathrm{eff}}}{\mathrm{%s}}' % scale.frequency_unit
+        if lhs_label is None:
+            lhs_label = r'\frac{H}{2\pi\,\mathrm{%s}}' % scale.frequency_unit
 
     components = components / scale_omega
     max_abs /= scale_omega
@@ -130,16 +135,14 @@ def plot_components(
     else:
         scale_omega = scale.pulsatance_value
         # If we normalize by 2*pi*frequency, the displayed values are in frequency
-        ylabel = r'$\nu\,(\mathrm{' + scale.frequency_unit + '})$'
+        ylabel = r'$\nu\,(2\pi\,\mathrm{' + scale.frequency_unit + '})$'
 
     # Dividing by omega -> now everything is in terms of frequency (not angular)
     # Note: Don't use '/='!
     components = components / scale_omega
-    uncertainties = uncertainties / scale_omega
 
     if ignore_identity:
         components.reshape(-1)[0] = 0.
-        uncertainties.reshape(-1)[0] = 0.
 
     # Negative threshold specified -> relative to max
     if threshold < 0.:
@@ -149,8 +152,17 @@ def plot_components(
     nterms = np.count_nonzero(np.abs(components) > threshold)
     indices = np.unravel_index(flat_indices[:nterms], components.shape)
 
+    if uncertainties is None:
+        yerr = None
+    else:
+        uncertainties = uncertainties / scale_omega
+        if ignore_identity:
+            uncertainties.reshape(-1)[0] = 0.
+
+        yerr = uncertainties[indices]
+
     fig, ax = plt.subplots(1, 1)
-    ax.bar(np.arange(nterms), components[indices], yerr=uncertainties[indices])
+    ax.bar(np.arange(nterms), components[indices], yerr=yerr)
 
     ax.axhline(0., color='black', linewidth=0.5)
 
