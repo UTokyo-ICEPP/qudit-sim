@@ -119,6 +119,10 @@ class HamiltonianBuilder:
         """Qudit parameters."""
         return self._qudit_params[qudit_id]
 
+    def qudit_index(self, qudit_id: Hashable) -> int:
+        """Qudit index."""
+        return next(idx for idx, qid in enumerate(self._qudit_params) if qid == qudit_id)
+
     def coupling(self, q1: Hashable, q2: Hashable) -> float:
         """Coupling constant between the two qudits."""
         return self._coupling[frozenset({self._qudit_params[q1], self._qudit_params[q2]})]

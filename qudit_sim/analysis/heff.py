@@ -254,7 +254,7 @@ def inspect_heff_fit(
     for iax, basis_index_flat in enumerate(indices_ilogu):
         ax = axes[iax]
         basis_index = np.unravel_index(basis_index_flat, pauli_dim)
-        central = components[(0,) + basis_index] * tlist
+        central = components[(0,) + basis_index] * tlist + components[(1,) + basis_index]
         ax.plot(tlist, central)
         ax.plot(tlist, central - components[(2,) + basis_index], ls='--', color=colors[1])
         ax.plot(tlist, central + components[(2,) + basis_index], ls='--', color=colors[1])
@@ -503,8 +503,8 @@ def plot_amplitude_scan(
         ax.set_ylim(ymin * 1.2, ymax * 1.2)
         ax.grid(True)
         # Since amp and nu are normalized by (2*pi*frequency), displayed values are frequencies
-        ax.set_xlabel(f'Drive amplitude ({amp_scale.frequency_unit})')
-        ax.set_ylabel(fr'$\nu$ ({compo_scale.frequency_unit})')
+        ax.set_xlabel(fr'Drive amplitude ($2\pi\,\mathrm{{{amp_scale.frequency_unit}}}$)')
+        ax.set_ylabel(fr'$\nu$ ($2\pi\,\mathrm{{{compo_scale.frequency_unit}}}$)')
         ax.legend()
 
     fig.tight_layout()
