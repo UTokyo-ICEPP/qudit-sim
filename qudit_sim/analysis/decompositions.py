@@ -142,7 +142,8 @@ def plot_components(
     components = components / scale_omega
 
     if ignore_identity:
-        components.reshape(-1)[0] = 0.
+        identity_index = (0,) * len(components.shape)
+        components[identity_index] = 0.
 
     # Negative threshold specified -> relative to max
     if threshold < 0.:
@@ -157,7 +158,7 @@ def plot_components(
     else:
         uncertainties = uncertainties / scale_omega
         if ignore_identity:
-            uncertainties.reshape(-1)[0] = 0.
+            uncertainties[identity_index] = 0.
 
         yerr = uncertainties[indices]
 
@@ -201,7 +202,7 @@ def gate_components(
 
 def _single_gate_components(sim_result, comp_dim):
     gate = sim_result.states[-1]
-    components = paulis.components(-matrix_angle(gate)).real
+    components = paulis.components(-matrix_angle(gate), sim_result.dim).real
 
     if comp_dim is not None and sim_result.dim[0] != comp_dim:
         components = paulis.truncate(components, (comp_dim,) * len(sim_result.dim))

@@ -132,7 +132,7 @@ def parallel_map(
         else:
             arg_list = list((tuple(), k) for k in kwargs)
 
-    assert arg_list is not None
+    assert arg_list is not None, 'args or kwarg_keys must be set'
 
     logger.info('Starting %d parallel execution of %s', len(arg_list), target.__name__)
 
@@ -154,7 +154,7 @@ def parallel_map(
             if arg_position is None:
                 a += common_args
             elif isinstance(arg_position, int):
-                assert len(a) == 1
+                assert len(a) == 1, 'arg_position is an integer but the number of positional arguments is not 1'
                 a = common_args[:arg_position] + a + common_args[arg_position:]
             else:
                 newargs = []
