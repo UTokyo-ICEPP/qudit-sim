@@ -15,8 +15,6 @@ import numpy as np
 from .pulse import PulseSequence
 from .util import HamiltonianCoefficient
 
-REL_FREQUENCY_EPSILON = 1.e-7
-
 def cos_freq(freq, phase=0.):
     """`cos(freq * t + phase)`"""
     return lambda t, args: np.cos(freq * t + phase)
@@ -122,7 +120,7 @@ class DriveTerm:
 
     def _generate_fn_rwa(self, amplitude, frame_frequency, drive_base):
         detuning = self.frequency - frame_frequency
-        is_resonant = (abs(detuning) < REL_FREQUENCY_EPSILON * frame_frequency)
+        is_resonant = np.isclose(detuning, 0.)
 
         if isinstance(amplitude, (float, complex)):
             # static envelope
