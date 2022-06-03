@@ -726,7 +726,7 @@ class HamiltonianBuilder:
             points_per_cycle: Number of points per cycle at the highest frequency.
             num_cycles: Number of overall cycles.
             duration: Maximum value of the tlist.
-            num_points: Total number of time points.
+            num_points: Total number of time points including 0.
             rwa: Whether to use the rotating wave approximation to find the maximum frequency.
 
         Returns:
@@ -756,13 +756,13 @@ class HamiltonianBuilder:
 
         if num_cycles is not None:
             duration = cycle * num_cycles
-            num_points = points_per_cycle * num_cycles
+            num_points = points_per_cycle * num_cycles + 1
 
         elif duration is not None:
-            num_points = int(points_per_cycle * duration / cycle)
+            num_points = np.round(points_per_cycle * duration / cycle).astype(int) + 1
 
         elif num_points is not None:
-            duration = cycle * num_points / points_per_cycle
+            duration = cycle * (num_points - 1) / points_per_cycle
 
         return np.linspace(0., duration, num_points)
 

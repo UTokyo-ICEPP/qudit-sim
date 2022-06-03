@@ -128,10 +128,10 @@ def plot_components(
 
     if scale is None:
         scale_omega = 1.
-        ylabel = r'$\nu$'
+        ylabel = r'$\theta$'
     elif scale == 'pi':
         scale_omega = np.pi
-        ylabel = r'$\nu/\pi$'
+        ylabel = r'$\theta/\pi$'
     else:
         scale_omega = scale.pulsatance_value
         # If we normalize by 2*pi*frequency, the displayed values are in frequency
