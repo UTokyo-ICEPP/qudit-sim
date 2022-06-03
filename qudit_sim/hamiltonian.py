@@ -23,12 +23,9 @@ import qutip as qtp
 
 from .pulse import PulseSequence
 from .drive import DriveTerm, cos_freq, sin_freq
+from .util import Frame
 
-@dataclass(frozen=True)
-class Frame:
-    """Frame specification for a single level gap of a qudit."""
-    frequency: np.ndarray
-    phase: np.ndarray
+FrameSpec = Union[str, Dict[Hashable, Frame], Sequence[Frame]]
 
 @dataclass(frozen=True)
 class QuditParams:
@@ -113,13 +110,21 @@ class HamiltonianBuilder:
 
         return max(self._max_frequency_int, self._max_frequency_drive)
 
-    def qudit_params(self, qudit_id: Hashable) -> QuditParams:
-        """Qudit parameters."""
-        return self._qudit_params[qudit_id]
+    def qudit_ids(self) -> List[Hashable]:
+        """List of qudit IDs."""
+        return list(self._qudit_params.keys())
+
+    def qudit_id(self, idx: int) -> Hashable:
+        """Qudit ID for the given index."""
+        return self.qudit_ids()[idx]
 
     def qudit_index(self, qudit_id: Hashable) -> int:
         """Qudit index."""
         return next(idx for idx, qid in enumerate(self._qudit_params) if qid == qudit_id)
+
+    def qudit_params(self, qudit_id: Hashable) -> QuditParams:
+        """Qudit parameters."""
+        return self._qudit_params[qudit_id]
 
     def coupling(self, q1: Hashable, q2: Hashable) -> float:
         """Coupling constant between the two qudits."""
@@ -276,7 +281,10 @@ class HamiltonianBuilder:
 
         self._frame[qudit_id] = Frame(frequency=frequency, phase=phase)
 
-    def set_global_frame(self, frame: str) -> None:
+        self._max_frequency_int = None
+        self._max_frequency_drive = None
+
+    def set_global_frame(self, frame_spec: FrameSpec) -> None:
         r"""Set frames for all qudits globally.
 
         The allowed frame names are:
@@ -288,28 +296,123 @@ class HamiltonianBuilder:
           to cancel the phase drifts of single-qudit excitations.
 
         Args:
-            frame: 'qudit', 'lab', or 'dressed'.
+            frame_spec: Frame specification in dict or list form, or a frame name ('qudit', 'lab', or 'dressed').
         """
+        if isinstance(frame_spec, str):
+            if frame_spec == 'dressed' and len(self._coupling) == 0:
+                frame_spec = 'qudit'
 
-        if frame == 'dressed' and len(self._coupling) == 0:
-            frame = 'qudit'
+            if frame_spec == 'qudit':
+                for qid in self._qudit_params:
+                    self.set_frame(qid)
 
-        if frame == 'qudit':
-            for qid in self._qudit_params:
-                self.set_frame(qid)
+            elif frame_spec == 'lab':
+                for qid in self._qudit_params:
+                    self.set_frame(qid, frequency=np.zeros(self._num_levels - 1))
 
-        elif frame == 'lab':
-            for qid in self._qudit_params:
-                self.set_frame(qid, frequency=np.zeros(self._num_levels - 1))
+            elif frame_spec == 'dressed':
+                frequencies = self.dressed_frequencies()
 
-        elif frame == 'dressed':
-            frequencies = self.dressed_frequencies()
+                for qid, freq in frequencies.items():
+                    self.set_frame(qid, frequency=freq)
 
-            for qid, freq in frequencies.items():
-                self.set_frame(qid, frequency=freq)
+            else:
+                raise ValueError(f'Global frame {frame_spec} is not defined')
+
+        elif isinstance(frame_spec, dict):
+            for qudit_id, frame in frame_spec.items():
+                self.set_frame(qudit_id, frequency=frame.frequency, phase=frame.phase)
 
         else:
-            raise ValueError(f'Global frame {frame} is not defined')
+            qudit_ids = self.qudit_ids()
+            for idx, frame in enumerate(frame_spec):
+                self.set_frame(qudit_ids[idx], frequency=frame.frequency, phase=frame.phase)
+
+    def change_frame(
+        self,
+        tlist: np.ndarray,
+        states: np.ndarray,
+        from_frame: FrameSpec,
+        to_frame: Optional[FrameSpec] = None
+    ) -> np.ndarray:
+        """Apply the change-of-frame unitaries to states.
+
+        Args:
+            tlist: 1D array of time points.
+            states: Array of shape either ``(T, D, D)`` (operator evolution) or ``(T, D)`` (state evolution).
+            from_frame: Specification of original frame.
+            to_frame: Specification of new frame. If None, the current frame is used.
+
+        Returns:
+            An array corresponding to ``states`` with the change of frame applied.
+        """
+        def frame_arrays(frame_spec):
+            if isinstance(frame_spec, str):
+                if frame_spec == 'dressed' and len(self._coupling) == 0:
+                    frame_spec = 'qudit'
+
+                qudit_ids = self.qudit_ids()
+
+                if frame_spec == 'qudit':
+                    freqs = self.free_frequencies()
+                    frequencies = np.array([freqs[qudit_id] for qudit_id in qudit_ids])
+                elif frame_spec == 'lab':
+                    frequencies = np.zeros((self.num_qudits, self._num_levels - 1))
+                elif frame_spec == 'dressed':
+                    freqs = self.dressed_frequencies()
+                    frequencies = np.array([freqs[qudit_id] for qudit_id in qudit_ids])
+                else:
+                    raise ValueError(f'Global frame {frame_spec} is not defined')
+
+                phases = np.zeros((self.num_qudits, self._num_levels - 1))
+
+            elif isinstance(frame_spec, dict):
+                qudit_ids = self.qudit_ids()
+                frequencies = np.array([frame_spec[qudit_id].frequency for qudit_id in qudit_ids])
+                phases = np.array([frame_spec[qudit_id].phase for qudit_id in qudit_ids])
+
+            else:
+                frequencies = np.array([frame.frequency for frame in frame_spec])
+                phases = np.array([frame.phase for frame in frame_spec])
+
+            return frequencies, phases
+
+        if to_frame is None:
+            frequencies = np.array([frame.frequency for frame in self._frame.values()])
+            phases = np.array([frame.phase for frame in self._frame.values()])
+        else:
+            frequencies, phases = frame_arrays(to_frame)
+
+        from_freq, from_phase = frame_arrays(from_frame)
+
+        frequencies -= from_freq
+        phases -= from_phase
+
+        energies = np.concatenate((np.zeros(self.num_qudits)[:, None], np.cumsum(frequencies, axis=1)), axis=1)
+        offsets = np.concatenate((np.zeros(self.num_qudits)[:, None], np.cumsum(phases, axis=1)), axis=1)
+
+        en_diagonal = np.zeros(1)
+        for en_arr in energies:
+            en_diagonal = np.add.outer(en_diagonal, en_arr).reshape(-1)
+
+        offset_diagonal = np.zeros(1)
+        for off_arr in offsets:
+            offset_diagonal = np.add.outer(offset_diagonal, off_arr).reshape(-1)
+
+        diagonals = np.exp(1.j * (en_diagonal[None, :] * tlist[:, None] + offset_diagonal))
+
+        if len(states.shape) == 2:
+            # Left-multiplying by a diagonal is the same as element-wise multiplication
+            return diagonals * states
+
+        elif len(states.shape) == 3:
+            # Right-multiplying by the inverse of a diagonal unitary = element-wise multiplication
+            # of the columns by the conjugate
+            return diagonals[:, :, None] * states * diagonals[0].conjugate()
+
+        else:
+            raise ValueError('Invalid shape of states array')
+
 
     def add_coupling(self, q1: Hashable, q2: Hashable, value: float) -> None:
         """Add a coupling term between two qudits."""
@@ -417,7 +520,7 @@ class HamiltonianBuilder:
             qudit_op = qtp.Qobj(inpt=np.diag(diagonal))
 
             ops = [qtp.qeye(self._num_levels)] * self.num_qudits
-            ops[iq] = qudit_op
+            ops[self.qudit_index(qudit_id)] = qudit_op
 
             hdiag += qtp.tensor(ops)
 
@@ -527,7 +630,9 @@ class HamiltonianBuilder:
         # Construct the Qobj for each qudit/level first
         qops = list()
 
-        for qudit_id, frame in self._frame.items():
+        for iq, qudit_id in enumerate(self._frame):
+            frame = self._frame[qudit_id]
+
             for level in range(self._num_levels - 1):
                 cre = np.sqrt(level + 1) * qtp.basis(self._num_levels, level + 1) * qtp.basis(self._num_levels, level).dag()
 

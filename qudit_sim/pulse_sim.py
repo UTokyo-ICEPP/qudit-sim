@@ -205,5 +205,6 @@ def _run_single(
 
     expect = list(exp.copy() for exp in qtp_result.expect)
     dim = (hgen.num_levels,) * hgen.num_qudits
+    frame_tuple = tuple(hgen.frame(qudit_id) for qudit_id in hgen.qudit_ids())
 
-    return PulseSimResult(times=tlist, expect=expect, states=states, dim=dim)
+    return PulseSimResult(times=tlist, expect=expect, states=states, dim=dim, frame=frame_tuple)

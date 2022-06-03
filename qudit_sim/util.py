@@ -10,6 +10,13 @@ CallableCoefficient = Callable[[Union[float, np.ndarray], dict], Union[complex, 
 HamiltonianCoefficient = Union[str, np.ndarray, CallableCoefficient]
 
 @dataclass(frozen=True)
+class Frame:
+    """Frame specification for a single level gap of a qudit."""
+    frequency: np.ndarray
+    phase: np.ndarray
+
+
+@dataclass(frozen=True)
 class PulseSimResult:
     """Return type of pulse_sim.
 
@@ -19,6 +26,7 @@ class PulseSimResult:
     expect: Union[np.ndarray, None]
     states: Union[np.ndarray, None]
     dim: Tuple[int, ...]
+    frame: Tuple[Frame, ...]
 
 
 _frequency_units = list(f'{f}{u}' for u in ['Hz', 'kHz', 'MHz', 'GHz', 'mHz'] for f in ['', '10', '100'])
