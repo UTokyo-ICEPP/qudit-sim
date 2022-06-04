@@ -296,6 +296,10 @@ class GaussianSquare(Pulse):
         self.gauss_right = Gaussian(duration=self.t1 * 2., amp=amp, sigma=sigma,
                                     center=None, zero_ends=zero_ends)
 
+    @property
+    def sigma(self) -> float:
+        return self.gauss_left.sigma
+
     def _right_tail(self, t, args):
         return self.gauss_right(t - self.width, args)
 
