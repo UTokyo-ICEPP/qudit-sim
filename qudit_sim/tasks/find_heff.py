@@ -1,6 +1,6 @@
 """Effective Hamiltonian extraction frontend."""
 
-from typing import Any, List, Tuple, Optional, Union
+from typing import Any, List, Tuple, Optional, Hashable, Union
 import os
 from functools import partial
 import logging
@@ -15,16 +15,28 @@ import optax
 import rqutils.paulis as paulis
 from rqutils.math import matrix_exp, matrix_angle
 
-from .util import PulseSimResult
-from .config import config
-from .parallel import parallel_map
+from ..config import config
+from ..parallel import parallel_map
+from ..hamiltonian import HamiltonianBuilder
+from ..util import PulseSimResult
+from ..pulse import GaussianSquare
+from ..pulse_sim import pulse_sim
 from .heff_tools import unitary_subtraction, trace_norm_squared
+
+QuditSpec = Union[Hashable, Tuple[Hashable, ...]]
+FrequencySpec = Union[float, Tuple[float, ...]]
+AmplitudeSpec = Union[float, complex, Tuple[Union[float, complex], ...]]
 
 logger = logging.getLogger(__name__)
 
 def find_heff(
-    sim_result: Union[PulseSimResult, List[PulseSimResult]],
+    hgen: HamiltonianBuilder,
+    qudit: QuditSpec,
+    frequency: Union[FrequencySpec, List[FrequencySpec], np.ndarray],
+    amplitude: Union[AmplitudeSpec, List[AmplitudeSpec], np.ndarray],
     comp_dim: int = 2,
+    ramp_cycles: float = 100.,
+    flattop_cycles: float = 1000.,
     optimizer: str = 'adam',
     optimizer_args: Any = 0.05,
     max_updates: int = 10000,
@@ -50,49 +62,125 @@ def find_heff(
     original_log_level = logger.level
     logger.setLevel(log_level)
 
-    if isinstance(sim_result, list):
-        num_tasks = len(sim_result)
+    hgen = hgen.copy(clear_drive=True)
 
-        common_kwargs = {'comp_dim': comp_dim, 'optimizer': optimizer, 'optimizer_args': optimizer_args,
-                         'max_updates': max_updates, 'convergence': convergence, 'log_level': log_level}
+    if isinstance(frequency, np.ndarray):
+        frequency = list(frequency)
+    if isinstance(amplitude, np.ndarray):
+        amplitude = list(amplitude)
+
+    if isinstance(frequency, list) and isinstance(amplitude, list):
+        if len(frequency) != len(amplitude):
+            raise ValueError('Inconsistent length of frequency and amplitude lists')
+
+        drive_spec = list(zip(frequency, amplitude))
+
+    elif isinstance(frequency, list):
+        drive_spec = list((freq, amplitude) for freq in frequency)
+
+    elif isinstance(amplitude, list):
+        drive_spec = list((frequency, amp) for amp in amplitude)
+
+    else:
+        drive_spec = (frequency, amplitude)
+
+    if isinstance(drive_spec, list):
+        num_tasks = len(drive_spec)
 
         if save_result_to:
             if not (os.path.exists(save_result_to) and os.path.isdir(save_result_to)):
                 os.makedirs(save_result_to)
 
-            save_result_path = lambda itask: os.path.join(save_result_to, f'heff_{itask}')
+            save_result_path = lambda prefix, itask: os.path.join(save_result_to, f'{prefix}_{itask}')
         else:
-            save_result_path = lambda itask: None
+            save_result_path = lambda prefix, itask: None
 
         args = list()
-        kwarg_keys = ('logger_name', 'save_result_to')
-        kwarg_values = list()
+        flattop_times = list()
+        for spec in drive_spec:
+            hgen, duration, flattop_time = _add_drive(hgen, spec, ramp_cycles, flattop_cycles)
+            tlist = {'points_per_cycle': 8, 'duration': duration}
+            args.append((hgen, tlist))
+            flattop_times.append(flattop_time)
 
-        for itask, result in enumerate(sim_result):
-            args.append((result.states, result.times, result.dim))
-            kwarg_values.append((
-                f'{__name__}.{itask}',
-                save_result_path(itask)))
+        kwarg_keys = ('save_result_to',)
+        kwarg_values = list((save_result_path('sim', itask),) for itask in range(num_tasks))
+        common_kwargs = {'rwa': False, 'log_level': log_level}
 
-        components = parallel_map(_run_single, args=args, kwarg_keys=kwarg_keys,
-                                  kwarg_values=kwarg_values, common_kwargs=common_kwargs,
-                                  log_level=log_level, thread_based=True)
+        sim_results = parallel_map(pulse_sim, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
+                                   common_kwargs=common_kwargs, log_level=log_level)
+
+        args = list(zip(sim_results, flattop_times))
+        kwarg_keys = ('logger_name', 'save_result_to',)
+        kwarg_values = list((f'{__name__}.{itask}', save_result_path('heff', itask)) for itask in range(num_tasks))
+        common_kwargs = {'comp_dim': comp_dim, 'optimizer': optimizer, 'optimizer_args': optimizer_args,
+                         'max_updates': max_updates, 'convergence': convergence, 'log_level': log_level}
+
+        components = parallel_map(_run_single, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
+                                  common_kwargs=common_kwargs, log_level=log_level, thread_based=True)
 
     else:
-        components = _run_single(sim_result.states, sim_result.times, sim_result.dim,
-                                 comp_dim=comp_dim, optimizer=optimizer, optimizer_args=optimizer_args,
-                                 max_updates=max_updates, convergence=convergence,
-                                 save_result_to=save_result_to, log_level=log_level)
+        if save_result_to:
+            save_result_to_sim = f'{save_result_to}_sim'
+            save_result_to_heff = f'{save_result_to}_heff'
+
+        hgen, duration, flattop_time = _add_drive(hgen, drive_spec, ramp_cycles, flattop_cycles)
+        tlist = {'points_per_cycle': 8, 'duration': duration}
+
+        sim_result = pulse_sim(hgen, tlist, rwa=False, save_result_to=save_result_to_sim, log_level=log_level)
+
+        components = _run_single(sim_result, flattop_time, comp_dim=comp_dim, optimizer=optimizer,
+                                 optimizer_args=optimizer_args, max_updates=max_updates, convergence=convergence,
+                                 save_result_to=save_result_to_heff, log_level=log_level)
 
     logger.setLevel(original_log_level)
 
     return components
 
 
+def _add_drive(
+    hgen: HamiltonianBuilder,
+    drive_spec: Tuple[FrequencySpec, AmplitudeSpec],
+    ramp_cycles: float,
+    flattop_cycles: float
+) -> Tuple[HamiltonianBuilder, float, float]:
+
+    frequency, amplitude = drive_spec
+
+    hgen = hgen.copy(clear_drive=True)
+    hgen.set_global_frame('dressed')
+
+    if isinstance(qudit, tuple):
+        if not isinstance(frequency, tuple) or not isinstance(amplitude, tuple) or \
+            len(frequency) != len(qudit) or len(amplitude) != len(qudit):
+            raise RuntimeError('Inconsistent qudit, frequency, and amplitude specification')
+
+        max_cycle = 2. * np.pi / min(frequency)
+        duration = max_cycle * (ramp_cycles + flattop_cycles)
+        width = max_cycle * flattop_cycles
+        sigma = (duration - width) / 4.
+
+        for qid, freq, amp in zip(qudit, frequency, amplitude):
+            pulse = GaussianSquare(duration, amp, sigma, width, fall=False)
+            hgen.add_drive(qid, frequency=freq, amplitude=pulse)
+
+    else:
+        cycle = 2. * np.pi / frequency
+        duration = cycle * (ramp_cycles + flattop_cycles)
+        width = cycle * flattop_cycles
+        sigma = (duration - width) / 4.
+
+        pulse = GaussianSquare(duration, amplitude, sigma, width, fall=False)
+        hgen.add_drive(qudit, frequency=frequency, amplitude=pulse)
+
+    tlist = {'points_per_cycle': 8, 'duration': duration}
+
+    return hgen, duration, 4. * sigma
+
+
 def _run_single(
-    time_evolution: np.ndarray,
-    tlist: np.ndarray,
-    dim: tuple,
+    sim_result: PulseSimResult,
+    flattop_time: float,
     comp_dim: int,
     optimizer: str,
     optimizer_args: Any,
@@ -104,34 +192,26 @@ def _run_single(
 ):
     logger = logging.getLogger(logger_name)
 
-    matrix_dim = np.prod(dim)
-    assert time_evolution.shape == (tlist.shape[0], matrix_dim, matrix_dim), 'Inconsistent input shape'
-
     if save_result_to:
         with h5py.File(f'{save_result_to}.h5', 'w') as out:
-            out.create_dataset('num_qudits', data=len(dim))
-            out.create_dataset('num_sim_levels', data=dim[0])
+            out.create_dataset('num_qudits', data=len(sim_result.dim))
+            out.create_dataset('num_sim_levels', data=sim_result.dim[0])
             out.create_dataset('comp_dim', data=comp_dim)
-            out.create_dataset('time_evolution', data=time_evolution)
-            out.create_dataset('tlist', data=tlist)
+            out.create_dataset('time_evolution', data=sim_result.states)
+            out.create_dataset('tlist', data=sim_result.times)
 
-    heff_compos, offset_compos = _maximize_fidelity(time_evolution,
-                                                    tlist,
-                                                    dim,
-                                                    optimizer,
-                                                    optimizer_args,
-                                                    max_updates,
-                                                    convergence,
-                                                    save_result_to)
+    t1 = np.searchsorted(sim_result.times, flattop_time, 'right') - 1
+    time_evolution = sim_result.states[t1:]
+    tlist = sim_result.times[t1:]
 
-    offset_range = _estimate_offset_range(time_evolution,
-                                          tlist,
-                                          dim,
-                                          heff_compos,
-                                          offset_compos,
-                                          save_result_to)
-
-    components = np.stack((heff_compos, offset_compos, offset_range), axis=0)
+    components = _maximize_fidelity(time_evolution,
+                                    tlist,
+                                    sim_result.dim,
+                                    optimizer,
+                                    optimizer_args,
+                                    max_updates,
+                                    convergence,
+                                    save_result_to)
 
     if dim[0] != comp_dim:
         reduced_dim = (comp_dim,) * len(dim)
@@ -327,24 +407,4 @@ def _maximize_fidelity(
     ## Recover the shape and normalization of the components arrays before returning
     heff_compos = np.concatenate(([0.], compos_norm / time_norm)).reshape(basis.shape[:-2])
 
-    offset_compos = np.concatenate(([0.], offset_compos)).reshape(basis.shape[:-2])
-
-    return heff_compos, offset_compos
-
-
-def _estimate_offset_range(
-    time_evolution: np.ndarray,
-    tlist: np.ndarray,
-    dim: Tuple[int, ...],
-    heff_compos: np.ndarray,
-    offset_compos: np.ndarray,
-    save_result_to: Union[str, None]
-) -> np.ndarray:
-    target = unitary_subtraction(time_evolution, heff_compos, offset_compos, tlist)
-    ilogtargets = -matrix_angle(target)
-    ilogtarget_compos = paulis.components(ilogtargets, dim=dim).real
-
-    offset_range = np.amax(ilogtarget_compos, axis=0) - np.amin(ilogtarget_compos, axis=0)
-    offset_range /= 2.
-
-    return offset_range
+    return heff_compos

@@ -16,7 +16,6 @@ See :doc:`/hamiltonian` for theoretical background.
 # and exploit such cases in the future.
 
 from typing import Any, Dict, Sequence, List, Tuple, Callable, Optional, Union, Hashable
-import copy
 from dataclasses import dataclass
 import numpy as np
 import qutip as qtp
@@ -766,6 +765,21 @@ class HamiltonianBuilder:
 
         return np.linspace(0., duration, num_points)
 
+    def copy(self, clear_drive: bool = False):
+        instance = HamiltonianBuilder(self._num_levels)
+
+        instance.default_frame = self.default_frame
+
+        # Not sure if copy.deepcopy keeps the dict ordering, so we insert by hand
+        instance._qudit_params.update(self._qudit_params.items())
+        instance._coupling.update(self._coupling.items())
+        instance._crosstalk.update(self._crosstalk.items())
+        if not clear_drive:
+            instance._drive.update(self._drive.items())
+        instance._frame.update(self._frame.items())
+
+        instance._max_frequency_int = self._max_frequency_int
+        instance._max_frequency_drive = None if clear_drive else self._max_frequency_drive
 
     def make_scan(
         self,
@@ -790,7 +804,7 @@ class HamiltonianBuilder:
         Returns:
             A list of copies of self varied over the specified attribute.
         """
-        copies = list(copy.deepcopy(self) for _ in range(len(values)))
+        copies = list(self.copy() for _ in range(len(values)))
 
         if scan_type == 'amplitude':
             for value, instance in zip(values, copies):
