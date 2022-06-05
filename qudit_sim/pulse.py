@@ -279,42 +279,71 @@ class GaussianSquare(Pulse):
         amp: Union[float, complex],
         sigma: float,
         width: float,
-        zero_ends: bool = True
+        zero_ends: bool = True,
+        rise: bool = True,
+        fall: bool = True
     ):
+        if not (rise or fall):
+            raise ValueError("That's just a square pulse, dude")
+
         super().__init__(duration)
 
         assert sigma > 1. * ns, 'Gaussian sigma must be greater than 1 ns'
         assert width < duration, 'GaussianSquare width must be less than duration'
 
-        self.t1 = (duration - width) / 2.
-
         self.amp = amp
+        self.sigma = sigma
         self.width = width
 
-        self.gauss_left = Gaussian(duration=self.t1 * 2., amp=amp, sigma=sigma,
-                                   center=None, zero_ends=zero_ends)
-        self.gauss_right = Gaussian(duration=self.t1 * 2., amp=amp, sigma=sigma,
-                                    center=None, zero_ends=zero_ends)
+        self._condlist = list()
+        self._funclist = list()
 
-    @property
-    def sigma(self) -> float:
-        return self.gauss_left.sigma
+        ramp_duration = duration - width
+        if rise and fall:
+            gauss_duration = ramp_duration
+        else:
+            gauss_duration = ramp_duration * 2.
 
-    def _right_tail(self, t, args):
-        return self.gauss_right(t - self.width, args)
+        if rise:
+            self.t_plateau = gauss_duration / 2.
+            self.gauss_rise = Gaussian(duration=gauss_duration, amp=amp, sigma=sigma,
+                                       center=None, zero_ends=zero_ends)
+
+            self._condlist.append(lambda t: t < self.t_plateau)
+            self._funclist.append(self.gauss_rise)
+        else:
+            self.t_plateau = 0.
+            self.gauss_rise = None
+
+        if fall:
+            self.gauss_fall = Gaussian(duration=gauss_duration, amp=amp, sigma=sigma,
+                                       center=None, zero_ends=zero_ends)
+
+            self._condlist.append(lambda t: t >= self.t_plateau + self.width)
+            self._funclist.append(self._fall_tail)
+        else:
+            self.gauss_fall = None
+
+        self._funclist.append(self.amp)
+
+    def _fall_tail(self, t, args):
+        gauss_t0 = self.t_plateau + self.width - self.gauss_fall.duration / 2.
+        return self.gauss_fall(t - gauss_t0, args)
+
+    def _make_condlist(self, t):
+        return list(cond(t) for cond in self._condlist)
 
     def __call__(self, t, args=None):
-        # piecewise determines the output dtype from the first argument
+        # np.piecewise determines the output dtype from the first argument
         tlist = np.asarray(t, dtype=np.complex128)
-        return np.piecewise(tlist,
-            [t < self.t1, t >= self.t1 + self.width],
-            [self.gauss_left, self._right_tail, self.amp],
-            args)
+        return np.piecewise(tlist, self._make_condlist(t), self._funclist, args)
 
     def _scale(self, c):
         self.amp *= c
-        self.gauss_left._scale(c)
-        self.gauss_right._scale(c)
+        if self.gauss_rise:
+            self.gauss_rise._scale(c)
+        if self.gauss_fall:
+            self.gauss_fall._scale(c)
 
 
 class Drag(Gaussian):
@@ -353,6 +382,29 @@ class Drag(Gaussian):
         dgauss = -(t - self.center) / np.square(self.sigma) * gauss
 
         return gauss + 1.j * self.beta * dgauss
+
+
+class Square(Pulse):
+    """Square (constant) pulse.
+
+    Args:
+        duration: Pulse duration.
+        amp: Pulse height relative to the drive base amplitude.
+    """
+    def __init__(
+        self,
+        duration: float,
+        amp: Union[float, complex]
+    ):
+        super().__init__(duration)
+
+        self.amp = complex(amp)
+
+    def __call__(self, t, args=None):
+        return np.full_like(t, self.amp)
+
+    def _scale(self, c):
+        self.amp *= c
 
 
 @dataclass(frozen=True)
