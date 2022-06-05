@@ -20,72 +20,9 @@ else:
 import rqutils.paulis as paulis
 from rqutils.math import matrix_angle
 
-from ..hamiltonian import HamiltonianBuilder
-from ..pulse_sim import pulse_sim
-from ..find_heff import find_heff
-from ..heff_tools import unitary_subtraction, heff_fidelity
+from ..apps.heff_tools import unitary_subtraction, heff_fidelity
 from ..util import FrequencyScale
 from .decompositions import print_components
-
-def heff_analysis(
-    hgen: HamiltonianBuilder,
-    drive_def: List[Tuple[Hashable, float, complex]],
-    comp_dim: int = 2,
-    optimizer: str = 'adam',
-    optimizer_args: Any = 0.05,
-    max_updates: int = 10000,
-    convergence: float = 1.e-4,
-    num_drive_cycles: Tuple[int, int, int] = (500, 1000, 20),
-    save_result_to: Optional[str] = None,
-    log_level: int = logging.WARNING
-) -> Tuple[np.ndarray, np.ndarray]:
-    r"""Run a full effective Hamiltonian analysis.
-
-    Given a HamiltonianBuilder object with the full specification offrequencies and couplings but
-    no drive information, add constant drive terms, run the effective Hamiltonian extraction from
-    simulations with several different durations, and compute the average and uncertainties of the
-    :math:`H_{\mathrm{eff}}` components.
-
-    The
-
-    Args:
-        hgen: Hamiltonian with no drive term.
-        drive_def: A list of drive term specifications (qudit id, frequency, amplitude).
-
-    Returns:
-        An array of effective Hamiltonian components and another array representing their
-        uncertainties.
-    """
-    max_frequency = 0.
-
-    for qudit_id, frequency, amplitude in drive_def:
-        hgen.add_drive(qudit_id, frequency=frequency, amplitude=amplitude)
-        max_frequency = max(max_frequency, frequency)
-
-    cycle = 2. * np.pi / max_frequency
-    durations = np.linspace(num_drive_cycles[0] * cycle, num_drive_cycles[1] * cycle, num_drive_cycles[2])
-
-    tlist = list({'points_per_cycle': 8, 'duration': duration} for duration in durations)
-
-    sim_results = pulse_sim(hgen, tlist, rwa=False, save_result_to=save_result_to, log_level=log_level)
-
-    components_list = find_heff(sim_results, comp_dim=comp_dim, optimizer=optimizer,
-                                optimizer_args=optimizer_args, max_updates=max_updates,
-                                convergence=convergence,
-                                save_result_to=save_result_to, log_level=log_level)
-
-    components_list = np.array(components_list)
-
-    # duration-weighted average of Heff, offset, and offset range components
-    # (longer-time simulation result is preferred)
-    components_avg = np.sum(components_list.reshape(durations.shape[0], -1) * durations[:, None], axis=0)
-    components_avg /= np.sum(durations)
-    components_avg = components_avg.reshape(components_list.shape[1:])
-
-    uncertainties = np.amax(components_list, axis=0) - np.amin(components_list, axis=0)
-
-    return components_avg, uncertainties
-
 
 def fidelity_loss(
     time_evolution: np.ndarray,
@@ -119,49 +56,6 @@ def fidelity_loss(
     return fid_loss
 
 
-def print_heff_fit_result(
-    components: np.ndarray,
-    symbol: Optional[str] = None,
-    precision: int = 3,
-    threshold: float = 1.e-3,
-    scale: FrequencyScale = FrequencyScale.auto
-) -> Union[Latex, str]:
-    r"""Compose a LaTeX expression of the effective Hamiltonian from the Pauli components.
-
-    Args:
-        components: Array of Pauli components returned by find_heff.
-        uncertainties: Array of component uncertainties.
-        symbol: Symbol to use instead of :math:`\lambda` for the matrices.
-        precision: Number of digits below the decimal point to show.
-        threshold: Ignore terms with absolute components below this value relative to the given scale
-            (if >0) or to the maximum absolute component (if <0).
-        scale: Normalize the components with the frequency scale. If None, components are taken
-            to be dimensionless. If `FrequencyScale.auto`, scale is found from the maximum absolute
-            value of the components. String `'pi'` is also allowed, in which case the components are
-            normalized by :math:`\pi`.
-
-    Returns:
-        A representation object for a LaTeX expression or an expression string for the effective Hamiltonian.
-    """
-    if scale is FrequencyScale.auto:
-        max_abs = np.amax(np.abs(components[0]))
-        scale = FrequencyScale.find_energy_scale(max_abs)
-
-    heff_lhs = r'\frac{H_{\mathrm{eff}}}{2\pi\,\mathrm{%s}}' % scale.frequency_unit
-    offset_lhs = r'\Theta_{\mathrm{off}}'
-
-    overall = r'i \mathrm{log} U_{\mathrm{eff}}(t) = H_{\mathrm{eff}} t + \Theta_{\mathrm{off}}'
-    heff = print_components(components[0], symbol=symbol, precision=precision, threshold=threshold,
-                            scale=scale, lhs_label=heff_lhs)
-    offset = print_components(components[1], uncertainties=components[2], symbol=symbol, precision=precision,
-                              threshold=threshold, scale=None, lhs_label=offset_lhs)
-
-    if has_ipython:
-        return Latex(fr'\begin{{split}} {overall} \end{{split}} {heff.data} {offset.data}')
-    else:
-        return f'{overall}\n{heff}\n{offset}'
-
-
 def inspect_heff_fit(
     filename: str,
     threshold: float = 0.01,
@@ -190,10 +84,13 @@ def inspect_heff_fit(
         comp_dim = int(source['comp_dim'][()])
         time_evolution = source['time_evolution'][()]
         tlist = source['tlist'][()]
+        fit_start = source['fit_start'][()]
         if num_sim_levels != comp_dim:
             components = source['components_original'][()]
         else:
             components = source['components'][()]
+
+        offset_components = source['offset_components'][()]
 
         try:
             loss = source['loss'][()]
@@ -210,18 +107,20 @@ def inspect_heff_fit(
         tscale = FrequencyScale.find_time_scale(tlist[-1])
 
     tlist *= tscale.frequency_value
-    components[0] /= tscale.frequency_value
+    components /= tscale.frequency_value
 
     ilogus = -matrix_angle(time_evolution)
     ilogu_compos = paulis.components(ilogus, dim=dim).real
     ilogu_compos = ilogu_compos.reshape(tlist.shape[0], -1)[:, 1:]
 
-    target = unitary_subtraction(time_evolution, components[0], components[1], tlist)
+    tlist_fit = tlist[fit_start:] - tlist[fit_start]
+
+    target = unitary_subtraction(time_evolution[fit_start:], components, offset_components, tlist_fit)
 
     ilogtargets, ilogvs = matrix_angle(target, with_diagonals=True)
     ilogtargets *= -1.
     ilogtarget_compos = paulis.components(ilogtargets, dim=dim).real
-    ilogtarget_compos = ilogtarget_compos.reshape(tlist.shape[0], -1)[:, 1:]
+    ilogtarget_compos = ilogtarget_compos.reshape(tlist_fit.shape[0], -1)[:, 1:]
 
     if limit_components is None:
         # Make a list of tuples from a tuple of arrays
@@ -254,10 +153,8 @@ def inspect_heff_fit(
     for iax, basis_index_flat in enumerate(indices_ilogu):
         ax = axes[iax]
         basis_index = np.unravel_index(basis_index_flat, pauli_dim)
-        central = components[(0,) + basis_index] * tlist + components[(1,) + basis_index]
-        ax.plot(tlist, central)
-        ax.plot(tlist, central - components[(2,) + basis_index], ls='--', color=colors[1])
-        ax.plot(tlist, central + components[(2,) + basis_index], ls='--', color=colors[1])
+        yval = components[basis_index] * tlist_fit + offset_components[basis_index]
+        ax.plot(tlist_fit + tlist[fit_start], yval)
 
     handles = [
         mpl.lines.Line2D([0.], [0.], color=colors[0]),
@@ -276,14 +173,7 @@ def inspect_heff_fit(
 
     ## Plot individual pauli components
     _plot_ilogu_compos(axes, ilogtarget_compos, num_qudits, num_sim_levels, indices_ilogtarget,
-                       tlist, tscale, comp_dim, align_ylim=align_ylim)
-
-    ## Add offset bands
-    for iax, basis_index_flat in enumerate(indices_ilogtarget):
-        ax = axes[iax]
-        basis_index = np.unravel_index(basis_index_flat, pauli_dim)
-        ax.axhline(components[(2,) + basis_index], ls='--', color=colors[1])
-        ax.axhline(-components[(2,) + basis_index], ls='--', color=colors[1])
+                       tlist_fit, tscale, comp_dim, align_ylim=align_ylim)
 
     if digest:
         ## Third figure: fit digest plots
@@ -292,12 +182,12 @@ def inspect_heff_fit(
         fig.suptitle('Fit metrics', fontsize=24)
 
         # fidelity
-        final_fidelity = heff_fidelity(time_evolution, components[0], components[1], tlist)
+        final_fidelity = heff_fidelity(time_evolution[fit_start:], components, offset_components, tlist_fit)
         ax = axes[0]
         ax.set_title('Final fidelity')
         ax.set_xlabel(f't ({tscale.time_unit})')
         ax.set_ylabel('fidelity')
-        ax.plot(tlist, final_fidelity)
+        ax.plot(tlist_fit + tlist[fit_start], final_fidelity)
         ax.axhline(1., color='black', linewidth=0.5)
 
         # eigenphases of target matrices
@@ -305,7 +195,7 @@ def inspect_heff_fit(
         ax.set_title('Final target matrix eigenphases')
         ax.set_xlabel(f't ({tscale.time_unit})')
         ax.set_ylabel(r'$U(t)U_{eff}^{\dagger}(t)$ eigenphases')
-        ax.plot(tlist, ilogvs)
+        ax.plot(tlist_fit + tlist[fit_start], ilogvs)
 
         ## Intermediate data is not available if minuit is used
         if loss is not None:
@@ -428,10 +318,9 @@ def plot_amplitude_scan(
         normalize the amplitude variable in the polynomials.
     """
     components = np.asarray(components)
-    heff_compos = components[:, 0]
 
-    num_qudits = len(heff_compos.shape) - 1 # first dim: amplitudes
-    comp_dim = int(np.around(np.sqrt(heff_compos.shape[1])))
+    num_qudits = len(components.shape) - 1 # first dim: amplitudes
+    comp_dim = int(np.around(np.sqrt(components.shape[1])))
     num_paulis = comp_dim ** 2
 
     if amp_scale is FrequencyScale.auto:
@@ -441,10 +330,10 @@ def plot_amplitude_scan(
     amps_norm = amplitudes / amp_scale_omega
 
     if compo_scale is FrequencyScale.auto:
-        compo_scale = FrequencyScale.find_energy_scale(np.amax(np.abs(heff_compos)))
+        compo_scale = FrequencyScale.find_energy_scale(np.amax(np.abs(components)))
 
     compo_scale_omega = compo_scale.pulsatance_value
-    compos_norm = heff_compos / compo_scale_omega
+    compos_norm = components / compo_scale_omega
 
     if threshold is None:
         threshold = compo_scale_omega * 1.e-2
@@ -464,7 +353,7 @@ def plot_amplitude_scan(
 
     # Array for polynomial fit results
 
-    coefficients = np.zeros(heff_compos.shape[1:] + (max_poly_order + 1,), dtype=float)
+    coefficients = np.zeros(components.shape[1:] + (max_poly_order + 1,), dtype=float)
 
     if num_qudits > 1 and num_above_threshold > 6:
         # Which Pauli components of the first qudit have plots to draw?
@@ -592,11 +481,16 @@ def _poly_odd(x, *args):
     return value
 
 
+if has_ipython:
+    print_type = Latex
+else:
+    print_type = str
+
 def print_amplitude_scan(
     coefficients: np.ndarray,
     amp_scale: FrequencyScale,
     compo_scale: FrequencyScale
-) -> Latex:
+) -> print_type:
     """Print a LaTeX expression of the amplitude scan fit results.
 
     Args:
@@ -621,23 +515,30 @@ def print_amplitude_scan(
         if np.allclose(coefficients[index], np.zeros(poly_order)):
             continue
 
-        line = fr'\frac{{\nu_{{{basis_labels[index]}}}}}{{2\pi\,\mathrm{{{compo_scale.frequency_unit}}}}} &='
+        if has_ipython:
+            line = fr'\frac{{\nu_{{{basis_labels[index]}}}}}{{2\pi\,\mathrm{{{compo_scale.frequency_unit}}}}} &='
+        else:
+            line = f'nu[{basis_labels[index]}]/(2π {compo_scale.frequency_unit}) ='
 
         for order, p in enumerate(coefficients[index]):
             if p == 0.:
                 continue
 
             pstr = f'{abs(p):.2e}'
-            epos = pstr.index('e')
-            power = int(pstr[epos + 1:])
-            if power == -1:
-                pexp = f'{abs(p):.3f}'
-            elif power == 0:
-                pexp = f'{abs(p):.2f}'
-            elif power == 1:
-                pexp = f'{abs(p):.1f}'
+
+            if has_ipython:
+                epos = pstr.index('e')
+                power = int(pstr[epos + 1:])
+                if power == -1:
+                    pexp = f'{abs(p):.3f}'
+                elif power == 0:
+                    pexp = f'{abs(p):.2f}'
+                elif power == 1:
+                    pexp = f'{abs(p):.1f}'
+                else:
+                    pexp = fr'\left({pstr[:epos]} \times 10^{{{power}}}\right)'
             else:
-                pexp = fr'\left({pstr[:epos]} \times 10^{{{power}}}\right)'
+                pexp = pstr
 
             if p < 0.:
                 pexp = f'-{pexp}'
@@ -649,11 +550,14 @@ def print_amplitude_scan(
             else:
                 if p > 0.:
                     pexp = f'+ {pexp}'
-                line += f'{pexp} A^{order}'
+                line += f'{pexp} A^{{{order}}}'
 
         lines.append(line)
 
-    linebreak = r' \\ '
-    expr = Latex(fr'\begin{{align}}{linebreak.join(lines)}\end{{align}} A: amplitude in $2\pi\,\mathrm{{{amp_scale.frequency_unit}}}$')
+    if has_ipython:
+        linebreak = r' \\ '
+        expr = Latex(fr'\begin{{align}}{linebreak.join(lines)}\end{{align}} A: amplitude in $2\pi\,\mathrm{{{amp_scale.frequency_unit}}}$')
+    else:
+        expr = '\n'.join(lines) + f'\nA: amplitude in 2π {amp_scale.frequency_unit}\n'
 
     return expr

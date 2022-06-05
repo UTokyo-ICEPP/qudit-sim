@@ -774,12 +774,18 @@ class HamiltonianBuilder:
         instance._qudit_params.update(self._qudit_params.items())
         instance._coupling.update(self._coupling.items())
         instance._crosstalk.update(self._crosstalk.items())
+        for qudit_id in self._qudit_params:
+            instance._drive[qudit_id] = list()
         if not clear_drive:
-            instance._drive.update(self._drive.items())
+            for qudit_id, drive in self._drive.items():
+                instance._drive[qudit_id].extend(drive)
+
         instance._frame.update(self._frame.items())
 
         instance._max_frequency_int = self._max_frequency_int
         instance._max_frequency_drive = None if clear_drive else self._max_frequency_drive
+
+        return instance
 
     def make_scan(
         self,

@@ -62,8 +62,6 @@ def find_heff(
     original_log_level = logger.level
     logger.setLevel(log_level)
 
-    hgen = hgen.copy(clear_drive=True)
-
     if isinstance(frequency, np.ndarray):
         frequency = list(frequency)
     if isinstance(amplitude, np.ndarray):
@@ -97,8 +95,8 @@ def find_heff(
 
         args = list()
         flattop_times = list()
-        for spec in drive_spec:
-            hgen, duration, flattop_time = _add_drive(hgen, spec, ramp_cycles, flattop_cycles)
+        for freq, amp in drive_spec:
+            hgen, duration, flattop_time = _add_drive(hgen, qudit, freq, amp, ramp_cycles, flattop_cycles)
             tlist = {'points_per_cycle': 8, 'duration': duration}
             args.append((hgen, tlist))
             flattop_times.append(flattop_time)
@@ -124,7 +122,7 @@ def find_heff(
             save_result_to_sim = f'{save_result_to}_sim'
             save_result_to_heff = f'{save_result_to}_heff'
 
-        hgen, duration, flattop_time = _add_drive(hgen, drive_spec, ramp_cycles, flattop_cycles)
+        hgen, duration, flattop_time = _add_drive(hgen, qudit, drive_spec[0], drive_spec[1], ramp_cycles, flattop_cycles)
         tlist = {'points_per_cycle': 8, 'duration': duration}
 
         sim_result = pulse_sim(hgen, tlist, rwa=False, save_result_to=save_result_to_sim, log_level=log_level)
@@ -140,12 +138,12 @@ def find_heff(
 
 def _add_drive(
     hgen: HamiltonianBuilder,
-    drive_spec: Tuple[FrequencySpec, AmplitudeSpec],
+    qudit: QuditSpec,
+    frequency: FrequencySpec,
+    amplitude: AmplitudeSpec,
     ramp_cycles: float,
     flattop_cycles: float
 ) -> Tuple[HamiltonianBuilder, float, float]:
-
-    frequency, amplitude = drive_spec
 
     hgen = hgen.copy(clear_drive=True)
     hgen.set_global_frame('dressed')
@@ -192,6 +190,8 @@ def _run_single(
 ):
     logger = logging.getLogger(logger_name)
 
+    fit_start = np.searchsorted(sim_result.times, flattop_time, 'right') - 1
+
     if save_result_to:
         with h5py.File(f'{save_result_to}.h5', 'w') as out:
             out.create_dataset('num_qudits', data=len(sim_result.dim))
@@ -199,30 +199,32 @@ def _run_single(
             out.create_dataset('comp_dim', data=comp_dim)
             out.create_dataset('time_evolution', data=sim_result.states)
             out.create_dataset('tlist', data=sim_result.times)
+            out.create_dataset('fit_start', data=fit_start)
 
-    t1 = np.searchsorted(sim_result.times, flattop_time, 'right') - 1
-    time_evolution = sim_result.states[t1:]
-    tlist = sim_result.times[t1:]
+    time_evolution = sim_result.states[fit_start:]
+    tlist = sim_result.times[fit_start:] - sim_result.times[fit_start]
 
-    components = _maximize_fidelity(time_evolution,
-                                    tlist,
-                                    sim_result.dim,
-                                    optimizer,
-                                    optimizer_args,
-                                    max_updates,
-                                    convergence,
-                                    save_result_to)
+    heff_compos, offset_compos = _maximize_fidelity(time_evolution,
+                                                    tlist,
+                                                    sim_result.dim,
+                                                    optimizer,
+                                                    optimizer_args,
+                                                    max_updates,
+                                                    convergence,
+                                                    save_result_to)
 
-    if dim[0] != comp_dim:
-        reduced_dim = (comp_dim,) * len(dim)
-        components_original = components
-        components = paulis.truncate(components, reduced_dim)
+    if sim_result.dim[0] != comp_dim:
+        reduced_dim = (comp_dim,) * len(sim_result.dim)
+        components_original = heff_compos
+        components = paulis.truncate(heff_compos, reduced_dim)
     else:
         components_original = None
+        components = heff_compos
 
     if save_result_to:
         with h5py.File(f'{save_result_to}.h5', 'a') as out:
             out.create_dataset('components', data=components)
+            out.create_dataset('offset_components', data=offset_compos)
             if components_original is not None:
                 out.create_dataset('components_original', data=components_original)
 
@@ -407,4 +409,6 @@ def _maximize_fidelity(
     ## Recover the shape and normalization of the components arrays before returning
     heff_compos = np.concatenate(([0.], compos_norm / time_norm)).reshape(basis.shape[:-2])
 
-    return heff_compos
+    offset_compos = np.concatenate(([0.], offset_compos)).reshape(basis.shape[:-2])
+
+    return heff_compos, offset_compos
