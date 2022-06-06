@@ -27,7 +27,6 @@ def pulse_sim(
     psi0: Optional[Union[qtp.Qobj, List[qtp.Qobj]]] = None,
     args: Optional[Any] = None,
     e_ops: Optional[Union[EOps, List[EOps]]] = None,
-    rwa: Union[bool, List[bool]] = True,
     keep_callable: Union[bool, List[bool]] = False,
     options: Optional[qtp.solver.Options] = None,
     progress_bar: Optional[qtp.ui.progressbar.BaseProgressBar] = None,
@@ -62,7 +61,6 @@ def pulse_sim(
         psi0: Initial state Qobj. Defaults to the identity operator appropriate for the given Hamiltonian.
         args: Second parameter passed to drive amplitude functions (if callable).
         e_ops: List of observables passed to the QuTiP solver.
-        rwa: Whether to use the rotating-wave approximation.
         keep_callable: Keep callable time-dependent Hamiltonian coefficients. Otherwise all callable coefficients
             are converted to arrays before simulation execution for efficiency (no loss of accuracy observed so far).
         options: QuTiP solver options.
@@ -79,7 +77,7 @@ def pulse_sim(
     num_tasks = None
     zip_list = []
 
-    parallel_params = [hgen, tlist, psi0, args, e_ops, rwa, keep_callable]
+    parallel_params = [hgen, tlist, psi0, args, e_ops, keep_callable]
     element_types = [HamiltonianBuilder, (np.ndarray, tuple, dict), qtp.Qobj, None, Sequence, bool, bool]
 
     for param, typ in zip(parallel_params, element_types):
@@ -95,7 +93,7 @@ def pulse_sim(
             zip_list.append(None)
 
     if num_tasks is None:
-        result = _run_single(hgen, tlist, psi0, args, e_ops, rwa, keep_callable, options=options,
+        result = _run_single(hgen, tlist, psi0, args, e_ops, keep_callable, options=options,
                              progress_bar=progress_bar, save_result_to=save_result_to, log_level=log_level)
 
     else:
@@ -134,7 +132,6 @@ def _run_single(
     psi0: Union[qtp.Qobj, None],
     args: Any,
     e_ops: EOps,
-    rwa: bool,
     keep_callable: bool,
     options: Optional[qtp.solver.Options] = None,
     progress_bar: Optional[qtp.ui.progressbar.BaseProgressBar] = None,
@@ -145,16 +142,19 @@ def _run_single(
     """Run one pulse simulation."""
     logger = logging.getLogger(logger_name)
 
+    ## Move to the lab frame
+
+    original_frame = hgen.frame()
+
+    hgen = hgen.copy()
+    hgen.set_global_frame('lab')
+
     ## Define the time points if necessary
 
-    if isinstance(tlist, tuple) or isinstance(tlist, dict):
-        # Need to build Hint and Hdrive once to get the max frequencies
-        hgen.build_hint()
-        hgen.build_hdrive(rwa=rwa)
-        if isinstance(tlist, tuple):
-            tlist = hgen.make_tlist(points_per_cycle=tlist[0], num_cycles=tlist[1])
-        else:
-            tlist = hgen.make_tlist(**tlist)
+    if isinstance(tlist, tuple):
+        tlist = hgen.make_tlist(points_per_cycle=tlist[0], num_cycles=tlist[1])
+    elif isinstance(tlist, dict):
+        tlist = hgen.make_tlist(**tlist)
 
     logger.info('Using %d time points from %.3e to %.3e', tlist.shape[0], tlist[0], tlist[-1])
 
@@ -165,7 +165,7 @@ def _run_single(
     else:
         tlist_arg = {'tlist': tlist, 'args': args}
 
-    hamiltonian = hgen.build(rwa=rwa, **tlist_arg)
+    hamiltonian = hgen.build(rwa=False, **tlist_arg)
 
     ## Define the initial state if necessary
 
@@ -198,13 +198,17 @@ def _run_single(
         logger.info('Saving the simulation result to %s.qu', save_result_to)
         qtp.fileio.qsave(qtp_result, save_result_to)
 
+    ## Bring the hgen frame back and change the frame of the states
+
     if qtp_result.states:
         states = np.stack(list(state.full() for state in qtp_result.states))
+        states = hgen.change_frame(tlist, states, from_frame='lab')
     else:
         states = None
 
+    ## TODO NEED TO CHANGE FRAME
     expect = list(exp.copy() for exp in qtp_result.expect)
     dim = (hgen.num_levels,) * hgen.num_qudits
-    frame_tuple = tuple(hgen.frame(qudit_id) for qudit_id in hgen.qudit_ids())
+    frame_tuple = tuple(original_frame[qudit_id] for qudit_id in hgen.qudit_ids())
 
     return PulseSimResult(times=tlist, expect=expect, states=states, dim=dim, frame=frame_tuple)

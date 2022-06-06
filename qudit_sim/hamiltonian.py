@@ -744,13 +744,20 @@ class HamiltonianBuilder:
         if len([p for p in [num_cycles, duration, num_points] if p is not None]) != 1:
             raise RuntimeError('One and only one of num_cycles, duration, or num_points must be set')
 
-        try:
-            frequency = self.max_frequency
+        # If we are in the lab frame, max frequency is the maximum of all drives
+        if all(np.all(frame.frequency == 0.) for frame in self._frame.values()):
+            frequency = 0.
+            for drives in self._drive.values():
+                frequency = max(frequency, max(drive.frequency for drive in drives))
 
-        except MaxFrequencyNotSet:
-            self.build_hint()
-            self.build_hdrive(rwa=rwa)
-            frequency = self.max_frequency
+        else:
+            try:
+                frequency = self.max_frequency
+
+            except MaxFrequencyNotSet:
+                self.build_hint()
+                self.build_hdrive(rwa=rwa)
+                frequency = self.max_frequency
 
         if frequency == 0.:
             hamiltonian = self.build(rwa=rwa)
