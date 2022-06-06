@@ -17,6 +17,7 @@ See :doc:`/hamiltonian` for theoretical background.
 
 from typing import Any, Dict, Sequence, List, Tuple, Callable, Optional, Union, Hashable
 from dataclasses import dataclass
+import copy
 import numpy as np
 import qutip as qtp
 
@@ -133,13 +134,19 @@ class HamiltonianBuilder:
         """Crosstalk factor from source to target."""
         return self._crosstalk[(source, target)]
 
-    def drive(self, qudit_id: Hashable) -> List[DriveTerm]:
+    def drive(self, qudit_id: Optional[Hashable] = None) -> List[DriveTerm]:
         """Drive terms for the qudit."""
-        return list(self._drive[qudit_id])
+        if qudit_id is None:
+            return copy.deepcopy(self._drive)
+        else:
+            return list(self._drive[qudit_id])
 
-    def frame(self, qudit_id: Hashable) -> Frame:
+    def frame(self, qudit_id: Optional[Hashable] = None) -> Frame:
         """Frame of the qudit."""
-        return self._frame[qudit_id]
+        if qudit_id is None:
+            return copy.deepcopy(self._frame)
+        else:
+            return self._frame[qudit_id]
 
     def add_qudit(
         self,
@@ -222,6 +229,9 @@ class HamiltonianBuilder:
         Returns:
             The dressed-qudit frequency of the specified qudit ID, or a full mapping of qudit ID to frequency arrays.
         """
+        if len(self._coupling) == 0:
+            return self.free_frequencies(qudit_id)
+
         current_frame = dict(self._frame)
 
         # Move to the lab frame first to build a fully static H0+Hint

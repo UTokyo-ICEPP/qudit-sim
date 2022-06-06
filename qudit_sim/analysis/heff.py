@@ -22,7 +22,7 @@ from rqutils.math import matrix_angle
 
 from ..apps.heff_tools import unitary_subtraction, heff_fidelity
 from ..util import FrequencyScale
-from .decompositions import print_components
+from .decompositions import print_components, plot_time_evolution
 
 def fidelity_loss(
     time_evolution: np.ndarray,
@@ -61,7 +61,7 @@ def inspect_heff_fit(
     threshold: float = 0.01,
     tscale: FrequencyScale = FrequencyScale.auto,
     align_ylim: bool = False,
-    limit_components: Optional[List[Tuple]] = None,
+    select_components: Optional[List[Tuple]] = None,
     digest: bool = True
 ) -> List[mpl.figure.Figure]:
     """Plot the time evolution of Pauli components before and after fidelity maximization.
@@ -100,62 +100,40 @@ def inspect_heff_fit(
             grad = None
 
     dim = (num_sim_levels,) * num_qudits
-    num_paulis = num_sim_levels ** 2
-    pauli_dim = (num_paulis,) * num_qudits
-
-    if tscale is FrequencyScale.auto:
-        tscale = FrequencyScale.find_time_scale(tlist[-1])
-
-    tlist *= tscale.frequency_value
-    components /= tscale.frequency_value
-
-    ilogus = -matrix_angle(time_evolution)
-    ilogu_compos = paulis.components(ilogus, dim=dim).real
-    ilogu_compos = ilogu_compos.reshape(tlist.shape[0], -1)[:, 1:]
-
     tlist_fit = tlist[fit_start:] - tlist[fit_start]
-
-    target = unitary_subtraction(time_evolution[fit_start:], components, offset_components, tlist_fit)
-
-    ilogtargets, ilogvs = matrix_angle(target, with_diagonals=True)
-    ilogtargets *= -1.
-    ilogtarget_compos = paulis.components(ilogtargets, dim=dim).real
-    ilogtarget_compos = ilogtarget_compos.reshape(tlist_fit.shape[0], -1)[:, 1:]
-
-    if limit_components is None:
-        # Make a list of tuples from a tuple of arrays
-        indices_ilogu = np.nonzero(np.amax(np.abs(ilogu_compos), axis=0) > threshold)[0] + 1
-        indices_ilogu = np.concatenate([np.array([0]), indices_ilogu])
-        indices_ilogtarget = np.nonzero(np.amax(np.abs(ilogtarget_compos), axis=0) > threshold)[0] + 1
-        indices_ilogtarget = np.concatenate([np.array([0]), indices_ilogtarget])
-    else:
-        tuple_of_indices = tuple([index[i] for index in limit_components]
-                                 for i in range(len(limit_components[0])))
-        limit_components = np.ravel_multi_index(tuple_of_indices, pauli_dim)
-        limit_components = np.sort(limit_components)
-
-        indices_ilogu = limit_components
-        indices_ilogtarget = limit_components
 
     figures = []
 
     ## First figure: original time evolution and Heff
-    fig, axes = _make_figure(len(indices_ilogu))
-    figures.append(fig)
-    fig.suptitle(r'Original time evolution vs $H_{eff}$', fontsize=24)
+    indices, fig_ilogu = plot_time_evolution(time_evolution=time_evolution,
+                                             tlist=tlist,
+                                             dim=dim,
+                                             threshold=threshold,
+                                             select_components=select_components,
+                                             align_ylim=align_ylim,
+                                             tscale=tscale)
+    figures.append(fig_ilogu)
+
+    fig_ilogu.suptitle(r'Original time evolution vs $H_{eff}$', fontsize=24)
+
+    # Add lines with slope=compo for terms above threshold
+    if tscale is FrequencyScale.auto:
+        tscale = FrequencyScale.find_time_scale(tlist[-1])
+
+    for iax, index in enumerate(indices):
+        ax = fig_ilogu.axes[iax]
+        xval = (tlist_fit + tlist[fit_start]) * tscale.frequency_value
+        yval = components[index] * tlist_fit + offset_components[index]
+        x0 = tlist[fit_start] * tscale.frequency_value
+
+        ax.plot(xval, yval)
+        ax.axvline(x0, linestyle='--', color='black', linewidth=0.5)
+
+        if np.all(np.array(index) < comp_dim ** 2):
+            for spine in ax.spines.values():
+                spine.set(linewidth=2.)
 
     colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-
-    _plot_ilogu_compos(axes, ilogu_compos, num_qudits, num_sim_levels, indices_ilogu, tlist, tscale,
-                       comp_dim, align_ylim=align_ylim)
-
-    ## Add lines with slope=compo for terms above threshold
-    for iax, basis_index_flat in enumerate(indices_ilogu):
-        ax = axes[iax]
-        basis_index = np.unravel_index(basis_index_flat, pauli_dim)
-        yval = components[basis_index] * tlist_fit + offset_components[basis_index]
-        ax.plot(tlist_fit + tlist[fit_start], yval)
-
     handles = [
         mpl.lines.Line2D([0.], [0.], color=colors[0]),
         mpl.lines.Line2D([0.], [0.], color=colors[1])
@@ -164,22 +142,35 @@ def inspect_heff_fit(
         'ilogU(t) component',
         '$H_{eff}t$ component $\pm$ offset'
     ]
-    fig.legend(handles, labels, 'upper right')
+    fig_ilogu.legend(handles, labels, 'upper right')
 
     ## Second figure: subtracted unitaries
-    fig, axes = _make_figure(len(indices_ilogtarget))
-    figures.append(fig)
-    fig.suptitle('Unitary-subtracted time evolution', fontsize=24)
+    target = unitary_subtraction(time_evolution[fit_start:], components, offset_components, tlist_fit)
 
-    ## Plot individual pauli components
-    _plot_ilogu_compos(axes, ilogtarget_compos, num_qudits, num_sim_levels, indices_ilogtarget,
-                       tlist_fit, tscale, comp_dim, align_ylim=align_ylim)
+    indices, fig_target = plot_time_evolution(time_evolution=target,
+                                              tlist=(tlist_fit + tlist[fit_start]),
+                                              dim=dim,
+                                              threshold=threshold,
+                                              select_components=select_components,
+                                              align_ylim=align_ylim,
+                                              tscale=tscale)
+    figures.append(fig_target)
+
+    fig_target.suptitle('Unitary-subtracted time evolution', fontsize=24)
+
+    # Highlight the plots within the computational dimensions
+    for iax, index in enumerate(indices):
+        ax = fig_ilogu.axes[iax]
+
+        if np.all(np.array(index) < comp_dim ** 2):
+            for spine in ax.spines.values():
+                spine.set(linewidth=2.)
 
     if digest:
         ## Third figure: fit digest plots
-        fig, axes = plt.subplots(1, 4, figsize=(16, 4))
-        figures.append(fig)
-        fig.suptitle('Fit metrics', fontsize=24)
+        fig_digest, axes = plt.subplots(1, 4, figsize=(16, 4))
+        figures.append(fig_digest)
+        fig_digest.suptitle('Fit metrics', fontsize=24)
 
         # fidelity
         final_fidelity = heff_fidelity(time_evolution[fit_start:], components, offset_components, tlist_fit)
@@ -190,23 +181,16 @@ def inspect_heff_fit(
         ax.plot(tlist_fit + tlist[fit_start], final_fidelity)
         ax.axhline(1., color='black', linewidth=0.5)
 
-        # eigenphases of target matrices
-        ax = axes[1]
-        ax.set_title('Final target matrix eigenphases')
-        ax.set_xlabel(f't ({tscale.time_unit})')
-        ax.set_ylabel(r'$U(t)U_{eff}^{\dagger}(t)$ eigenphases')
-        ax.plot(tlist_fit + tlist[fit_start], ilogvs)
-
         ## Intermediate data is not available if minuit is used
         if loss is not None:
-            ax = axes[2]
+            ax = axes[1]
             ax.set_title('Loss evolution')
             ax.set_xlabel('steps')
             ax.set_ylabel('loss')
             ax.plot(loss)
             ax.axhline(0., color='black', linewidth=0.5)
 
-            ax = axes[3]
+            ax = axes[2]
             ax.set_title('Gradient evolution')
             ax.set_xlabel('steps')
             ax.set_ylabel('max(abs(grad))')
@@ -217,74 +201,6 @@ def inspect_heff_fit(
         fig.tight_layout()
 
     return figures
-
-
-def _make_figure(num_axes, nxmin=4, nxmax=12):
-    nx = np.floor(np.sqrt(num_axes)).astype(int)
-    nx = max(nx, nxmin)
-    nx = min(nx, nxmax)
-    ny = np.ceil(num_axes / nx).astype(int)
-
-    fig, axes = plt.subplots(ny, nx, figsize=(nx * 4, ny * 4))
-    return fig, axes.reshape(-1)
-
-
-def _plot_ilogu_compos(axes, compos_data, num_qudits, num_sim_levels, limit_components_flat, tlist, tscale, comp_dim, align_ylim=False):
-    # compos_data: shape (T, num_basis - 1)
-    # limit_components_flat
-    num_paulis = num_sim_levels ** 2
-    num_comp_paulis = comp_dim ** 2
-    dim = (num_sim_levels,) * num_qudits
-    pauli_dim = (num_paulis,) * num_qudits
-
-    limit_components = np.unravel_index(limit_components_flat, pauli_dim)
-    labels = paulis.labels(dim, norm=False)[limit_components]
-    compos_data_selected = compos_data[:, limit_components_flat - 1]
-
-    iax = 0
-
-    if limit_components_flat[0] == 0:
-        l0p = paulis.l0_projector(comp_dim, num_sim_levels)
-        l0_projection = l0p
-        for _ in range(num_qudits - 1):
-            l0_projection = np.kron(l0_projection, l0p)
-
-        l0_compos = np.matmul(compos_data, l0_projection[1:])
-
-        # lambda 0 projection onto computational subspace
-        ax = axes[0]
-        title = f'${labels[0]}$'
-        if comp_dim != num_sim_levels:
-            title += ' (projected)'
-        ax.set_title(title)
-        ax.plot(tlist, l0_compos)
-
-        iax += 1
-
-    while iax < limit_components_flat.shape[0]:
-        ax = axes[iax]
-
-        ax.set_title(f'${labels[iax]}$')
-        ax.plot(tlist, compos_data_selected[:, iax])
-
-        if (np.array([indices[iax] for indices in limit_components]) < num_comp_paulis).all():
-            for spine in ax.spines.values():
-                spine.set(linewidth=2.)
-
-        iax += 1
-
-    ymax = np.amax(compos_data_selected)
-    ymin = np.amin(compos_data_selected)
-    vrange = ymax - ymin
-    ymax += 0.2 * vrange
-    ymin -= 0.2 * vrange
-
-    for ax in axes.reshape(-1):
-        ax.axhline(0., color='black', linewidth=0.5)
-        if align_ylim:
-            ax.set_ylim(ymin, ymax)
-        ax.set_xlabel(f't ({tscale.time_unit})')
-        ax.set_ylabel('rad')
 
 
 def plot_amplitude_scan(

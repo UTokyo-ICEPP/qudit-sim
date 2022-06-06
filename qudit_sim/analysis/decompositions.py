@@ -1,6 +1,6 @@
 """Analysis of Pauli decompositions of Hamiltonians and gates."""
 
-from typing import Union, List, Optional
+from typing import Union, List, Optional, Tuple
 import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -200,7 +200,7 @@ def gate_components(
         return _single_gate_components(sim_result, comp_dim)
 
 
-def _single_gate_components(sim_result, comp_dim):
+def _single_gate_components(sim_result: PulseSimResult, comp_dim):
     gate = sim_result.states[-1]
     components = paulis.components(-matrix_angle(gate), sim_result.dim).real
 
@@ -208,3 +208,81 @@ def _single_gate_components(sim_result, comp_dim):
         components = paulis.truncate(components, (comp_dim,) * len(sim_result.dim))
 
     return components
+
+
+def plot_time_evolution(
+    sim_result: Optional[PulseSimResult] = None,
+    time_evolution: Optional[np.ndarray] = None,
+    tlist: Optional[np.ndarray] = None,
+    dim: Optional[Tuple[int, ...]] = None,
+    threshold: float = 0.01,
+    select_components: Optional[List[Tuple[int, ...]]] = None,
+    align_ylim: bool = False,
+    tscale: Optional[FrequencyScale] = FrequencyScale.auto,
+    fig: Optional[mpl.figure.Figure] = None
+):
+    if sim_result is not None:
+        time_evolution = sim_result.states
+        tlist = sim_result.times
+        dim = sim_result.dim
+
+    if tscale is FrequencyScale.auto:
+        tscale = FrequencyScale.find_time_scale(tlist[-1])
+
+    if tscale is not None:
+        tlist = tlist * tscale.frequency_value
+
+    ilogus = -matrix_angle(time_evolution)
+    ilogu_compos = np.moveaxis(paulis.components(ilogus, dim=dim).real, 0, -1)
+
+    if select_components is None:
+        # Make a list of tuples from a tuple of arrays
+        select_components = list(zip(*np.nonzero(np.amax(np.abs(ilogu_compos), axis=-1) > threshold)))
+
+    num_axes = len(select_components)
+
+    if num_axes == 0:
+        if fig is None:
+            fig = plt.figure()
+
+        return select_components, fig
+
+    nx = np.floor(np.sqrt(num_axes)).astype(int)
+    nx = max(nx, 4)
+    nx = min(nx, 12)
+    ny = np.ceil(num_axes / nx).astype(int)
+
+    if fig is None:
+        fig, _ = plt.subplots(ny, nx, figsize=(nx * 4, ny * 4))
+    else:
+        fig.set_figheight(ny * 4.)
+        fig.set_figwidth(nx * 4.)
+        fig.subplots(ny, nx)
+
+    labels = paulis.labels(dim, norm=False)
+
+    if align_ylim:
+        indices_array = np.array(tuple(zip(select_components)))
+        selected_compos = ilogu_compos[indices_array]
+        ymax = np.amax(selected_compos)
+        ymin = np.amin(selected_compos)
+        vrange = ymax - ymin
+        ymax += 0.2 * vrange
+        ymin -= 0.2 * vrange
+
+    for iax, index in enumerate(select_components):
+        ax = fig.axes[iax]
+
+        ax.set_title(f'${labels[index]}$')
+        ax.plot(tlist, ilogu_compos[index])
+
+        ax.axhline(0., color='black', linewidth=0.5)
+        if align_ylim:
+            ax.set_ylim(ymin, ymax)
+        if tscale is None:
+            ax.set_xlabel('t')
+        else:
+            ax.set_xlabel(f't ({tscale.time_unit})')
+        ax.set_ylabel('rad')
+
+    return select_components, fig

@@ -35,8 +35,8 @@ def find_heff(
     frequency: Union[FrequencySpec, List[FrequencySpec], np.ndarray],
     amplitude: Union[AmplitudeSpec, List[AmplitudeSpec], np.ndarray],
     comp_dim: int = 2,
+    cycles: float = 1000.,
     ramp_cycles: float = 100.,
-    flattop_cycles: float = 1000.,
     optimizer: str = 'adam',
     optimizer_args: Any = 0.05,
     max_updates: int = 10000,
@@ -96,7 +96,7 @@ def find_heff(
         args = list()
         flattop_times = list()
         for freq, amp in drive_spec:
-            hgen, duration, flattop_time = _add_drive(hgen, qudit, freq, amp, ramp_cycles, flattop_cycles)
+            hgen, duration, flattop_time = _add_drive(hgen, qudit, freq, amp, cycles, ramp_cycles)
             tlist = {'points_per_cycle': 8, 'duration': duration}
             args.append((hgen, tlist))
             flattop_times.append(flattop_time)
@@ -122,7 +122,7 @@ def find_heff(
             save_result_to_sim = f'{save_result_to}_sim'
             save_result_to_heff = f'{save_result_to}_heff'
 
-        hgen, duration, flattop_time = _add_drive(hgen, qudit, drive_spec[0], drive_spec[1], ramp_cycles, flattop_cycles)
+        hgen, duration, flattop_time = _add_drive(hgen, qudit, drive_spec[0], drive_spec[1], cycles, ramp_cycles)
         tlist = {'points_per_cycle': 8, 'duration': duration}
 
         sim_result = pulse_sim(hgen, tlist, rwa=False, save_result_to=save_result_to_sim, log_level=log_level)
@@ -141,8 +141,8 @@ def _add_drive(
     qudit: QuditSpec,
     frequency: FrequencySpec,
     amplitude: AmplitudeSpec,
-    ramp_cycles: float,
-    flattop_cycles: float
+    cycles: float,
+    ramp_cycles: float
 ) -> Tuple[HamiltonianBuilder, float, float]:
 
     hgen = hgen.copy(clear_drive=True)
@@ -153,9 +153,16 @@ def _add_drive(
             len(frequency) != len(qudit) or len(amplitude) != len(qudit):
             raise RuntimeError('Inconsistent qudit, frequency, and amplitude specification')
 
+        if len(qudit) == 0:
+            # No-drive effective Hamiltonian
+            hgen.build()
+            duration = hgen.make_tlist(1, num_cycles=int(cycles))[-1]
+
+            return hgen, duration, 0.
+
         max_cycle = 2. * np.pi / min(frequency)
-        duration = max_cycle * (ramp_cycles + flattop_cycles)
-        width = max_cycle * flattop_cycles
+        duration = max_cycle * (ramp_cycles + cycles)
+        width = max_cycle * cycles
         sigma = (duration - width) / 4.
 
         for qid, freq, amp in zip(qudit, frequency, amplitude):
@@ -164,8 +171,8 @@ def _add_drive(
 
     else:
         cycle = 2. * np.pi / frequency
-        duration = cycle * (ramp_cycles + flattop_cycles)
-        width = cycle * flattop_cycles
+        duration = cycle * (ramp_cycles + cycles)
+        width = cycle * cycles
         sigma = (duration - width) / 4.
 
         pulse = GaussianSquare(duration, amplitude, sigma, width, fall=False)
@@ -278,15 +285,15 @@ def _maximize_fidelity(
 
     ilogu_compos = paulis.components(ilogus, dim=dim).real
 
-    init = ilogu_compos[last_valid_tidx - 1] / tlist[last_valid_tidx - 1]
+    init = (ilogu_compos[last_valid_tidx - 1] - ilogu_compos[0]) / tlist[last_valid_tidx - 1]
 
     # Reshape and truncate the components array to match the basis_list
     init = init.reshape(-1)[1:]
 
     ## Stack the initial parameter values
     # initial[0]: init multiplied by time_norm
-    # initial[1]: offset components (initialized to zero)
-    initial = np.stack((init * time_norm, np.zeros_like(init)), axis=0)
+    # initial[1]: offset components (initialized to ilogu_compos[0])
+    initial = np.stack((init * time_norm, ilogu_compos[0].reshape(-1)[1:]), axis=0)
     initial = jax.device_put(initial, device=jax_device)
 
     ## Working arrays
