@@ -146,8 +146,12 @@ def _run_single(
 
     original_frame = hgen.frame()
 
-    hgen = hgen.copy()
-    hgen.set_global_frame('lab')
+    nonlab_original_frame = any((np.any(frame.frequency) or np.any(frame.phase))
+                                for frame in original_frame.values())
+
+    if nonlab_original_frame:
+        hgen = hgen.copy()
+        hgen.set_global_frame('lab')
 
     ## Define the time points if necessary
 
@@ -172,7 +176,29 @@ def _run_single(
     if psi0 is None:
         psi0 = qtp.tensor([qtp.qeye(hgen.num_levels)] * hgen.num_qudits)
 
-    ## Other arguments to sesolve
+    ## Change the e_ops frame if necessary
+
+    if nonlab_original_frame:
+        def make_op_fn(lab_op_arr):
+            def op_fn(t, state):
+                return state.dag().full()[None, ...] @ lab_op_arr @ state.full()[None, ...]
+
+            return op_fn
+
+        e_ops_orig = e_ops
+        e_ops = []
+        for op in e_ops_orig:
+            if callable(op):
+                op_arr = op(tlist, qtp.tensor([qtp.qeye(hgen.num_levels)] * hgen.num_qudits))
+            else:
+                op_arr = op.full()
+
+            lab_op_arr = hgen.change_frame(tlist, op_arr, from_frame=original_frame, to_frame='lab',
+                                           objtype='observable')
+
+            e_ops.append(make_op_fn(lab_op_arr))
+
+    ## Arguments to sesolve
 
     kwargs = {'args': args, 'e_ops': e_ops, 'options': options, 'progress_bar': progress_bar}
 
@@ -202,11 +228,16 @@ def _run_single(
 
     if qtp_result.states:
         states = np.stack(list(state.full() for state in qtp_result.states))
-        states = hgen.change_frame(tlist, states, from_frame='lab')
+        if len(states.shape) == 2:
+            objtype = 'state'
+        else:
+            objtype = 'evolution'
+
+        states = hgen.change_frame(tlist, states, from_frame='lab', to_frame=original_frame,
+                                   objtype=objtype)
     else:
         states = None
 
-    ## TODO NEED TO CHANGE FRAME
     expect = list(exp.copy() for exp in qtp_result.expect)
     dim = (hgen.num_levels,) * hgen.num_qudits
     frame_tuple = tuple(original_frame[qudit_id] for qudit_id in hgen.qudit_ids())

@@ -48,19 +48,19 @@ Change of frame
 Qudit frame
 -----------
 
-We move to the qudit frame through a transformation with :math:`U_q := e^{i H_0 t}`:
+We move to the qudit frame through a transformation with :math:`U_q(t) := e^{i H_0 t}`:
 
 .. math::
 
     \tilde{H} & := U_q H U_q^{\dagger} + i \dot{U_q} U_q^{\dagger} \\
     & = U_q (H_{\mathrm{int}} + H_{\mathrm{d}}) U_q^{\dagger} =: \tilde{H}_{\mathrm{int}} + \tilde{H}_{\mathrm{d}}.
 
-:math:`\tilde{H}` is the generator of time evolution for state :math:`U_q |\psi\rangle`:
+:math:`\tilde{H}` is the generator of time evolution for state :math:`|\tilde{\psi}(t)\rangle_q := U_q(t) |\psi(t)\rangle`:
 
 .. math::
 
-    i \frac{\partial}{\partial t} U_q |\psi\rangle & = (i \dot{U}_q + U_q H) |\psi\rangle \\
-                                                   & = \tilde{H} U_q |\psi\rangle.
+    i \frac{\partial}{\partial t} |\tilde{\psi}(t)\rangle_q & = (i \dot{U}_q(t) + U_q(t) H(t)) |\psi(t)\rangle \\
+                                                   & = \tilde{H}(t) |\tilde{\psi}(t)\rangle_q.
 
 To write down :math:`\tilde{H}_{\mathrm{int}}` and :math:`\tilde{H}_{\mathrm{d}}` in terms of :math:`\{b_j\}_j` and :math:`\{N_j\}_j`,
 we first note that :math:`U_q` can be factored into commuting subsystem unitaries:
@@ -216,6 +216,43 @@ The three terms can be expressed in terms of individual qudit levels as
     H_{\mathrm{diag}} & = \sum_{j} \sum_{l} \left[ \left( \omega_j - \frac{\Delta_j}{2} \right) l + \frac{\Delta_j}{2} l^2 - \Xi_j^{l} \right] |l\rangle_j \langle l|_j, \\
     \tilde{H}_{\mathrm{int}} & = \sum_{j<k} J_{jk} \sum_{lm} \left( e^{i [(\xi_j^{l} - \xi_{k}^{m}) t + (\phi_j^{l} - \phi_k^{m})]} \sqrt{(l+1)(m+1)} |l+1\rangle_j \langle l|_j \otimes |m\rangle_k \langle m+1|_k + \mathrm{h.c.} \right), \\
     \tilde{H}_{\mathrm{d}} & = \sum_{jk} \alpha_{jk} \frac{\Omega_j}{2} \left( r_j(t) e^{-i (\nu_j t - \rho_{jk})} + \mathrm{c.c.} \right) \sum_l \left( e^{i (\xi_k^{l} t + \phi_k^{l})} \sqrt{l+1} |l + 1 \rangle_k \langle l |_k  + \mathrm{h.c.} \right).
+
+Frame change operations
+-----------------------
+
+Frame change between :math:`U_f(t)` and :math:`U_g(t)` is effected by the change-of-frame unitary
+:math:`V_{gf}(t) := U_g(t) U_f^{\dagger}(t)`:
+
+.. math::
+
+    V_{gf}(t) |\tilde{\psi}(t)\rangle_f = V_{gf}(t) U_f(t) |\psi(t)\rangle = U_g(t) |\psi(t)\rangle = |\tilde{\psi}(t)\rangle_g.
+
+The Schrodinger equation in integral form in frame :math:`f` is
+
+.. math::
+
+    |\tilde{\psi}(t_1)\rangle_f = U_f(t_1) K(t_1; t_0) |\psi(t_0)\rangle & = U_f(t_1) K(t_1; t_0) U_f^{\dagger}(t_0) |\tilde{\psi}(t_0)\rangle_f \\
+    & =: \tilde{K}_f(t_1; t_0) |\tilde{\psi}(t_0)\rangle_f
+
+where :math:`K(t_1; t_0) := T \left[ \exp \left(-i \int_{t_0}^{t_1}dt H(t) \right)\right]` is the lab-frame time evolution operator. Time evolution operator in frame :math:`g` is
+
+.. math::
+
+    \tilde{K}_g(t_1; t_0) = V_{gf}(t_1) \tilde{K}_f(t_1; t_0) V_{gf}^{\dagger}(t_0).
+
+As noted above, :math:`\tilde{H}_f := U_f H U_f^{\dagger} + i \dot{U}_f U_f^{\dagger}` (ommitting the time dependence) is the Hamiltonian in frame :math:`f`. The Hamiltonian in frame :math:`g` is obtained from :math:`\tilde{H}_f` by
+
+.. math::
+
+    \tilde{H}_g & = U_g U_f^{\dagger} \tilde{H}_f U_f U_g^{\dagger} - i U_g U_f^{\dagger} \dot{U}_f U_g^{\dagger} + i \dot{U}_g U_g^{\dagger} \\
+                & = V_{gf} \tilde{H}_f V_{gf}^{\dagger} + i \dot{V}_{gf} V_{gf}^{\dagger}.
+
+Finally, given the frame transformation of the states, the expectation value of an observable :math:`O` in frame :math:`f` changes its value in frame :math:`g` to
+
+.. math::
+
+    \langle O \rangle_f = \langle \tilde{\psi}|_g V_{gf} O V_{gf}^{\dagger} |\tilde{\psi}\rangle_g = \langle V_{gf} O V_{gf}^{\dagger} \rangle_g.
+
 
 Rotating-wave approximation
 ===========================

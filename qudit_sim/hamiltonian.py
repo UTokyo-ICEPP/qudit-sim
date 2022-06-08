@@ -340,17 +340,24 @@ class HamiltonianBuilder:
     def change_frame(
         self,
         tlist: np.ndarray,
-        states: np.ndarray,
+        obj: np.ndarray,
         from_frame: FrameSpec,
-        to_frame: Optional[FrameSpec] = None
+        to_frame: Optional[FrameSpec] = None,
+        objtype: str = 'evolution'
     ) -> np.ndarray:
-        """Apply the change-of-frame unitaries to states.
+        r"""Apply the change-of-frame unitaries to states, unitaries, hamiltonians, and observables.
 
         Args:
-            tlist: 1D array of time points.
-            states: Array of shape either ``(T, D, D)`` (operator evolution) or ``(T, D)`` (state evolution).
+            tlist: 1D array of shape ``(T,)`` representing the time points.
+            obj: Array of shape either ``(T, D)`` (state evolution), ``(T, D, D)`` (evolution operator,
+                Hamiltonian, or an observable), ``(D, D)`` (Hamiltonian or an observable), ``(N, D, D)``
+                (multiple observables), or ``(N, T, D, D)`` (multiple time-dependent observables), where
+                ``D`` is the dimension of the quantum system (``num_levels ** num_qudits``) and ``N`` is
+                the number of observables.
             from_frame: Specification of original frame.
             to_frame: Specification of new frame. If None, the current frame is used.
+            objtype: ``'state'``, ``'evolution'``, ``'hamiltonian'``, or ``'observable'``. Ignored when
+                the type can be unambiguously inferred from the shape of ``obj``.
 
         Returns:
             An array corresponding to ``states`` with the change of frame applied.
@@ -408,20 +415,77 @@ class HamiltonianBuilder:
         for off_arr in offsets:
             offset_diagonal = np.add.outer(offset_diagonal, off_arr).reshape(-1)
 
+        # Diagonals of the change-of-frame unitary V_{to;from}
         diagonals = np.exp(1.j * (en_diagonal[None, :] * tlist[:, None] + offset_diagonal))
 
-        if len(states.shape) == 2:
-            # Left-multiplying by a diagonal is the same as element-wise multiplication
-            return diagonals * states
+        state_dim = diagonals.shape[1]
+        shape_consistent = True
+        type_valid = True
 
-        elif len(states.shape) == 3:
-            # Right-multiplying by the inverse of a diagonal unitary = element-wise multiplication
-            # of the columns by the conjugate
-            return diagonals[:, :, None] * states * diagonals[0].conjugate()
+        if len(obj.shape) == 2:
+            if obj.shape[1] != state_dim:
+                shape_consistent = False
+
+            if state_dim != tlist.shape[0] and obj.shape[0] == tlist.shape[0]:
+                # Unambiguously determined
+                objtype = 'state'
+
+            if objtype == 'state':
+                if obj.shape[0] != tlist.shape[0]:
+                    shape_consistent = False
+            elif objtype in ['hamiltonian', 'observable']:
+                if obj.shape[0] != state_dim:
+                    shape_consistent = False
+            else:
+                type_valid = False
+
+        elif len(obj.shape) == 3:
+            if obj.shape[1:] != (state_dim, state_dim):
+                shape_consistent = False
+
+            if objtype in ['evolution', 'hamiltonian']:
+                if obj.shape[0] != tlist.shape[0]:
+                    shape_consistent = False
+            elif objtype != 'observable':
+                type_valid = False
+
+        elif len(obj.shape) == 4:
+            if obj.shape[1:] != (tlist.shape[0], state_dim, state_dim):
+                shape_consistent = False
+
+            if objtype != 'observable':
+                type_valid = False
 
         else:
-            raise ValueError('Invalid shape of states array')
+            shape_consistent = False
 
+        if not type_valid:
+            raise ValueError(f'Invalid objtype {objtype} for an obj of shape {obj.shape}')
+        if not shape_consistent:
+            raise ValueError(f'Inconsistent obj shape {obj.shape} for objtype {objtype} and tlist length {tlist.shape[0]}')
+
+        if objtype == 'state':
+            # Left-multiplying by a diagonal is the same as element-wise multiplication
+            return diagonals * obj
+
+        elif objtype == 'evolution':
+            # Right-multiplying by the inverse of a diagonal unitary = element-wise multiplication
+            # of the columns by the conjugate
+            return diagonals[:, :, None] * obj * diagonals[0].conjugate()
+
+        elif objtype == 'hamiltonian':
+            if len(obj.shape) == 2:
+                obj = obj[None, ...]
+
+            return diagonals[:, :, None] * obj * diagonals[0].conjugate() - np.diag(en_diagonal)
+
+        elif objtype == 'observable':
+            if len(obj.shape) == 2:
+                obj = obj[None, ...]
+            elif len(obj.shape) == 3 and obj.shape[0] != tlist.shape[0]:
+                obj = obj[:, None, ...]
+
+            return diagonals[:, :, None] * obj * diagonals[0].conjugate()
 
     def add_coupling(self, q1: Hashable, q2: Hashable, value: float) -> None:
         """Add a coupling term between two qudits."""
