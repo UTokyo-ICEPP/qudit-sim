@@ -44,8 +44,8 @@ class HamiltonianBuilder:
             augmented with ``'crosstalk'``, which should be a ``dict`` of form ``{(j, k): z}`` specifying the crosstalk
             factor ``z`` (complex corresponding to :math:`\alpha_{jk} e^{i\rho_{jk}}`) of drive on qudit :math:`j` seen
             by qudit :math:`k`. :math:`j` and :math:`k` are qudit ids given in ``qudits``.
-        default_frame: Default global frame to use. ``set_global_frame(default_frame)`` is executed each time
-            ``add_qudit`` or ``add_coupling`` is called.
+        default_frame: Default global frame to use. ``set_global_frame(default_frame, keep_phase=True)`` is executed
+            each time ``add_qudit`` or ``add_coupling`` is called.
     """
     def __init__(
         self,
@@ -177,8 +177,9 @@ class HamiltonianBuilder:
 
         self._drive[qudit_id] = list()
         self._crosstalk[(qudit_id, qudit_id)] = 1.
+        self.set_frame(qudit_id)
 
-        self.set_global_frame(self.default_frame)
+        self.set_global_frame(self.default_frame, keep_phase=True)
 
     def free_frequencies(
         self,
@@ -218,7 +219,7 @@ class HamiltonianBuilder:
         if len(self._coupling) == 0:
             return self.free_frequencies(qudit_id)
 
-        current_frame = dict(self._frame)
+        current_frame = self.frame()
 
         # Move to the lab frame first to build a fully static H0+Hint
         self.set_global_frame('lab')
@@ -243,7 +244,7 @@ class HamiltonianBuilder:
 
             frequencies[qid] = np.diff(energies)
 
-        self._frame = current_frame
+        self.set_global_frame(current_frame)
 
         if qudit_id is None:
             return frequencies
@@ -323,7 +324,7 @@ class HamiltonianBuilder:
 
         return frequencies, phases
 
-    def set_global_frame(self, frame_spec: FrameSpec) -> None:
+    def set_global_frame(self, frame_spec: FrameSpec, keep_phase: bool = False) -> None:
         r"""Set frames for all qudits globally.
 
         The allowed frame names are:
@@ -338,10 +339,16 @@ class HamiltonianBuilder:
           more than one drive terms.
 
         Args:
-            frame_spec: Frame specification in dict or list form, or a frame name ('qudit', 'lab', 'dressed', or 'drive').
+            frame_spec: Frame specification in dict or list form, or a frame name ('qudit', 'lab',
+            'dressed', or 'drive').
         """
         frequencies, phases = self._frame_arrays(frame_spec)
+
         qudit_ids = self.qudit_ids()
+
+        if keep_phase:
+            current_frame = self.frame()
+            phases = np.array([current_frame[qudit_id].phase for qudit_id in qudit_ids])
 
         for idx, (frequency, phase) in enumerate(zip(frequencies, phases)):
             self.set_frame(qudit_ids[idx], frequency=frequency, phase=phase)
@@ -532,7 +539,7 @@ class HamiltonianBuilder:
         """Add a coupling term between two qudits."""
         self._coupling[frozenset({q1, q2})] = value
 
-        self.set_global_frame(self.default_frame)
+        self.set_global_frame(self.default_frame, keep_phase=True)
 
     def add_crosstalk(self, source: Hashable, target: Hashable, factor: complex) -> None:
         r"""Add a crosstalk term from the source channel to the target qudit.
@@ -611,7 +618,7 @@ class HamiltonianBuilder:
 
         hamiltonian = []
 
-        if hstatic != qtp.Qobj():
+        if np.any(hstatic.data.data):
             # The static term does not have to be the first element (nor does it have to be a single term, actually)
             # but qutip recommends following this convention
             hamiltonian.append(hstatic)
@@ -632,7 +639,7 @@ class HamiltonianBuilder:
         Returns:
             A Qobj representing Hdiag. The object may be empty if the qudit frame is used.
         """
-        hdiag = qtp.Qobj()
+        hdiag = qtp.tensor([qtp.qzero(self._num_levels)] * self.num_qudits)
 
         for qudit_id, frame in self._frame.items():
             energy_offset = np.cumsum(self.free_frequencies(qudit_id)) - np.cumsum(frame.frequency)
@@ -669,7 +676,7 @@ class HamiltonianBuilder:
             Otherwise the entries are 2-lists `[Qobj, c(t)]`.
         """
         hint = list()
-        hstatic = qtp.Qobj()
+        hstatic = qtp.tensor([qtp.qzero(self._num_levels)] * self.num_qudits)
 
         for (q1, q2), coupling in self._coupling.items():
             p1 = self._qudit_params[q1]
@@ -720,7 +727,7 @@ class HamiltonianBuilder:
                             hint.append([h_x, fn_x(tlist, args)])
                             hint.append([h_y, fn_y(tlist, args)])
 
-        if hstatic != qtp.Qobj():
+        if np.any(hstatic.data.data):
             hint.insert(0, hstatic)
 
         return hint
@@ -743,7 +750,7 @@ class HamiltonianBuilder:
             Otherwise the entries are 2-lists `[Qobj, c(t)]`.
         """
         hdrive = list()
-        hstatic = qtp.Qobj()
+        hstatic = qtp.tensor([qtp.qzero(self._num_levels)] * self.num_qudits)
 
         # Construct the Qobj for each qudit/level first
         qops = list()
@@ -790,10 +797,8 @@ class HamiltonianBuilder:
                     h_y = 1.j * (creation_op - creation_op.dag())
 
                     if isinstance(fn_x, (float, complex)):
-                        if fn_x != 0.:
-                            hstatic += fn_x * h_x
-                        if fn_y != 0.:
-                            hstatic += fn_y * h_y
+                        hstatic += fn_x * h_x
+                        hstatic += fn_y * h_y
 
                     elif isinstance(fn_x, str):
                         hdrive.append([h_x, fn_x])
@@ -801,9 +806,9 @@ class HamiltonianBuilder:
                             hdrive.append([h_y, fn_y])
 
                     elif isinstance(fn_x, np.ndarray):
-                        if np.any(fn_x != 0.):
+                        if np.any(fn_x):
                             hdrive.append([h_x, fn_x])
-                        if np.any(fn_y != 0.):
+                        if np.any(fn_y):
                             hdrive.append([h_y, fn_y])
 
                     else:
@@ -816,7 +821,7 @@ class HamiltonianBuilder:
                             if fn_y is not None:
                                 hdrive.append([h_y, fn_y(tlist, args)])
 
-        if hstatic != qtp.Qobj():
+        if np.any(hstatic.data.data):
             hdrive.insert(0, hstatic)
 
         return hdrive

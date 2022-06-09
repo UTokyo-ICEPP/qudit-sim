@@ -120,6 +120,8 @@ def find_heff(
         if save_result_to:
             save_result_to_sim = f'{save_result_to}_sim'
             save_result_to_heff = f'{save_result_to}_heff'
+        else:
+            save_result_to_sim = save_result_to_heff = None
 
         hgen, tlist, flattop_time = _add_drive(hgen, qudit, drive_spec[0], drive_spec[1], cycles, ramp_cycles)
 
@@ -144,7 +146,8 @@ def _add_drive(
 ) -> Tuple[HamiltonianBuilder, np.ndarray, float]:
 
     hgen = hgen.copy(clear_drive=True)
-    hgen.set_global_frame('dressed')
+    hgen.default_frame = 'dressed'
+    hgen.set_global_frame('dressed', keep_phase=True)
 
     if isinstance(qudit, tuple):
         if not isinstance(frequency, tuple) or not isinstance(amplitude, tuple) or \

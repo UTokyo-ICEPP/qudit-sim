@@ -1,6 +1,7 @@
 """Calibrate a π pulse."""
 
-from typing import Hashable
+from typing import Hashable, Tuple
+import logging
 import numpy as np
 
 import rqutils.paulis as paulis
@@ -17,8 +18,9 @@ def find_pi_pulse(
     qudit_id: Hashable,
     level: int,
     duration: float = unit_time * 160,
-    sigma: int = unit_time * 40
-):
+    sigma: int = unit_time * 40,
+    log_level: int = logging.WARNING
+) -> Tuple[float, Drag]:
     # The "X" Pauli is the third from the last in the list of Paulis for the given level
     resonant_component = (level + 2) ** 2 - 3
 
@@ -27,7 +29,7 @@ def find_pi_pulse(
     single_qudit_idx = (0,) * qudit_index + (slice(None),) + (0,) * (hgen.num_qudits - qudit_index - 1)
 
     # Initialize the Hamiltonian
-    hgen.clear_drive()
+    hgen = hgen.copy(clear_drive=True)
     hgen.set_global_frame('dressed')
 
     drive_frequency = hgen.frame(qudit_id).frequency[level]
@@ -52,7 +54,7 @@ def find_pi_pulse(
     hgens = hgen.make_scan('amplitude', pulses, qudit_id=qudit_id, frequency=drive_frequency)
 
     ## Run the simulation
-    sim_results = pulse_sim(hgens, tlist=tlist, rwa=False)
+    sim_results = pulse_sim(hgens, tlist=tlist, log_level=log_level)
     components_list = np.array(gate_components(sim_results))
     single_qudit_components = components_list[(slice(None),) + single_qudit_idx]
 
@@ -74,7 +76,7 @@ def find_pi_pulse(
     hgens = hgen.make_scan('amplitude', pulses, qudit_id=qudit_id, frequency=drive_frequency)
 
     ## Run the simulation
-    sim_results = pulse_sim(hgens, tlist=tlist, rwa=False)
+    sim_results = pulse_sim(hgens, tlist=tlist, log_level=log_level)
     components_list = np.array(gate_components(sim_results))
     single_qudit_components = components_list[(slice(None),) + single_qudit_idx]
 
@@ -91,4 +93,4 @@ def find_pi_pulse(
     x0, x1 = betas[idx - 1:idx + 1]
     best_beta = ((0. - y0) * x1 - (0. - y1) * x0) / (y1 - y0)
 
-    return best_amplitude, best_beta
+    return drive_frequency, Drag(duration=duration, amp=best_amplitude, sigma=sigma, beta=best_beta)

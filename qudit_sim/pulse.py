@@ -6,12 +6,9 @@ import logging
 from dataclasses import dataclass
 import numpy as np
 
-from .util import FrequencyScale, CallableCoefficient
+from .util import CallableCoefficient
 
 logger = logging.getLogger(__name__)
-
-s = FrequencyScale.Hz.time_value
-ns = FrequencyScale.GHz.time_value
 
 class PulseSequence(list):
     """Pulse sequence.
@@ -63,11 +60,16 @@ class PulseSequence(list):
         Returns:
             X and Y coefficient functions.
         """
+        if len(self) == 0:
+            return 0., 0.
+
+        assert isinstance(self[0], SetFrequency), 'First instruction of a PulseSequence must be SetFrequency'
+
         funclist_x = []
         funclist_y = []
         timelist = []
 
-        frequency = 0.
+        frequency = None
         phase_offset = 0.
         time = 0.
 
@@ -95,17 +97,8 @@ class PulseSequence(list):
 
         timelist.append(time)
 
-        def make_fn(timelist, funclist):
-            def fn(t, args):
-                # piecewise determines the output dtype from tlist
-                t = np.asarray(t, dtype=np.float)
-                condlist = [((t >= start) & (t < end)) for start, end in zip(timelist[:-1], timelist[1:])]
-                return np.piecewise(t, condlist, funclist, args)
-
-            return fn
-
-        fn_x = make_fn(timelist, funclist_x)
-        fn_y = make_fn(timelist, funclist_y)
+        fn_x = _make_sequence_fn(timelist, funclist_x)
+        fn_y = _make_sequence_fn(timelist, funclist_y)
 
         return fn_x, fn_y
 
@@ -117,6 +110,7 @@ class PulseSequence(list):
 
         Args:
             t: Time or array of time points.
+            args: Second argument to the pulse envelope functions.
 
         Returns:
             Pulse sequence envelope (complex) as a function of time.
@@ -126,29 +120,38 @@ class PulseSequence(list):
 
         time = 0.
 
-        def make_shifted(pulse, start_time):
-            def fn(t):
-                return pulse(t - start_time, args)
-
-            return fn
-
         for inst in self:
             if isinstance(inst, Delay):
                 funclist.append(0.)
                 timelist.append(time)
                 time += inst.value
             elif isinstance(inst, Pulse):
-                funclist.append(make_shifted(inst, time))
+                funclist.append(_make_shifted_fn(inst, time))
                 timelist.append(time)
                 time += inst.duration
 
         timelist.append(time)
 
         # piecewise determines the output dtype from tlist
-        t = np.asarray(t, dtype=np.float)
+        tlist = np.asarray(t, dtype=np.complex128)
         condlist = [((t >= start) & (t < end)) for start, end in zip(timelist[:-1], timelist[1:])]
-        return np.piecewise(t, condlist, funclist)
+        return np.piecewise(tlist, condlist, funclist, args)
 
+
+def _make_sequence_fn(timelist, funclist):
+    def fn(t, args):
+        # piecewise determines the output dtype from tlist
+        tlist = np.asarray(t, dtype=np.float)
+        condlist = [((t >= start) & (t < end)) for start, end in zip(timelist[:-1], timelist[1:])]
+        return np.piecewise(tlist, condlist, funclist, args)
+
+    return fn
+
+def _make_shifted_fn(pulse, start_time):
+    def fn(t, args):
+        return pulse(t - start_time, args)
+
+    return fn
 
 class Pulse:
     """Base class for all pulse shapes.
@@ -243,8 +246,6 @@ class Gaussian(Pulse):
     ):
         super().__init__(duration)
 
-        assert sigma > 1. * ns, 'Gaussian sigma must be greater than 1 ns'
-
         self.sigma = sigma
 
         if center is None:
@@ -253,7 +254,7 @@ class Gaussian(Pulse):
             self.center = center
 
         if zero_ends:
-            assert np.abs(self.center - self.duration * 0.5) < 1. * ns, \
+            assert np.isclose(self.center, self.duration * 0.5), \
                 'Zero-ended Gaussian must be centered'
 
             x = self.duration * 0.5 / self.sigma
@@ -298,7 +299,6 @@ class GaussianSquare(Pulse):
 
         super().__init__(duration)
 
-        assert sigma > 1. * ns, 'Gaussian sigma must be greater than 1 ns'
         assert width < duration, 'GaussianSquare width must be less than duration'
 
         self.amp = amp
