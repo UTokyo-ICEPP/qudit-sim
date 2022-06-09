@@ -1,4 +1,4 @@
-"""Hamiltonian analysis routines."""
+"""Hamiltonian visualization routines."""
 
 from typing import Union, Tuple, List
 import numpy as np

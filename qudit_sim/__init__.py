@@ -9,4 +9,4 @@ from .util import FrequencyScale, PulseSimResult, CallableCoefficient, Hamiltoni
 from .parallel import parallel_map
 from .config import config
 from . import apps
-from . import analysis
+from . import visualization

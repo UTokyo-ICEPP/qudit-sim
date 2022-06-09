@@ -48,3 +48,35 @@ def heff_fidelity(
     fidelity = trace_norm_squared(target, npmod=npmod)
 
     return fidelity
+
+
+def fidelity_loss(
+    time_evolution: np.ndarray,
+    components: np.ndarray,
+    tlist: np.ndarray
+) -> np.ndarray:
+    """Compute the loss in the mean fidelity when each component is set to zero.
+
+    Args:
+        time_evolution: Time evolution unitary as a function of time.
+        components: Pauli components.
+        tlist: Time points.
+
+    Returns:
+        An array with the shape of Pauli basis, with elements corresponding to the loss in mean
+        fidelity when the respective components are set to zero.
+    """
+    best_fidelity = np.mean(heff_fidelity(time_evolution, components[0], components[1], tlist))
+
+    fid_loss = np.zeros_like(components[0])
+
+    for idx in np.ndindex(fid_loss.shape):
+        test_heff = components[0].copy()
+        test_heff[idx] = 0.
+        test_offset = components[1].copy()
+        test_offset[idx] = 0.
+        test_fidelity = np.mean(heff_fidelity(time_evolution, test_heff, test_offset, tlist))
+
+        fid_loss[idx] = best_fidelity - test_fidelity
+
+    return fid_loss
