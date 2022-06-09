@@ -12,7 +12,6 @@ from typing import Callable, Optional, Union, Tuple
 from dataclasses import dataclass
 import numpy as np
 
-from .pulse import PulseSequence
 from .util import HamiltonianCoefficient
 
 def cos_freq(freq, phase=0.):
@@ -76,7 +75,7 @@ class DriveTerm:
             a constant phase. None otherwise.
     """
     frequency: Optional[float] = None
-    amplitude: Union[float, complex, str, np.ndarray, PulseSequence, Callable] = 1.+0.j
+    amplitude: Union[float, complex, str, np.ndarray, Callable] = 1.+0.j
     constant_phase: Optional[float] = None
 
     def generate_fn(
@@ -84,7 +83,7 @@ class DriveTerm:
         frame_frequency: float,
         drive_base: complex,
         rwa: bool
-    ) -> Tuple[HamiltonianCoefficient, Union[HamiltonianCoefficient, None], float]:
+    ) -> Tuple[HamiltonianCoefficient, Union[HamiltonianCoefficient, None]]:
         r"""Generate the coefficients for X and Y drives.
 
         Args:
@@ -93,14 +92,8 @@ class DriveTerm:
             rwa: If True, returns the RWA coefficients.
 
         Returns:
-            A 3-tuple of X and Y coefficients and the maximum frequency appearing in the term.
+            X and Y coefficient functions.
         """
-        if isinstance(self.amplitude, PulseSequence):
-            return self.amplitude.generate_fn(frame_frequency, drive_base, rwa, initial_frequency=self.frequency)
-
-        if self.frequency is None:
-            raise RuntimeError('Drive frequency not set')
-
         amplitude = self.amplitude
         if isinstance(amplitude, str):
             # If this is actually a static expression, convert to complex
@@ -111,12 +104,10 @@ class DriveTerm:
 
         if rwa:
             fn_x, fn_y = self._generate_fn_rwa(amplitude, frame_frequency, drive_base)
-            max_freq = abs(self.frequency - frame_frequency)
         else:
             fn_x, fn_y = self._generate_fn_full(amplitude, frame_frequency, drive_base)
-            max_freq = self.frequency + frame_frequency
 
-        return fn_x, fn_y, max_freq
+        return fn_x, fn_y
 
     def _generate_fn_rwa(self, amplitude, frame_frequency, drive_base):
         detuning = self.frequency - frame_frequency

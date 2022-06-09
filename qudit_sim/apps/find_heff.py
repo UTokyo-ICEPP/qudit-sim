@@ -96,14 +96,13 @@ def find_heff(
         args = list()
         flattop_times = list()
         for freq, amp in drive_spec:
-            hgen, duration, flattop_time = _add_drive(hgen, qudit, freq, amp, cycles, ramp_cycles)
-            tlist = {'points_per_cycle': 8, 'duration': duration}
+            hgen, tlist, flattop_time = _add_drive(hgen, qudit, freq, amp, cycles, ramp_cycles)
             args.append((hgen, tlist))
             flattop_times.append(flattop_time)
 
         kwarg_keys = ('save_result_to',)
         kwarg_values = list((save_result_path('sim', itask),) for itask in range(num_tasks))
-        common_kwargs = {'rwa': False, 'log_level': log_level}
+        common_kwargs = {'log_level': log_level}
 
         sim_results = parallel_map(pulse_sim, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
                                    common_kwargs=common_kwargs, log_level=log_level)
@@ -122,10 +121,9 @@ def find_heff(
             save_result_to_sim = f'{save_result_to}_sim'
             save_result_to_heff = f'{save_result_to}_heff'
 
-        hgen, duration, flattop_time = _add_drive(hgen, qudit, drive_spec[0], drive_spec[1], cycles, ramp_cycles)
-        tlist = {'points_per_cycle': 8, 'duration': duration}
+        hgen, tlist, flattop_time = _add_drive(hgen, qudit, drive_spec[0], drive_spec[1], cycles, ramp_cycles)
 
-        sim_result = pulse_sim(hgen, tlist, rwa=False, save_result_to=save_result_to_sim, log_level=log_level)
+        sim_result = pulse_sim(hgen, tlist, save_result_to=save_result_to_sim, log_level=log_level)
 
         components = _run_single(sim_result, flattop_time, comp_dim=comp_dim, optimizer=optimizer,
                                  optimizer_args=optimizer_args, max_updates=max_updates, convergence=convergence,
@@ -143,7 +141,7 @@ def _add_drive(
     amplitude: AmplitudeSpec,
     cycles: float,
     ramp_cycles: float
-) -> Tuple[HamiltonianBuilder, float, float]:
+) -> Tuple[HamiltonianBuilder, np.ndarray, float]:
 
     hgen = hgen.copy(clear_drive=True)
     hgen.set_global_frame('dressed')
@@ -155,10 +153,9 @@ def _add_drive(
 
         if len(qudit) == 0:
             # No-drive effective Hamiltonian
-            hgen.build()
-            duration = hgen.make_tlist(1, num_cycles=int(cycles))[-1]
+            tlist = hgen.make_tlist(8, num_cycles=int(cycles))
 
-            return hgen, duration, 0.
+            return hgen, tlist, 0.
 
         max_cycle = 2. * np.pi / min(frequency)
         duration = max_cycle * (ramp_cycles + cycles)
@@ -178,9 +175,9 @@ def _add_drive(
         pulse = GaussianSquare(duration, amplitude, sigma, width, fall=False)
         hgen.add_drive(qudit, frequency=frequency, amplitude=pulse)
 
-    tlist = {'points_per_cycle': 8, 'duration': duration}
+    tlist = hgen.make_tlist(8, duration=duration)
 
-    return hgen, duration, 4. * sigma
+    return hgen, tlist, 4. * sigma
 
 
 def _run_single(

@@ -33,16 +33,10 @@ def find_pi_pulse(
     ## Make the tlist
 
     hgen.add_drive(qudit_id, frequency=drive_frequency, amplitude=1.)
-    hgen.build()
-    max_frequency = hgen.max_frequency
-
-    # max_frequency is actually angular
-    cycle = 1. / max_frequency * 2. * np.pi
-    num_tpoints = int(duration / cycle) * 10
-    tlist = np.linspace(0., duration, num_tpoints)
+    tlist = hgen.make_tlist(10, duration=duration)
+    hgen.clear_drive()
 
     ## Set up the amplitude scan
-    hgen.clear_drive()
 
     # Approximate the Gaussian with a triangle -> angle = Hamiltonian * duration / 2.
     # For a resonant drive, the transition Hamiltonian strength is drive_base * amplitude * sqrt(level+1) / 2

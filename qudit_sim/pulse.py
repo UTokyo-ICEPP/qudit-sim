@@ -27,12 +27,25 @@ class PulseSequence(list):
         d += sum(inst.duration for inst in self if isinstance(inst, Pulse))
         return d
 
+    @property
+    def frequency(self):
+        frequency = 0.
+        max_frequency = 0.
+        for inst in self:
+            if isinstance(inst, ShiftFrequency):
+                frequency += inst.value
+                max_frequency = max(max_frequency, frequency)
+            elif isinstance(inst, SetFrequency):
+                frequency = inst.value
+                max_frequency = max(max_frequency, frequency)
+
+        return max_frequency
+
     def generate_fn(
         self,
         frame_frequency: float,
         drive_base: complex,
-        rwa: bool = True,
-        initial_frequency: Optional[float] = None
+        rwa: bool = False
     ) -> tuple:
         r"""Generate the X and Y drive coefficients and the maximum frequency appearing in the sequence.
 
@@ -48,26 +61,23 @@ class PulseSequence(list):
                 is SetFrequency.
 
         Returns:
-            A 3-tuple of X and Y coefficients and the maximum frequency appearing in the term.
+            X and Y coefficient functions.
         """
         funclist_x = []
         funclist_y = []
         timelist = []
 
-        frequency = initial_frequency
-        max_frequency = 0. if frequency is None else frequency
+        frequency = 0.
         phase_offset = 0.
         time = 0.
 
         for inst in self:
             if isinstance(inst, ShiftFrequency):
                 frequency += inst.value
-                max_frequency = max(max_frequency, frequency)
             elif isinstance(inst, ShiftPhase):
                 phase_offset += inst.value
             elif isinstance(inst, SetFrequency):
                 frequency = inst.value
-                max_frequency = max(max_frequency, frequency)
             elif isinstance(inst, SetPhase):
                 phase_offset = inst.value - frequency * time
             elif isinstance(inst, Delay):
@@ -97,7 +107,7 @@ class PulseSequence(list):
         fn_x = make_fn(timelist, funclist_x)
         fn_y = make_fn(timelist, funclist_y)
 
-        return fn_x, fn_y, max_frequency
+        return fn_x, fn_y
 
     def envelope(self, t: Union[float, np.ndarray], args: Any = None) -> np.ndarray:
         """Return the envelope of the sequence as a function of time.

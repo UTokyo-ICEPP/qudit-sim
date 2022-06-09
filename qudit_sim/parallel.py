@@ -134,7 +134,8 @@ def parallel_map(
 
     assert arg_list is not None, 'args or kwarg_keys must be set'
 
-    logger.info('Starting %d parallel execution of %s', len(arg_list), target.__name__)
+    logger.info('Executing %s in %d parallel (max %d simultaneous) %s..', target.__name__, len(arg_list), num_cpus,
+                'threads' if thread_based else 'processes')
 
     num_done = 0
 

@@ -162,6 +162,55 @@ def _run_single(
 
     logger.info('Using %d time points from %.3e to %.3e', tlist.shape[0], tlist[0], tlist[-1])
 
+    ## Define the initial state if necessary
+
+    identity = qtp.tensor([qtp.qeye(hgen.num_levels)] * hgen.num_qudits)
+
+    if psi0 is None:
+        psi0 = identity
+
+    if psi0.isket:
+        objtype = 'state'
+    else:
+        objtype = 'evolution'
+
+    psi0_data = hgen.change_frame(tlist[:1], psi0, from_frame=original_frame, to_frame='lab', objtype=objtype)
+    dims = psi0.dims
+    psi0 = qtp.Qobj(inpt=psi0_data[0], dims=dims)
+
+    ## Change the e_ops frame if necessary
+
+    if nonlab_original_frame and e_ops is not None:
+        en_diagonal, offset_diagonal = hgen.frame_change_operator(from_frame=original_frame, to_frame='lab')
+
+        def make_op_fn(observable):
+            if isinstance(observable, qtp.Qobj):
+                obs_arr = observable.full()
+                def op_fn(t, state):
+                    cof_op_diag = np.exp(1.j * (en_diagonal * t + offset_diagonal))
+                    frame_obs = cof_op_diag[:, None] * obs_arr * cof_op_diag[None, :].conjugate()
+
+                    return state.dag().full() @ frame_obs @ state.full()
+
+            else:
+                def op_fn(t, state):
+                    cof_op_diag = np.exp(1., * (en_diagonal * t + offset_diagonal))
+                    obs_arr = observable(t, identity)
+                    frame_obs = cof_op_diag[:, None] * obs_arr * cof_op_diag[None, :].conjugate()
+
+                    return state.dag().full() @ frame_obs @ state.full()
+
+            return op_fn
+
+        e_ops_orig = e_ops
+        e_ops = []
+        for observable in e_ops_orig:
+            e_ops.append(make_op_fn(observable))
+
+    ## Arguments to sesolve
+
+    kwargs = {'args': args, 'e_ops': e_ops, 'options': options, 'progress_bar': progress_bar}
+
     ## Build the Hamiltonian
 
     if keep_callable:
@@ -170,37 +219,6 @@ def _run_single(
         tlist_arg = {'tlist': tlist, 'args': args}
 
     hamiltonian = hgen.build(rwa=False, **tlist_arg)
-
-    ## Define the initial state if necessary
-
-    if psi0 is None:
-        psi0 = qtp.tensor([qtp.qeye(hgen.num_levels)] * hgen.num_qudits)
-
-    ## Change the e_ops frame if necessary
-
-    if nonlab_original_frame:
-        def make_op_fn(lab_op_arr):
-            def op_fn(t, state):
-                return state.dag().full()[None, ...] @ lab_op_arr @ state.full()[None, ...]
-
-            return op_fn
-
-        e_ops_orig = e_ops
-        e_ops = []
-        for op in e_ops_orig:
-            if callable(op):
-                op_arr = op(tlist, qtp.tensor([qtp.qeye(hgen.num_levels)] * hgen.num_qudits))
-            else:
-                op_arr = op.full()
-
-            lab_op_arr = hgen.change_frame(tlist, op_arr, from_frame=original_frame, to_frame='lab',
-                                           objtype='observable')
-
-            e_ops.append(make_op_fn(lab_op_arr))
-
-    ## Arguments to sesolve
-
-    kwargs = {'args': args, 'e_ops': e_ops, 'options': options, 'progress_bar': progress_bar}
 
     ## Run sesolve in a temporary directory
 
@@ -228,11 +246,6 @@ def _run_single(
 
     if qtp_result.states:
         states = np.stack(list(state.full() for state in qtp_result.states))
-        if len(states.shape) == 2:
-            objtype = 'state'
-        else:
-            objtype = 'evolution'
-
         states = hgen.change_frame(tlist, states, from_frame='lab', to_frame=original_frame,
                                    objtype=objtype)
     else:
