@@ -251,7 +251,7 @@ def _run_single(
     else:
         states = None
 
-    expect = list(exp.copy() for exp in qtp_result.expect)
+    expect = list(exp.real.copy() for exp in qtp_result.expect)
     dim = (hgen.num_levels,) * hgen.num_qudits
     frame_tuple = tuple(original_frame[qudit_id] for qudit_id in hgen.qudit_ids())
 
