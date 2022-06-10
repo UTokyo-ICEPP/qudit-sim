@@ -128,7 +128,7 @@ def inspect_heff_fit(
 
     # Highlight the plots within the computational dimensions
     for iax, index in enumerate(indices):
-        ax = fig_ilogu.axes[iax]
+        ax = fig_target.axes[iax]
 
         if np.all(np.array(index) < comp_dim ** 2):
             for spine in ax.spines.values():
@@ -162,7 +162,7 @@ def inspect_heff_fit(
             ax.set_title('Gradient evolution')
             ax.set_xlabel('steps')
             ax.set_ylabel('max(abs(grad))')
-            ax.plot(np.amax(np.abs(grad), axis=1))
+            ax.plot(np.amax(np.abs(grad.reshape(grad.shape[0], -1)), axis=1))
             ax.axhline(0., color='black', linewidth=0.5)
 
     for fig in figures:

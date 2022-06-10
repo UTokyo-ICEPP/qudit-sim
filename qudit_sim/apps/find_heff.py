@@ -277,23 +277,21 @@ def _maximize_fidelity(
     for ilogv_ext in [np.amin(ilogvs, axis=1), -np.amax(ilogvs, axis=1)]:
         margin = 0.1
         hits_minus_pi = np.asarray(ilogv_ext < -np.pi + margin).nonzero()[0]
-        if len(hits_minus_pi) != 0:
+        if hits_minus_pi.shape[0] != 0:
             last_valid_tidx = min(last_valid_tidx, hits_minus_pi[0])
 
     if last_valid_tidx <= 1:
         raise RuntimeError('Failed to obtain an initial estimate of the slopes')
 
     ilogu_compos = paulis.components(ilogus, dim=dim).real
+    ilogu_compos = ilogu_compos.reshape(tlist.shape[0], -1)[:, 1:]
 
     init = (ilogu_compos[last_valid_tidx - 1] - ilogu_compos[0]) / tlist[last_valid_tidx - 1]
-
-    # Reshape and truncate the components array to match the basis_list
-    init = init.reshape(-1)[1:]
 
     ## Stack the initial parameter values
     # initial[0]: init multiplied by time_norm
     # initial[1]: offset components (initialized to ilogu_compos[0])
-    initial = np.stack((init * time_norm, ilogu_compos[0].reshape(-1)[1:]), axis=0)
+    initial = np.stack((init * time_norm, ilogu_compos[0]), axis=0)
     initial = jax.device_put(initial, device=jax_device)
 
     ## Working arrays
