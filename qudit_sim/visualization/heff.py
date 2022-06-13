@@ -22,7 +22,7 @@ from rqutils.math import matrix_angle
 
 from ..apps.heff_tools import unitary_subtraction, heff_fidelity
 from ..util import FrequencyScale
-from .decompositions import print_components, plot_time_evolution
+from .decompositions import print_components, plot_evolution
 
 def inspect_heff_fit(
     filename: str,
@@ -73,13 +73,13 @@ def inspect_heff_fit(
     figures = []
 
     ## First figure: original time evolution and Heff
-    indices, fig_ilogu = plot_time_evolution(time_evolution=time_evolution,
-                                             tlist=tlist,
-                                             dim=dim,
-                                             threshold=threshold,
-                                             select_components=select_components,
-                                             align_ylim=align_ylim,
-                                             tscale=tscale)
+    indices, fig_ilogu = plot_evolution(time_evolution=time_evolution,
+                                        tlist=tlist,
+                                        dim=dim,
+                                        threshold=threshold,
+                                        select_components=select_components,
+                                        align_ylim=align_ylim,
+                                        tscale=tscale)
     figures.append(fig_ilogu)
 
     fig_ilogu.suptitle(r'Original time evolution vs $H_{eff}$', fontsize=24)
@@ -115,13 +115,13 @@ def inspect_heff_fit(
     ## Second figure: subtracted unitaries
     target = unitary_subtraction(time_evolution[fit_start:], components, offset_components, tlist_fit)
 
-    indices, fig_target = plot_time_evolution(time_evolution=target,
-                                              tlist=(tlist_fit + tlist[fit_start]),
-                                              dim=dim,
-                                              threshold=threshold,
-                                              select_components=select_components,
-                                              align_ylim=align_ylim,
-                                              tscale=tscale)
+    indices, fig_target = plot_evolution(time_evolution=target,
+                                         tlist=(tlist_fit + tlist[fit_start]),
+                                         dim=dim,
+                                         threshold=threshold,
+                                         select_components=select_components,
+                                         align_ylim=align_ylim,
+                                         tscale=tscale)
     figures.append(fig_target)
 
     fig_target.suptitle('Unitary-subtracted time evolution', fontsize=24)

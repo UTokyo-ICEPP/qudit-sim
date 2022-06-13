@@ -179,10 +179,11 @@ def plot_components(
     return fig
 
 
-def plot_time_evolution(
+def plot_evolution(
     sim_result: Optional[PulseSimResult] = None,
     time_evolution: Optional[np.ndarray] = None,
     tlist: Optional[np.ndarray] = None,
+    differential: bool = False,
     dim: Optional[Tuple[int, ...]] = None,
     threshold: float = 0.01,
     select_components: Optional[List[Tuple[int, ...]]] = None,
@@ -201,12 +202,17 @@ def plot_time_evolution(
     if tscale is not None:
         tlist = tlist * tscale.frequency_value
 
+    if differential:
+        time_evolution = time_evolution[1:] @ time_evolution[:-1].transpose((0, 2, 1)).conjugate()
+        tlist = tlist[1:]
+
     ilogus = -matrix_angle(time_evolution)
-    ilogu_compos = np.moveaxis(paulis.components(ilogus, dim=dim).real, 0, -1)
+    components = paulis.components(ilogus, dim=dim).real
+    components = np.moveaxis(components, 0, -1)
 
     if select_components is None:
         # Make a list of tuples from a tuple of arrays
-        select_components = list(zip(*np.nonzero(np.amax(np.abs(ilogu_compos), axis=-1) > threshold)))
+        select_components = list(zip(*np.nonzero(np.amax(np.abs(components), axis=-1) > threshold)))
 
     num_axes = len(select_components)
 
@@ -232,7 +238,7 @@ def plot_time_evolution(
 
     if align_ylim:
         indices_array = np.array(tuple(zip(select_components)))
-        selected_compos = ilogu_compos[indices_array]
+        selected_compos = components[indices_array]
         ymax = np.amax(selected_compos)
         ymin = np.amin(selected_compos)
         vrange = ymax - ymin
@@ -243,7 +249,7 @@ def plot_time_evolution(
         ax = fig.axes[iax]
 
         ax.set_title(f'${labels[index]}$')
-        ax.plot(tlist, ilogu_compos[index])
+        ax.plot(tlist, components[index])
 
         ax.axhline(0., color='black', linewidth=0.5)
         if align_ylim:
