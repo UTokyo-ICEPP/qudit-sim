@@ -30,7 +30,7 @@ def inspect_heff_fit(
     tscale: FrequencyScale = FrequencyScale.auto,
     align_ylim: bool = False,
     select_components: Optional[List[Tuple]] = None,
-    digest: bool = True
+    metrics: bool = True
 ) -> List[mpl.figure.Figure]:
     """Plot the time evolution of Pauli components before and after fidelity maximization.
 
@@ -41,10 +41,10 @@ def inspect_heff_fit(
         tscale: Scale for the time axis.
         align_ylim: Whether to align the y axis limits for all plots.
         limit_components: List of Pauli components to plot.
-        digest: If True, a figure for fit information is included.
+        metrics: If True, a figure for fit information is included.
 
     Returns:
-        A list of two (three if digest=True) figures.
+        A list of two (three if metrics=True) figures.
     """
     with h5py.File(filename, 'r') as source:
         num_qudits = int(source['num_qudits'][()])
@@ -70,36 +70,39 @@ def inspect_heff_fit(
     dim = (num_sim_levels,) * num_qudits
     tlist_fit = tlist[fit_start:] - tlist[fit_start]
 
-    figures = []
-
-    ## First figure: original time evolution and Heff
-    indices, fig_ilogu = plot_evolution(time_evolution=time_evolution,
-                                        tlist=tlist,
-                                        dim=dim,
-                                        threshold=threshold,
-                                        select_components=select_components,
-                                        align_ylim=align_ylim,
-                                        tscale=tscale)
-    figures.append(fig_ilogu)
-
-    fig_ilogu.suptitle(r'Original time evolution vs $H_{eff}$', fontsize=24)
-
-    # Add lines with slope=compo for terms above threshold
     if tscale is FrequencyScale.auto:
         tscale = FrequencyScale.find_time_scale(tlist[-1])
 
+    figures = []
+
+    ## First figure: original time evolution and Heff
+    indices, fig_generator = plot_evolution(time_evolution=time_evolution,
+                                            tlist=tlist,
+                                            dim=dim,
+                                            threshold=threshold,
+                                            select_components=select_components,
+                                            eigvals=True,
+                                            align_ylim=align_ylim,
+                                            tscale=tscale,
+                                            title='Original time evolution vs $H_{eff}$')
+    figures.append(fig_generator)
+
+    # Add lines with slope=compo for terms above threshold
+    xval = (tlist_fit + tlist[fit_start]) * tscale.frequency_value
+    x0 = tlist[fit_start] * tscale.frequency_value
+
     for iax, index in enumerate(indices):
-        ax = fig_ilogu.axes[iax]
-        xval = (tlist_fit + tlist[fit_start]) * tscale.frequency_value
+        ax = fig_generator.axes[iax]
         yval = components[index] * tlist_fit + offset_components[index]
-        x0 = tlist[fit_start] * tscale.frequency_value
 
         ax.plot(xval, yval)
-        ax.axvline(x0, linestyle='--', color='black', linewidth=0.5)
 
-        if np.all(np.array(index) < comp_dim ** 2):
-            for spine in ax.spines.values():
-                spine.set(linewidth=2.)
+    # Indicate the start-of-fit time
+    for ax in fig_generator.axes:
+        if ax.get_lines():
+            ax.axvline(x0, linestyle='dotted', color='black', linewidth=0.5)
+
+    _highlight_comp_dim_components(fig_generator, indices, comp_dim)
 
     colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
     handles = [
@@ -107,10 +110,10 @@ def inspect_heff_fit(
         mpl.lines.Line2D([0.], [0.], color=colors[1])
     ]
     labels = [
-        'ilogU(t) component',
-        '$H_{eff}t$ component $\pm$ offset'
+        'Generator component',
+        '$H_{eff}t$ component'
     ]
-    fig_ilogu.legend(handles, labels, 'upper right')
+    fig_generator.legend(handles, labels, 'upper right')
 
     ## Second figure: subtracted unitaries
     target = unitary_subtraction(time_evolution[fit_start:], components, offset_components, tlist_fit)
@@ -121,24 +124,17 @@ def inspect_heff_fit(
                                          threshold=threshold,
                                          select_components=select_components,
                                          align_ylim=align_ylim,
-                                         tscale=tscale)
+                                         tscale=tscale,
+                                         title='Unitary-subtracted time evolution')
     figures.append(fig_target)
 
-    fig_target.suptitle('Unitary-subtracted time evolution', fontsize=24)
+    _highlight_comp_dim_components(fig_target, indices, comp_dim)
 
-    # Highlight the plots within the computational dimensions
-    for iax, index in enumerate(indices):
-        ax = fig_target.axes[iax]
-
-        if np.all(np.array(index) < comp_dim ** 2):
-            for spine in ax.spines.values():
-                spine.set(linewidth=2.)
-
-    if digest:
-        ## Third figure: fit digest plots
-        fig_digest, axes = plt.subplots(1, 4, figsize=(16, 4))
-        figures.append(fig_digest)
-        fig_digest.suptitle('Fit metrics', fontsize=24)
+    if metrics:
+        ## Third figure: fit metrics plots
+        fig_metrics, axes = plt.subplots(1, 3, figsize=(16, 4))
+        figures.append(fig_metrics)
+        fig_metrics.suptitle('Fit metrics', fontsize=16)
 
         # fidelity
         final_fidelity = heff_fidelity(time_evolution[fit_start:], components, offset_components, tlist_fit)
@@ -146,7 +142,7 @@ def inspect_heff_fit(
         ax.set_title('Final fidelity')
         ax.set_xlabel(f't ({tscale.time_unit})')
         ax.set_ylabel('fidelity')
-        ax.plot(tlist_fit + tlist[fit_start], final_fidelity)
+        ax.plot((tlist_fit + tlist[fit_start]) * tscale.frequency_value, final_fidelity)
         ax.axhline(1., color='black', linewidth=0.5)
 
         ## Intermediate data is not available if minuit is used
@@ -165,10 +161,18 @@ def inspect_heff_fit(
             ax.plot(np.amax(np.abs(grad.reshape(grad.shape[0], -1)), axis=1))
             ax.axhline(0., color='black', linewidth=0.5)
 
-    for fig in figures:
-        fig.tight_layout()
+        fig_metrics.tight_layout()
 
     return figures
+
+
+def _highlight_comp_dim_components(fig, indices, comp_dim):
+    for iax, index in enumerate(indices):
+        ax = fig.axes[iax]
+
+        if np.all(np.array(index) < comp_dim ** 2):
+            for spine in ax.spines.values():
+                spine.set(linewidth=2.)
 
 
 def plot_amplitude_scan(

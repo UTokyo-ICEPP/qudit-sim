@@ -187,9 +187,11 @@ def plot_evolution(
     dim: Optional[Tuple[int, ...]] = None,
     threshold: float = 0.01,
     select_components: Optional[List[Tuple[int, ...]]] = None,
+    eigvals: bool = True,
     align_ylim: bool = False,
     tscale: Optional[FrequencyScale] = FrequencyScale.auto,
-    fig: Optional[mpl.figure.Figure] = None
+    fig: Optional[mpl.figure.Figure] = None,
+    title: str = ''
 ):
     if sim_result is not None:
         time_evolution = sim_result.states
@@ -206,8 +208,8 @@ def plot_evolution(
         time_evolution = time_evolution[1:] @ time_evolution[:-1].transpose((0, 2, 1)).conjugate()
         tlist = tlist[1:]
 
-    ilogus = -matrix_angle(time_evolution)
-    components = paulis.components(ilogus, dim=dim).real
+    generator, ev = matrix_angle(time_evolution, with_diagonals=True)
+    components = paulis.components(-1. * generator, dim=dim).real
     components = np.moveaxis(components, 0, -1)
 
     if select_components is None:
@@ -215,6 +217,8 @@ def plot_evolution(
         select_components = list(zip(*np.nonzero(np.amax(np.abs(components), axis=-1) > threshold)))
 
     num_axes = len(select_components)
+    if eigvals:
+        num_axes += 1
 
     if num_axes == 0:
         if fig is None:
@@ -224,7 +228,7 @@ def plot_evolution(
 
     nx = np.floor(np.sqrt(num_axes)).astype(int)
     nx = max(nx, 4)
-    nx = min(nx, 12)
+    nx = min(nx, 9)
     ny = np.ceil(num_axes / nx).astype(int)
 
     if fig is None:
@@ -254,10 +258,32 @@ def plot_evolution(
         ax.axhline(0., color='black', linewidth=0.5)
         if align_ylim:
             ax.set_ylim(ymin, ymax)
+        ax.set_ylabel('rad')
+
+    if eigvals:
+        ax = fig.axes[len(select_components)]
+
+        ev = np.sort(-1. * ev, axis=1)
+
+        ax.set_title('Generator eigenvalues')
+        ax.plot(tlist, ev)
+
+        for y in [-np.pi, 0., np.pi]:
+            ax.axhline(y, color='black', linewidth=0.5, linestyle='dashed')
+        ax.set_ylabel('rad')
+
+    for ax in fig.axes:
+        if not ax.get_lines():
+            continue
+
         if tscale is None:
             ax.set_xlabel('t')
         else:
             ax.set_xlabel(f't ({tscale.time_unit})')
-        ax.set_ylabel('rad')
+
+    if title:
+        fig.suptitle(title, fontsize=20)
+
+    fig.tight_layout(rect=[0., 0., 1., 0.98])
 
     return select_components, fig
