@@ -10,10 +10,11 @@ import copy
 import collections
 
 import numpy as np
+import h5py
 import qutip as qtp
 
 from .hamiltonian import HamiltonianBuilder
-from .util import PulseSimResult
+from .util import PulseSimResult, save_sim_result
 from .parallel import parallel_map
 
 logger = logging.getLogger(__name__)
@@ -238,10 +239,6 @@ def _run_single(
 
     logger.info('Done in %f seconds.', stop - start)
 
-    if save_result_to:
-        logger.info('Saving the simulation result to %s.qu', save_result_to)
-        qtp.fileio.qsave(qtp_result, save_result_to)
-
     ## Bring the hgen frame back and change the frame of the states
 
     if qtp_result.states:
@@ -255,4 +252,10 @@ def _run_single(
     dim = (hgen.num_levels,) * hgen.num_qudits
     frame_tuple = tuple(original_frame[qudit_id] for qudit_id in hgen.qudit_ids())
 
-    return PulseSimResult(times=tlist, expect=expect, states=states, dim=dim, frame=frame_tuple)
+    result = PulseSimResult(times=tlist, expect=expect, states=states, dim=dim, frame=frame_tuple)
+
+    if save_result_to:
+        logger.info('Saving the simulation result to %s.h5', save_result_to)
+        save_sim_result(f'{save_result_to}.h5', result)
+
+    return result
