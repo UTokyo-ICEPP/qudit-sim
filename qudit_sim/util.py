@@ -32,11 +32,11 @@ class PulseSimResult:
 
 def save_sim_result(filename: str, result: PulseSimResult):
     """Save the pulse simulation result to an HDF5 file."""
-    with h5py.File(f'{save_result_to}.h5', 'w') as out:
+    with h5py.File(filename, 'w') as out:
         out.create_dataset('times', data=result.times)
-        if result.expect:
+        if result.expect is not None:
             out.create_dataset('expect', data=result.expect)
-        if result.states:
+        if result.states is not None:
             out.create_dataset('states', data=result.states)
         out.create_dataset('dim', data=np.array(result.dim, dtype=int))
         out.create_dataset('frame', data=np.array([[frame.frequency, frame.phase] for frame in result.frame]))
@@ -44,7 +44,7 @@ def save_sim_result(filename: str, result: PulseSimResult):
 
 def load_sim_result(filename: str) -> PulseSimResult:
     """Load the pulse simulation result from an HDF5 file."""
-    with h5py.File(f'{save_result_to}.h5', 'r') as source:
+    with h5py.File(filename, 'r') as source:
         times = source['times'][()]
         try:
             expect = source['expect'][()]
@@ -55,7 +55,7 @@ def load_sim_result(filename: str) -> PulseSimResult:
         except KeyError:
             states = None
         dim = tuple(source['dim'][()])
-        frame_tuple = tuple(Frame(d[0], d[1]) for d in source['frame'][()])
+        frame = tuple(Frame(d[0], d[1]) for d in source['frame'][()])
 
     return PulseSimResult(times, expect, states, dim, frame)
 

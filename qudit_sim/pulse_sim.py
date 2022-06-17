@@ -110,7 +110,9 @@ def pulse_sim(
             if not (os.path.exists(save_result_to) and os.path.isdir(save_result_to)):
                 os.makedirs(save_result_to)
 
-            save_result_path = lambda itask: os.path.join(save_result_to, f'sim_{itask}')
+            num_digits = int(np.log10(num_tasks)) + 1
+
+            save_result_path = lambda itask: os.path.join(save_result_to, f'%0{num_digits}d' % itask)
         else:
             save_result_path = lambda itask: None
 

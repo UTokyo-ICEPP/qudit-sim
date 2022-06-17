@@ -18,7 +18,7 @@ from rqutils.math import matrix_exp, matrix_angle
 from ..config import config
 from ..parallel import parallel_map
 from ..hamiltonian import HamiltonianBuilder
-from ..util import PulseSimResult
+from ..util import PulseSimResult, save_sim_result, load_sim_result
 from ..pulse import GaussianSquare
 from ..pulse_sim import pulse_sim
 from .heff_tools import unitary_subtraction, trace_norm_squared
@@ -85,51 +85,39 @@ def find_heff(
     if isinstance(drive_spec, list):
         num_tasks = len(drive_spec)
 
-        if save_result_to:
-            if not (os.path.exists(save_result_to) and os.path.isdir(save_result_to)):
-                os.makedirs(save_result_to)
-
-            save_result_path = lambda prefix, itask: os.path.join(save_result_to, f'{prefix}_{itask}')
-        else:
-            save_result_path = lambda prefix, itask: None
-
-        args = list()
-        flattop_times = list()
+        hgens = list()
+        tlists = list()
+        fit_starts = list()
         for freq, amp in drive_spec:
-            hgen, tlist, flattop_time = _add_drive(hgen, qudit, freq, amp, cycles, ramp_cycles)
-            args.append((hgen, tlist))
-            flattop_times.append(flattop_time)
+            hgen, tlist, fit_start = _add_drive(hgen, qudit, freq, amp, cycles, ramp_cycles)
+            hgens.append(hgen)
+            tlists.append(tlist)
+            fit_starts.append(fit_start)
 
-        kwarg_keys = ('save_result_to',)
-        kwarg_values = list((save_result_path('sim', itask),) for itask in range(num_tasks))
-        common_kwargs = {'log_level': log_level}
+        sim_results = pulse_sim(hgens, tlists, save_result_to=save_result_to, log_level=log_level)
 
-        sim_results = parallel_map(pulse_sim, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
-                                   common_kwargs=common_kwargs, log_level=log_level)
+        if save_result_to:
+            num_digits = int(np.log10(num_tasks)) + 1
+            save_result_path = lambda itask: os.path.join(save_result_to, f'%0{num_digits}d' % itask)
+        else:
+            save_result_path = lambda itask: None
 
-        args = list(zip(sim_results, flattop_times))
-        kwarg_keys = ('logger_name', 'save_result_to',)
-        kwarg_values = list((f'{__name__}.{itask}', save_result_path('heff', itask)) for itask in range(num_tasks))
+        kwarg_keys = ('fit_start', 'logger_name', 'save_result_to',)
+        kwarg_values = list((fit_starts[itask], f'{__name__}.{itask}', save_result_path(itask)) for itask in range(num_tasks))
         common_kwargs = {'comp_dim': comp_dim, 'optimizer': optimizer, 'optimizer_args': optimizer_args,
                          'max_updates': max_updates, 'convergence': convergence, 'log_level': log_level}
 
-        components = parallel_map(_run_single, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
+        components = parallel_map(heff_fit, args=sim_results, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
                                   common_kwargs=common_kwargs, log_level=log_level, thread_based=True)
 
     else:
-        if save_result_to:
-            save_result_to_sim = f'{save_result_to}_sim'
-            save_result_to_heff = f'{save_result_to}_heff'
-        else:
-            save_result_to_sim = save_result_to_heff = None
+        hgen, tlist, fit_start = _add_drive(hgen, qudit, drive_spec[0], drive_spec[1], cycles, ramp_cycles)
 
-        hgen, tlist, flattop_time = _add_drive(hgen, qudit, drive_spec[0], drive_spec[1], cycles, ramp_cycles)
+        sim_result = pulse_sim(hgen, tlist, save_result_to=save_result_to, log_level=log_level)
 
-        sim_result = pulse_sim(hgen, tlist, save_result_to=save_result_to_sim, log_level=log_level)
-
-        components = _run_single(sim_result, flattop_time, comp_dim=comp_dim, optimizer=optimizer,
+        components = heff_fit(sim_result, comp_dim=comp_dim, fit_start=fit_start, optimizer=optimizer,
                                  optimizer_args=optimizer_args, max_updates=max_updates, convergence=convergence,
-                                 save_result_to=save_result_to_heff, log_level=log_level)
+                                 save_result_to=save_result_to, log_level=log_level)
 
     logger.setLevel(original_log_level)
 
@@ -180,32 +168,40 @@ def _add_drive(
 
     tlist = hgen.make_tlist(8, duration=duration)
 
-    return hgen, tlist, 4. * sigma
+    fit_start = np.searchsorted(tlist, 4. * sigma, 'right') - 1
+
+    return hgen, tlist, fit_start
 
 
-def _run_single(
-    sim_result: PulseSimResult,
-    flattop_time: float,
-    comp_dim: int,
-    optimizer: str,
-    optimizer_args: Any,
-    max_updates: int,
-    convergence: float,
-    save_result_to: Union[str, None],
-    log_level: int,
+def heff_fit(
+    sim_result: Union[PulseSimResult, str],
+    comp_dim: Optional[int] = None,
+    fit_start: Optional[int] = None,
+    optimizer: str = 'adam',
+    optimizer_args: Any = 0.05,
+    max_updates: int = 10000,
+    convergence: float = 1.e-4,
+    save_result_to: Optional[str] = None,
+    log_level: int = logging.WARNING,
     logger_name: str = __name__
 ):
     logger = logging.getLogger(logger_name)
 
-    fit_start = np.searchsorted(sim_result.times, flattop_time, 'right') - 1
+    if isinstance(sim_result, str):
+        with h5py.File(sim_result, 'r') as source:
+            if comp_dim is None:
+                comp_dim = source['comp_dim'][()]
+            if fit_start is None:
+                fit_start = source['fit_start'][()]
+
+        sim_result = load_sim_result(sim_result)
+
+        if save_result_to:
+            save_sim_result(f'{save_result_to}.h5', sim_result)
 
     if save_result_to:
-        with h5py.File(f'{save_result_to}.h5', 'w') as out:
-            out.create_dataset('num_qudits', data=len(sim_result.dim))
-            out.create_dataset('num_sim_levels', data=sim_result.dim[0])
+        with h5py.File(f'{save_result_to}.h5', 'a') as out:
             out.create_dataset('comp_dim', data=comp_dim)
-            out.create_dataset('time_evolution', data=sim_result.states)
-            out.create_dataset('tlist', data=sim_result.times)
             out.create_dataset('fit_start', data=fit_start)
 
     time_evolution = sim_result.states[fit_start:]
