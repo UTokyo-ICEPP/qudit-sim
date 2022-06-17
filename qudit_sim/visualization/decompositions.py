@@ -188,7 +188,7 @@ def plot_evolution(
     threshold: float = 0.01,
     select_components: Optional[List[Tuple[int, ...]]] = None,
     eigvals: bool = True,
-    align_ylim: bool = False,
+    align_ylim: bool = True,
     tscale: Optional[FrequencyScale] = FrequencyScale.auto,
     fig: Optional[mpl.figure.Figure] = None,
     title: str = ''

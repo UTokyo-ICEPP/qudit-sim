@@ -28,7 +28,7 @@ def inspect_heff_fit(
     filename: str,
     threshold: float = 0.01,
     tscale: FrequencyScale = FrequencyScale.auto,
-    align_ylim: bool = False,
+    align_ylim: bool = True,
     select_components: Optional[List[Tuple]] = None,
     metrics: bool = True
 ) -> List[mpl.figure.Figure]:
