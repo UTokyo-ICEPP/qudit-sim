@@ -244,9 +244,10 @@ def _run_single(
     ## Bring the hgen frame back and change the frame of the states
 
     if qtp_result.states:
-        states = np.stack(list(state.full() for state in qtp_result.states))
-        states = hgen.change_frame(tlist, states, from_frame='lab', to_frame=original_frame,
-                                   objtype=objtype)
+        states = np.stack(list(np.squeeze(state.full()) for state in qtp_result.states))
+        if nonlab_original_frame:
+            states = hgen.change_frame(tlist, states, from_frame='lab', to_frame=original_frame,
+                                       objtype=objtype)
     else:
         states = None
 
