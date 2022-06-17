@@ -38,6 +38,9 @@ class PulseSequence(list):
 
         return max_frequency
 
+    def __str__(self):
+        return f'PulseSequence([{", ".join(str(inst) for inst in self)}])'
+
     def generate_fn(
         self,
         frame_frequency: float,
@@ -175,6 +178,9 @@ class Pulse:
         instance._scale(c)
         return instance
 
+    def __str__(self):
+        return f'Pulse(duration={self.duration})'
+
     def modulate(
         self,
         drive_base: complex,
@@ -270,6 +276,10 @@ class Gaussian(Pulse):
         return np.asarray(self.amp * (np.exp(-np.square(x) * 0.5) - self.offset),
                           dtype=np.complex128)
 
+    def __str__(self):
+        return (f'Gaussian(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, center={self.center},'
+                f' zero_ends={self.offset != 0.})')
+
     def _scale(self, c):
         self.amp *= c
 
@@ -348,6 +358,18 @@ class GaussianSquare(Pulse):
         tlist = np.asarray(t, dtype=np.complex128)
         return np.piecewise(tlist, self._make_condlist(t), self._funclist, args)
 
+    def __str__(self):
+        rise = self.gauss_rise is not None
+        fall = self.gauss_fall is not None
+
+        if rise:
+            zero_ends = self.gauss_rise.offset != 0.
+        else:
+            zero_ends = self.gauss_fall.offset != 0.
+
+        return (f'GaussianSquare(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, width={self.width}, '
+                f' zero_ends={zero_ends}, rise={rise}, fall={fall})')
+
     def _scale(self, c):
         self.amp *= c
         if self.gauss_rise:
@@ -393,6 +415,10 @@ class Drag(Gaussian):
 
         return gauss + 1.j * self.beta * dgauss
 
+    def __str__(self):
+        return (f'Drag(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, beta={self.beta}, '
+                f'center={self.center}, zero_ends={self.offset != 0.})')
+
 
 class Square(Pulse):
     """Square (constant) pulse.
@@ -412,6 +438,9 @@ class Square(Pulse):
 
     def __call__(self, t, args=None):
         return np.full_like(t, self.amp)
+
+    def __str__(self):
+        return f'Square(duration={self.duration}, amp={self.amp})'
 
     def _scale(self, c):
         self.amp *= c
