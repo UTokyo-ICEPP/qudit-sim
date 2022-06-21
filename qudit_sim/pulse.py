@@ -272,8 +272,8 @@ class Gaussian(Pulse):
             self._gaus_amp = np.asarray(amp, dtype=np.complex128)
 
     @property
-    def amp(self) -> float:
-        return float(self._gaus_amp * (1. - self._pedestal))
+    def amp(self) -> complex:
+        return complex(self._gaus_amp * (1. - self._pedestal))
 
     def __call__(self, t, args=None):
         x = (t - self.center) / self.sigma
@@ -347,10 +347,10 @@ class GaussianSquare(Pulse):
         else:
             self.gauss_fall = None
 
-        self._funclist.append(amp)
+        self._funclist.append(complex(amp))
 
     @property
-    def amp(self) -> float:
+    def amp(self) -> complex:
         return self._funclist[-1]
 
     def _fall_tail(self, t, args):
