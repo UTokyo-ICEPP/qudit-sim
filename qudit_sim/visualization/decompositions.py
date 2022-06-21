@@ -58,6 +58,10 @@ def print_components(
         scale_omega = np.pi
         if lhs_label is None:
             lhs_label = r'\frac{i \mathrm{log} U}{\pi}'
+    elif isinstance(scale, tuple):
+        scale_omega = scale[0]
+        if lhs_label is None:
+            lhs_label = fr'\frac{{i \mathrm{{log}} U}}{{{scale[1]}}}'
     else:
         scale_omega = scale.pulsatance_value
         if lhs_label is None:
@@ -238,27 +242,28 @@ def plot_evolution(
         fig.set_figwidth(nx * 4.)
         fig.subplots(ny, nx)
 
-    labels = paulis.labels(dim, norm=False)
+    if len(select_components) > 0:
+        labels = paulis.labels(dim, norm=False)
 
-    if align_ylim:
-        indices_array = np.array(tuple(zip(select_components)))
-        selected_compos = components[indices_array]
-        ymax = np.amax(selected_compos)
-        ymin = np.amin(selected_compos)
-        vrange = ymax - ymin
-        ymax += 0.2 * vrange
-        ymin -= 0.2 * vrange
-
-    for iax, index in enumerate(select_components):
-        ax = fig.axes[iax]
-
-        ax.set_title(f'${labels[index]}$')
-        ax.plot(tlist, components[index])
-
-        ax.axhline(0., color='black', linewidth=0.5)
         if align_ylim:
-            ax.set_ylim(ymin, ymax)
-        ax.set_ylabel('rad')
+            indices_array = np.array(tuple(zip(select_components)))
+            selected_compos = components[indices_array]
+            ymax = np.amax(selected_compos)
+            ymin = np.amin(selected_compos)
+            vrange = ymax - ymin
+            ymax += 0.2 * vrange
+            ymin -= 0.2 * vrange
+
+        for iax, index in enumerate(select_components):
+            ax = fig.axes[iax]
+
+            ax.set_title(f'${labels[index]}$')
+            ax.plot(tlist, components[index])
+
+            ax.axhline(0., color='black', linewidth=0.5)
+            if align_ylim:
+                ax.set_ylim(ymin, ymax)
+            ax.set_ylabel('rad')
 
     if eigvals:
         ax = fig.axes[len(select_components)]
