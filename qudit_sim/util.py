@@ -1,6 +1,6 @@
 """Miscellaneous utility classes and functions."""
 
-from typing import Union, Tuple, Callable
+from typing import Union, Tuple, List, Callable
 import enum
 from dataclasses import dataclass
 import numpy as np
@@ -24,7 +24,7 @@ class PulseSimResult:
     See the docstring of pulse_sim for why this class is necessary.
     """
     times: np.ndarray
-    expect: Union[np.ndarray, None]
+    expect: Union[List[np.ndarray], None]
     states: Union[np.ndarray, None]
     dim: Tuple[int, ...]
     frame: Tuple[Frame, ...]

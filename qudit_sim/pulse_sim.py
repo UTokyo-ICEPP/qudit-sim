@@ -29,19 +29,38 @@ def pulse_sim(
     args: Optional[Any] = None,
     e_ops: Optional[Union[EOps, List[EOps]]] = None,
     keep_callable: Union[bool, List[bool]] = False,
+    final_only: bool = False,
+    reunitarize_evolution: bool = True,
+    interval_len: int = 1000,
     options: Optional[qtp.solver.Options] = None,
-    progress_bar: Optional[qtp.ui.progressbar.BaseProgressBar] = None,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING
 ) -> Union[PulseSimResult, List[PulseSimResult]]:
-    """Run a pulse simulation.
+    r"""Run a pulse simulation.
 
     Build the Hamiltonian terms from the HamiltonianBuilder, determine the time points for the simulation
     if necessary, and run ``qutip.sesolve``.
 
-    All parameters except ``options``, ``progress_bar``, ``save_result_to``, and ``log_level`` can be given as lists to
-    trigger a parallel (multiprocess) execution of ``sesolve``. If more than one parameter is a list, their lengths must
-    be identical, and all parameters are "zipped" together to form the argument lists of individual single simulation jobs.
+    All parameters except ``options``, ``save_result_to``, and ``log_level`` can be given as lists to trigger a parallel
+    (multiprocess) execution of ``sesolve``. If more than one parameter is a list, their lengths must be identical, and all
+    parameters are "zipped" together to form the argument lists of individual single simulation jobs.
+
+    .. rubric:: Reunitarization of time evolution
+
+    Due to the finite numerical precision in solving the Schrodinger equation, the computed time evolution matrices will stop
+    being unitary at some point, with the rate of divergence dependent on the complexity of the Hamiltonian. In general, the
+    closest unitary :math:`U`, i.e., one with the smallest 2-norm :math:`\lVert U-A \rVert`, to an operator :math:`A` can be
+    calculated via a singular value decomposition:
+
+    .. math::
+
+        A & = V \Sigma W^{\dagger}, \\
+        U & = V W^{\dagger}.
+
+    This function has an option ``reunitarize_evolution`` to apply the above decomposition and recompute (reunitarize) the
+    time evolution matrices. Because reunitarizing at each time step can be rather slow, when this option is turned on
+    (default), ``sesolve`` is called in time intervals of length ``interval_len``, and the entire array of evolution matrices
+    from each interval is reunitarized (longer interval lengths result in larger reunitarization corrections).
 
     .. rubric:: Implementation notes (why we return an original object instead of the QuTiP result)
 
@@ -64,8 +83,12 @@ def pulse_sim(
         e_ops: List of observables passed to the QuTiP solver.
         keep_callable: Keep callable time-dependent Hamiltonian coefficients. Otherwise all callable coefficients
             are converted to arrays before simulation execution for efficiency (no loss of accuracy observed so far).
+        final_only: Throw away intermediate states and expectation values to save memory. Due to implementation details,
+            implies ``unitarize_evolution=True``.
+        reunitarize_evolution: Whether to reunitarize the time evolution matrices.
+        interval_len: Number of time steps to run ``sesolve`` uninterrupted. Only used when ``reunitarize_evolution=True``
+            and ``psi0`` is a unitary.
         options: QuTiP solver options.
-        progress_bar: QuTiP progress bar.
         save_result_to: File name (without the extension) to save the simulation result to.
         log_level: Log level.
 
@@ -78,10 +101,19 @@ def pulse_sim(
     num_tasks = None
     zip_list = []
 
-    parallel_params = [hgen, tlist, psi0, args, e_ops, keep_callable]
-    element_types = [HamiltonianBuilder, (np.ndarray, tuple, dict), qtp.Qobj, None, Sequence, bool, bool]
+    parallel_params = [
+        (hgen, HamiltonianBuilder),
+        (tlist, (np.ndarray, tuple, dict)),
+        (psi0, qtp.Qobj),
+        (args, None),
+        (e_ops, Sequence),
+        (keep_callable, bool),
+        (final_only, bool),
+        (reunitarize_evolution, bool),
+        (interval_len, int)
+    ]
 
-    for param, typ in zip(parallel_params, element_types):
+    for param, typ in parallel_params:
         if isinstance(param, list) and (typ is None or all(isinstance(elem, typ) for elem in param)):
             if num_tasks is None:
                 num_tasks = len(param)
@@ -94,11 +126,13 @@ def pulse_sim(
             zip_list.append(None)
 
     if num_tasks is None:
-        result = _run_single(hgen, tlist, psi0, args, e_ops, keep_callable, options=options,
-                             progress_bar=progress_bar, save_result_to=save_result_to, log_level=log_level)
+        args = tuple(param[0] for param in parallel_params)
+        kwargs = {'options': options, 'save_result_to': save_result_to, 'log_level': log_level}
+
+        result = _run_single(*args, **kwargs)
 
     else:
-        for iparam, param in enumerate(parallel_params):
+        for iparam, (param, _) in enumerate(parallel_params):
             if zip_list[iparam] is None:
                 zip_list[iparam] = [param] * num_tasks
 
@@ -134,10 +168,12 @@ def _run_single(
     tlist: TList,
     psi0: Union[qtp.Qobj, None],
     args: Any,
-    e_ops: EOps,
+    e_ops: Union[EOps, None],
     keep_callable: bool,
+    final_only: bool,
+    reunitarize_evolution: bool,
+    interval_len: int,
     options: Optional[qtp.solver.Options] = None,
-    progress_bar: Optional[qtp.ui.progressbar.BaseProgressBar] = None,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
     logger_name: str = __name__
@@ -181,38 +217,15 @@ def _run_single(
     dims = psi0.dims
     psi0 = qtp.Qobj(inpt=psi0_data[0], dims=dims)
 
-    ## Change the e_ops frame if necessary
+    if options is None:
+        local_options = qtp.solver.Options()
+    else:
+        local_options = copy.deepcopy(options)
 
-    if nonlab_original_frame and e_ops is not None:
-        en_diagonal, offset_diagonal = hgen.frame_change_operator(from_frame=original_frame, to_frame='lab')
-
-        def make_op_fn(observable):
-            if isinstance(observable, qtp.Qobj):
-                obs_arr = observable.full()
-                def op_fn(t, state):
-                    cof_op_diag = np.exp(1.j * (en_diagonal * t + offset_diagonal))
-                    frame_obs = cof_op_diag[:, None] * obs_arr * cof_op_diag[None, :].conjugate()
-
-                    return state.dag().full() @ frame_obs @ state.full()
-
-            else:
-                def op_fn(t, state):
-                    cof_op_diag = np.exp(1., * (en_diagonal * t + offset_diagonal))
-                    obs_arr = observable(t, identity)
-                    frame_obs = cof_op_diag[:, None] * obs_arr * cof_op_diag[None, :].conjugate()
-
-                    return state.dag().full() @ frame_obs @ state.full()
-
-            return op_fn
-
-        e_ops_orig = e_ops
-        e_ops = []
-        for observable in e_ops_orig:
-            e_ops.append(make_op_fn(observable))
-
-    ## Arguments to sesolve
-
-    kwargs = {'args': args, 'e_ops': e_ops, 'options': options, 'progress_bar': progress_bar}
+    # We'll always compute the states
+    local_options.store_states = True
+    # We may reuse the same Hamiltonian for multiple intervals
+    local_options.rhs_reuse = True
 
     ## Build the Hamiltonian
 
@@ -222,6 +235,31 @@ def _run_single(
         tlist_arg = {'tlist': tlist, 'args': args}
 
     hamiltonian = hgen.build(rwa=False, **tlist_arg)
+
+    ## Reunitarization and interval running setting
+
+    if final_only and psi0.isunitary:
+        reunitarize_evolution = True
+
+    array_terms = list()
+
+    if reunitarize_evolution:
+        interval_hamiltonian = copy.deepcopy(hamiltonian)
+
+        for iterm, term in enumerate(hamiltonian):
+            if isinstance(term, list) and isinstance(term[1], np.ndarray):
+                array_terms.append(iterm)
+
+    else:
+        interval_len = tlist.shape[0]
+        interval_hamiltonian = hamiltonian
+
+    ## Array to store the intermediate states
+
+    if final_only:
+        states = np.empty((1,) + np.squeeze(psi0.full()).shape, dtype=np.complex128)
+    else:
+        states = np.empty(tlist.shape + np.squeeze(psi0.full()).shape, dtype=np.complex128)
 
     ## Run sesolve in a temporary directory
 
@@ -233,25 +271,90 @@ def _run_single(
     with tempfile.TemporaryDirectory() as tempdir:
         try:
             os.chdir(tempdir)
-            qtp_result = qtp.sesolve(hamiltonian, psi0, tlist, **kwargs)
+
+            t0 = 0
+            while True:
+                for iterm in array_terms:
+                    interval_hamiltonian[iterm][1] = hamiltonian[iterm][1][t0:t0 + interval_len]
+
+                qtp_result = qtp.sesolve(interval_hamiltonian,
+                                         psi0,
+                                         tlist[t0:t0 + interval_len],
+                                         args=args,
+                                         options=local_options)
+
+                interval_states = np.stack(list(np.squeeze(state.full()) for state in qtp_result.states))
+
+                if psi0.isunitary and reunitarize_evolution:
+                    v, _, wdag = np.linalg.svd(interval_states)
+                    interval_states = v @ wdag
+
+                if final_only:
+                    states[0] = interval_states[-1]
+                else:
+                    states[t0:t0 + interval_len] = interval_states
+
+                t0 += interval_len
+
+                if t0 < tlist.shape[0]:
+                    psi0 = qtp.Qobj(inpt=interval_states[-1], dims=psi0.dims)
+                else:
+                    break
+
         finally:
             os.chdir(cwd)
+            # Clear the cached solver
+            qtp.rhs_clear()
 
     stop = time.time()
 
     logger.info('Done in %f seconds.', stop - start)
 
-    ## Bring the hgen frame back and change the frame of the states
+    ## Compute the expectation values from the stored states
 
-    if qtp_result.states:
-        states = np.stack(list(np.squeeze(state.full()) for state in qtp_result.states))
+    if e_ops:
+        if final_only:
+            exp_tlist = tlist[-1:]
+        else:
+            exp_tlist = tlist
+
         if nonlab_original_frame:
-            states = hgen.change_frame(tlist, states, from_frame='lab', to_frame=original_frame,
-                                       objtype=objtype)
-    else:
-        states = None
+            en_diagonal, offset_diagonal = hgen.frame_change_operator(from_frame=original_frame, to_frame='lab')
+            cof_op_diag = np.exp(1.j * (en_diagonal[None, :] * exp_tlist[:, None] + offset_diagonal))
 
-    expect = list(exp.real.copy() for exp in qtp_result.expect)
+        expect = list()
+
+        for observable in e_ops:
+            if isinstance(observable, qtp.Qobj):
+                obs_arr = observable.full()[None, ...]
+            else:
+                # NOTE: Below only works if observable(t, state) returns state* @ obs @ state
+                obs_arr = np.empty(exp_tlist.shape + (states.shape[-1], states.shape[-1]))
+                for it, t in enumerate(exp_tlist):
+                    obs_arr[it] = observable(t, identity)
+
+            if nonlab_original_frame:
+                obs_arr = cof_op_diag[..., None] * obs_arr * cof_op_diag[:, None, :].conjugate()
+
+            if psi0.isoper:
+                vals = np.einsum('tij,tij->t', obs_arr.conjugate(), states)
+            else:
+                vals = np.einsum('ti,tij,tj->t', states.conjugate(), obs_arr, states).real
+
+            expect.append(vals)
+
+        if options is None or not options.store_states:
+            states = None
+
+    else:
+        expect = None
+
+    ## Bring the hgen frame back and change the frame of the expvals and states
+
+    if states is not None and nonlab_original_frame:
+        states = hgen.change_frame(tlist, states, from_frame='lab', to_frame=original_frame,
+                                   objtype=objtype)
+
     dim = (hgen.num_levels,) * hgen.num_qudits
     frame_tuple = tuple(original_frame[qudit_id] for qudit_id in hgen.qudit_ids())
 
