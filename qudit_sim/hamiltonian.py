@@ -416,7 +416,8 @@ class HamiltonianBuilder:
         obj: Union[np.ndarray, qtp.Qobj],
         from_frame: FrameSpec,
         to_frame: Optional[FrameSpec] = None,
-        objtype: str = 'evolution'
+        objtype: str = 'evolution',
+        t0: Optional[float] = None
     ) -> np.ndarray:
         r"""Apply the change-of-frame unitaries to states, unitaries, hamiltonians, and observables.
 
@@ -432,14 +433,11 @@ class HamiltonianBuilder:
             to_frame: Specification of new frame. If None, the current frame is used.
             objtype: ``'state'``, ``'evolution'``, ``'hamiltonian'``, or ``'observable'``. Ignored when
                 the type can be unambiguously inferred from the shape of ``obj``.
+            t0: Initial time for the frame change of the evolution operator. If None, ``tlist[0]`` is used.
 
         Returns:
             An array representing the frame-changed object.
         """
-        en_diagonal, offset_diagonal = self.frame_change_operator(from_frame, to_frame)
-
-        cof_op_diag = np.exp(1.j * (en_diagonal[None, :] * tlist[:, None] + offset_diagonal))
-
         if isinstance(obj, qtp.Qobj):
             if obj.isket or obj.isbra:
                 obj = np.squeeze(obj.full())
@@ -447,7 +445,7 @@ class HamiltonianBuilder:
                 obj = obj.full()
 
         ## Validate and determine the object shape & type
-        state_dim = cof_op_diag.shape[1]
+        state_dim = self.num_levels ** self.num_qudits
         shape_consistent = True
         type_valid = True
 
@@ -518,6 +516,9 @@ class HamiltonianBuilder:
         if not shape_consistent:
             raise ValueError(f'Inconsistent obj shape {obj.shape} for objtype {objtype} and tlist length {tlist.shape[0]}')
 
+        en_diagonal, offset_diagonal = self.frame_change_operator(from_frame, to_frame)
+        cof_op_diag = np.exp(1.j * (en_diagonal[None, :] * tlist[:, None] + offset_diagonal))
+
         if objtype == 'state':
             # Left-multiplying by a diagonal is the same as element-wise multiplication
             obj = cof_op_diag * obj
@@ -525,7 +526,12 @@ class HamiltonianBuilder:
         elif objtype == 'evolution':
             # Right-multiplying by the inverse of a diagonal unitary = element-wise multiplication
             # of the columns by the conjugate
-            obj = cof_op_diag[:, :, None] * obj * cof_op_diag[0].conjugate()
+            if t0 is None:
+                cof_op_diag_t0_conj = cof_op_diag[0].conjugate()
+            else:
+                cof_op_diag_t0_conj = np.exp(-1.j * (en_diagonal * t0 + offset_diagonal))
+
+            obj = cof_op_diag[:, :, None] * obj * cof_op_diag_t0_conj
 
         elif objtype == 'hamiltonian':
             obj = cof_op_diag[:, :, None] * obj * cof_op_diag[:, None, :].conjugate() - np.diag(en_diagonal)
