@@ -47,11 +47,12 @@ def inspect_heff_fit(
         A list of two (three if metrics=True) figures.
     """
     with h5py.File(filename, 'r') as source:
-        num_qudits = int(source['num_qudits'][()])
-        num_sim_levels = int(source['num_sim_levels'][()])
+        dim = tuple(source['dim'][()])
+        num_qudits = len(dim)
+        num_sim_levels = dim[0]
+        time_evolution = source['states'][()]
+        tlist = source['times'][()]
         comp_dim = int(source['comp_dim'][()])
-        time_evolution = source['time_evolution'][()]
-        tlist = source['tlist'][()]
         fit_start = source['fit_start'][()]
         if num_sim_levels != comp_dim:
             components = source['components_original'][()]
@@ -67,7 +68,6 @@ def inspect_heff_fit(
             loss = None
             grad = None
 
-    dim = (num_sim_levels,) * num_qudits
     tlist_fit = tlist[fit_start:] - tlist[fit_start]
 
     if tscale is FrequencyScale.auto:
