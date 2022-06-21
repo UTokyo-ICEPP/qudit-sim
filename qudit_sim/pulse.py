@@ -264,24 +264,28 @@ class Gaussian(Pulse):
                 'Zero-ended Gaussian must be centered'
 
             x = self.duration * 0.5 / self.sigma
-            self.offset = np.exp(-np.square(x) * 0.5)
-            self.amp = np.asarray(amp / (1. - self.offset), dtype=np.complex128)
+            self._pedestal = np.exp(-np.square(x) * 0.5)
+            self._gaus_amp = np.asarray(amp / (1. - self._pedestal), dtype=np.complex128)
 
         else:
-            self.amp = np.asarray(amp, dtype=np.complex128)
-            self.offset = 0.
+            self._pedestal = 0.
+            self._gaus_amp = np.asarray(amp, dtype=np.complex128)
+
+    @property
+    def amp(self) -> float:
+        return float(self._gaus_amp * (1. - self._pedestal))
 
     def __call__(self, t, args=None):
         x = (t - self.center) / self.sigma
-        return np.asarray(self.amp * (np.exp(-np.square(x) * 0.5) - self.offset),
+        return np.asarray(self._gaus_amp * (np.exp(-np.square(x) * 0.5) - self._pedestal),
                           dtype=np.complex128)
 
     def __str__(self):
         return (f'Gaussian(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, center={self.center},'
-                f' zero_ends={self.offset != 0.})')
+                f' zero_ends={self._pedestal != 0.})')
 
     def _scale(self, c):
-        self.amp *= c
+        self._gaus_amp *= c
 
 
 class GaussianSquare(Pulse):
@@ -311,7 +315,6 @@ class GaussianSquare(Pulse):
 
         assert width < duration, 'GaussianSquare width must be less than duration'
 
-        self.amp = amp
         self.sigma = sigma
         self.width = width
 
@@ -344,7 +347,11 @@ class GaussianSquare(Pulse):
         else:
             self.gauss_fall = None
 
-        self._funclist.append(self.amp)
+        self._funclist.append(amp)
+
+    @property
+    def amp(self) -> float:
+        return self._funclist[-1]
 
     def _fall_tail(self, t, args):
         gauss_t0 = self.t_plateau + self.width - self.gauss_fall.duration / 2.
@@ -363,15 +370,16 @@ class GaussianSquare(Pulse):
         fall = self.gauss_fall is not None
 
         if rise:
-            zero_ends = self.gauss_rise.offset != 0.
+            zero_ends = self.gauss_rise._pedestal != 0.
         else:
-            zero_ends = self.gauss_fall.offset != 0.
+            zero_ends = self.gauss_fall._pedestal != 0.
 
         return (f'GaussianSquare(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, width={self.width}, '
                 f' zero_ends={zero_ends}, rise={rise}, fall={fall})')
 
     def _scale(self, c):
-        self.amp *= c
+        self._funclist[-1] *= c
+
         if self.gauss_rise:
             self.gauss_rise._scale(c)
         if self.gauss_fall:
@@ -417,7 +425,7 @@ class Drag(Gaussian):
 
     def __str__(self):
         return (f'Drag(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, beta={self.beta}, '
-                f'center={self.center}, zero_ends={self.offset != 0.})')
+                f'center={self.center}, zero_ends={self._pedestal != 0.})')
 
 
 class Square(Pulse):
