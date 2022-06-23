@@ -48,6 +48,8 @@ def pi_pulse(
     original_log_level = logger.level
     logger.setLevel(log_level)
 
+    hgen = hgen.copy(clear_drive=True)
+
     ## System parameters
     qudit_index = hgen.qudit_index(qudit_id)
     dim = (hgen.num_levels,) * hgen.num_qudits
@@ -104,11 +106,6 @@ def pi_pulse(
     ## Initialize the Hamiltonian
     drive_frequency = hgen.dressed_frequencies(qudit_id)[level]
 
-    ## Make the tlist
-    hgen.add_drive(qudit_id, frequency=drive_frequency, amplitude=1.)
-    tlist = hgen.make_tlist(10, duration=duration)
-    hgen.clear_drive()
-
     ## Get an initial estimate of the amplitude
     # Solve exp(-i pi/2 X) = exp(-i ∫H(t)dt)
     # Approximating H(t) as a pure X triangle ((A/half_duration)*X*t in the first half),
@@ -134,7 +131,9 @@ def pi_pulse(
         hgen.clear_drive()
         hgen.add_drive(qudit_id, frequency=drive_frequency, amplitude=pulse)
 
-        sim_result = pulse_sim(hgen, tlist, final_only=True)
+        sim_result = pulse_sim(hgen,
+                               tlist={'points_per_cycle': 10, 'duration': pulse.duration},
+                               final_only=True)
 
         # Need to compute the components "by hand" because our basis definition may be nonstandard
         generator = -matrix_angle(sim_result.states[-1])
