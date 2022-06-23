@@ -87,12 +87,12 @@ def find_heff(
 
         hgens = list()
         tlists = list()
-        fit_starts = list()
+        fit_start_times = list()
         for freq, amp in drive_spec:
-            hgen, tlist, fit_start = _add_drive(hgen, qudit, freq, amp, cycles, ramp_cycles)
+            hgen, tlist, fit_start_time = _add_drive(hgen, qudit, freq, amp, cycles, ramp_cycles)
             hgens.append(hgen)
             tlists.append(tlist)
-            fit_starts.append(fit_start)
+            fit_start_times.append(fit_start_time)
 
         sim_results = pulse_sim(hgens, tlists, save_result_to=save_result_to, log_level=log_level)
 
@@ -102,8 +102,8 @@ def find_heff(
         else:
             save_result_path = lambda itask: None
 
-        kwarg_keys = ('fit_start', 'logger_name', 'save_result_to',)
-        kwarg_values = list((fit_starts[itask], f'{__name__}.{itask}', save_result_path(itask)) for itask in range(num_tasks))
+        kwarg_keys = ('fit_start_time', 'logger_name', 'save_result_to',)
+        kwarg_values = list((fit_start_times[itask], f'{__name__}.{itask}', save_result_path(itask)) for itask in range(num_tasks))
         common_kwargs = {'comp_dim': comp_dim, 'optimizer': optimizer, 'optimizer_args': optimizer_args,
                          'max_updates': max_updates, 'convergence': convergence, 'log_level': log_level}
 
@@ -111,13 +111,13 @@ def find_heff(
                                   common_kwargs=common_kwargs, log_level=log_level, thread_based=True)
 
     else:
-        hgen, tlist, fit_start = _add_drive(hgen, qudit, drive_spec[0], drive_spec[1], cycles, ramp_cycles)
+        hgen, tlist, fit_start_time = _add_drive(hgen, qudit, drive_spec[0], drive_spec[1], cycles, ramp_cycles)
 
         sim_result = pulse_sim(hgen, tlist, save_result_to=save_result_to, log_level=log_level)
 
-        components = heff_fit(sim_result, comp_dim=comp_dim, fit_start=fit_start, optimizer=optimizer,
-                                 optimizer_args=optimizer_args, max_updates=max_updates, convergence=convergence,
-                                 save_result_to=save_result_to, log_level=log_level)
+        components = heff_fit(sim_result, comp_dim=comp_dim, fit_start_time=fit_start_time, optimizer=optimizer,
+                              optimizer_args=optimizer_args, max_updates=max_updates, convergence=convergence,
+                              save_result_to=save_result_to, log_level=log_level)
 
     logger.setLevel(original_log_level)
 
@@ -134,49 +134,42 @@ def _add_drive(
 ) -> Tuple[HamiltonianBuilder, np.ndarray, float]:
 
     hgen = hgen.copy(clear_drive=True)
-    hgen.default_frame = 'dressed'
-    hgen.set_global_frame('dressed', keep_phase=True)
 
-    if isinstance(qudit, tuple):
-        if not isinstance(frequency, tuple) or not isinstance(amplitude, tuple) or \
-            len(frequency) != len(qudit) or len(amplitude) != len(qudit):
-            raise RuntimeError('Inconsistent qudit, frequency, and amplitude specification')
+    if not isinstance(qudit, tuple):
+        qudit = (qudit,)
+        frequency = (frequency,)
+        amplitude = (amplitude,)
 
-        if len(qudit) == 0:
-            # No-drive effective Hamiltonian
-            tlist = hgen.make_tlist(8, num_cycles=int(cycles))
+    if not isinstance(frequency, tuple) or not isinstance(amplitude, tuple) or \
+        len(frequency) != len(qudit) or len(amplitude) != len(qudit):
+        raise RuntimeError('Inconsistent qudit, frequency, and amplitude specification')
 
-            return hgen, tlist, 0.
+    tlist = {'points_per_cycle': 8}
 
-        max_cycle = 2. * np.pi / min(frequency)
-        duration = max_cycle * (ramp_cycles + cycles)
-        width = max_cycle * cycles
-        sigma = (duration - width) / 4.
+    if len(qudit) == 0:
+        # Looking for a no-drive effective Hamiltonian
+        tlist['num_cycles'] = int(cycles)
 
-        for qid, freq, amp in zip(qudit, frequency, amplitude):
-            pulse = GaussianSquare(duration, amp, sigma, width, fall=False)
-            hgen.add_drive(qid, frequency=freq, amplitude=pulse)
+        return hgen, tlist, 0.
 
-    else:
-        cycle = 2. * np.pi / frequency
-        duration = cycle * (ramp_cycles + cycles)
-        width = cycle * cycles
-        sigma = (duration - width) / 4.
+    max_cycle = 2. * np.pi / min(frequency)
+    duration = max_cycle * (ramp_cycles + cycles)
+    width = max_cycle * cycles
+    sigma = (duration - width) / 4.
 
-        pulse = GaussianSquare(duration, amplitude, sigma, width, fall=False)
-        hgen.add_drive(qudit, frequency=frequency, amplitude=pulse)
+    for qid, freq, amp in zip(qudit, frequency, amplitude):
+        pulse = GaussianSquare(duration, amp, sigma, width, fall=False)
+        hgen.add_drive(qid, frequency=freq, amplitude=pulse)
 
-    tlist = hgen.make_tlist(8, duration=duration)
+    tlist['duration'] = duration
 
-    fit_start = np.searchsorted(tlist, 4. * sigma, 'right') - 1
-
-    return hgen, tlist, fit_start
+    return hgen, tlist, 4. * sigma
 
 
 def heff_fit(
     sim_result: Union[PulseSimResult, str],
     comp_dim: Optional[int] = None,
-    fit_start: Optional[int] = None,
+    fit_start_time: Optional[float] = None,
     optimizer: str = 'adam',
     optimizer_args: Any = 0.05,
     max_updates: int = 10000,
@@ -188,16 +181,18 @@ def heff_fit(
     logger = logging.getLogger(logger_name)
 
     if isinstance(sim_result, str):
+        sim_result = load_sim_result(sim_result)
+
         with h5py.File(sim_result, 'r') as source:
             if comp_dim is None:
                 comp_dim = source['comp_dim'][()]
-            if fit_start is None:
-                fit_start = source['fit_start'][()]
-
-        sim_result = load_sim_result(sim_result)
+            if fit_start_time is None:
+                fit_start_time = sim_result.times[source['fit_start'][()]]
 
         if save_result_to:
             save_sim_result(f'{save_result_to}.h5', sim_result)
+
+    fit_start = np.searchsorted(sim_result.times, fit_start_time, 'right') - 1
 
     if save_result_to:
         with h5py.File(f'{save_result_to}.h5', 'a') as out:
