@@ -189,17 +189,29 @@ def _run_single(
     """Run one pulse simulation."""
     logger = logging.getLogger(logger_name)
 
+    ## Create a lab-frame copy of hgen
+
+    lab_hgen = hgen.copy()
+    lab_hgen.set_global_frame('lab')
+
+    ## Define the time points if necessary
+
+    if isinstance(tlist, tuple):
+        tlist = {'points_per_cycle': tlist[0], 'num_cycles': tlist[1]}
+
+    if isinstance(tlist, dict):
+        tlist = lab_hgen.make_tlist(**tlist)
+
+    logger.info('Using %d time points from %.3e to %.3e', tlist.shape[0], tlist[0], tlist[-1])
+
     ## Initial state
 
     if psi0 is None:
-        psi0 = identity
+        psi0 = hgen.identity_op()
 
     ## Set up the states and expectation values calculator
 
-    calculator = StatesAndExpectations()
-    lab_hgen, tlist = calculator.initialize(hgen, psi0, e_ops, tlist)
-
-    logger.info('Using %d time points from %.3e to %.3e', tlist.shape[0], tlist[0], tlist[-1])
+    calculator = StatesAndExpectations(hgen, psi0, e_ops, tlist[0])
 
     ## Run the simulation or exponentiate the static Hamiltonian
 
@@ -231,38 +243,20 @@ def _run_single(
 
 
 class StatesAndExpectations:
-    def initialize(self, hgen, psi0, e_ops, tlist):
-        ## Create a lab-frame copy of hgen
-
-        lab_hgen = hgen.copy()
-        lab_hgen.set_global_frame('lab')
-
-        ## Define the time points if necessary
-
-        if isinstance(tlist, tuple):
-            tlist = {'points_per_cycle': tlist[0], 'num_cycles': tlist[1]}
-
-        if isinstance(tlist, dict):
-            tlist = lab_hgen.make_tlist(**tlist)
-
+    def __init__(self, hgen, psi0, e_ops, t0):
         ## Define the frame reverting function
-
         original_frame = hgen.frame()
 
         if any((np.any(frame.frequency) or np.any(frame.phase))
                for frame in original_frame.values()):
             # original frame is not lab
-            self.revert_frame = lambda e, t: hgen.change_frame(t, e,
-                                                               from_frame='lab',
-                                                               objtype='evolution',
-                                                               t0=tlist[0])
+            self.revert_frame = lambda e, t: hgen.change_frame(t, e, from_frame='lab',
+                                                               objtype='evolution', t0=t0)
         else:
-            self.revert_frame = lambda evolution, tlist: evolution
+            self.revert_frame = lambda e, t: e
 
         self.psi0_arr = np.squeeze(psi0.full())
         self.e_ops = e_ops
-
-        return lab_hgen, tlist
 
     def calculate(self, evolution, tlist):
         # Change the frame back to original
@@ -353,9 +347,9 @@ def _simulate_drive(
 
     ## Arrays to store the states and expectation values
 
-    num_e_ops = len(calculator.e_ops)
 
-    if num_e_ops == 0 or solve_options.store_states:
+
+    if not calculator.e_ops or solve_options.store_states:
         state_shape = calculator.psi0_arr.shape
         if final_only:
             states = np.empty((1,) + state_shape, dtype=np.complex128)
@@ -364,7 +358,8 @@ def _simulate_drive(
     else:
         states = None
 
-    if num_e_ops != 0:
+    if calculator.e_ops:
+        num_e_ops = len(calculator.e_ops)
         if final_only:
             expect = list(np.empty(1) for _ in range(num_e_ops))
         else:
@@ -388,7 +383,7 @@ def _simulate_drive(
 
             start = 0
             # Compute the time evolution in the lab frame -> initial unitary is identity
-            local_psi0 = qtp.tensor([qtp.qeye(hgen.num_levels)] * hgen.num_qudits)
+            local_psi0 = hgen.identity_op()
             while True:
                 for iterm in array_terms:
                     local_hamiltonian[iterm][1] = hamiltonian[iterm][1][start:start + interval_len]
