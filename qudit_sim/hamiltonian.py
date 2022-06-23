@@ -120,14 +120,20 @@ class HamiltonianBuilder:
         """Crosstalk factor from source to target."""
         return self._crosstalk[(source, target)]
 
-    def drive(self, qudit_id: Optional[Hashable] = None) -> List[DriveTerm]:
+    def drive(
+        self,
+        qudit_id: Optional[Hashable] = None
+    ) -> Union[Dict[Hashable, List[DriveTerm]], List[DriveTerm]]:
         """Drive terms for the qudit."""
         if qudit_id is None:
             return copy.deepcopy(self._drive)
         else:
             return list(self._drive[qudit_id])
 
-    def frame(self, qudit_id: Optional[Hashable] = None) -> Frame:
+    def frame(
+        self,
+        qudit_id: Optional[Hashable] = None
+    ) -> Union[Dict[Hashable, Frame], Frame]:
         """Frame of the qudit."""
         if qudit_id is None:
             return copy.deepcopy(self._frame)
@@ -181,6 +187,34 @@ class HamiltonianBuilder:
 
         self.set_global_frame(self.default_frame, keep_phase=True)
 
+    def eigenvalues(self) -> np.ndarray:
+        r"""Compute the energy eigenvalues of the static Hamiltonian (free and coupling).
+
+        Eigenvalues are ordered so that element ``[i, j, ...]`` corresponds to the energy of the state with the
+        largest component of :math:`|i\rangle_0 |j\rangle_1 \dots`, where :math:`|l\rangle_k` is the :math:`l`-th
+        energy eigenstate of the free qudit :math:`k`.
+
+        Returns:
+            An array of energy eigenvalues.
+        """
+        hgen = self.copy(clear_drive=True)
+
+        # Move to the lab frame first to build a fully static H0+Hint
+        hgen.set_global_frame('lab')
+        hamiltonian = hgen.build()[0]
+
+        eigvals, unitary = np.linalg.eigh(hamiltonian.full())
+        # hamiltonian == unitary @ np.diag(eigvals) @ unitary.T.conjugate()
+
+        # Row index of the biggest contributor to each column
+        k = np.argmax(np.abs(unitary), axis=1)
+        # Reordered eigenvalues (makes the corresponding change-of-basis unitary closest to identity)
+        eigvals = eigvals[k]
+        # Reshape the array to the qudit-product structure
+        eigvals = eigvals.reshape((self.num_levels,) * self.num_qudits)
+
+        return eigvals
+
     def free_frequencies(
         self,
         qudit_id: Optional[Hashable] = None
@@ -219,21 +253,7 @@ class HamiltonianBuilder:
         if len(self._coupling) == 0:
             return self.free_frequencies(qudit_id)
 
-        current_frame = self.frame()
-
-        # Move to the lab frame first to build a fully static H0+Hint
-        self.set_global_frame('lab')
-
-        hamiltonian = self.build_hdiag() + self.build_hint()[0]
-        eigvals, unitary = np.linalg.eigh(hamiltonian.full())
-        # hamiltonian == unitary @ np.diag(eigvals) @ unitary.T.conjugate()
-
-        # Row index of the biggest contributor to each column
-        k = np.argmax(np.abs(unitary), axis=1)
-        # Reordered eigenvalues (makes the corresponding change-of-basis unitary closest to identity)
-        eigvals = eigvals[k]
-        # Reshape the array to extract the single-qudit excitation subspaces
-        eigvals = eigvals.reshape((self.num_levels,) * self.num_qudits)
+        eigvals = self.eigenvalues()
 
         frequencies = dict()
 
@@ -243,8 +263,6 @@ class HamiltonianBuilder:
             energies = eigvals[indices]
 
             frequencies[qid] = np.diff(energies)
-
-        self.set_global_frame(current_frame)
 
         if qudit_id is None:
             return frequencies
@@ -614,7 +632,7 @@ class HamiltonianBuilder:
             A list of Hamiltonian terms that can be passed to qutip.sesolve.
         """
         hstatic = self.build_hdiag()
-        hint = self.build_hint(compile_hint=compile_hint, tlist=tlist, args=args)
+        hint = self.build_hint(compile_hint=compile_hint, tlist=tlist)
         hdrive = self.build_hdrive(rwa=rwa, tlist=tlist, args=args)
 
         if hint and isinstance(hint[0], qtp.Qobj):
@@ -666,16 +684,14 @@ class HamiltonianBuilder:
     def build_hint(
         self,
         compile_hint: bool = True,
-        tlist: Optional[np.ndarray] = None,
-        args: Optional[Dict[str, Any]] = None
+        tlist: Optional[np.ndarray] = None
     ) -> List:
         """Build the interaction Hamiltonian.
 
         Args:
             compile_hint: If True, interaction Hamiltonian terms are given as compilable strings.
-            tlist: Array of time points. If provided and `compile_hint=False`, all callable coefficients
-                are called with `(tlist, args)` and the resulting arrays are returned.
-            args: Arguments to the callable coefficients.
+            tlist: Array of time points. If provided and `compile_hint=False`, all dynamic coefficients
+                are taken as functions and called with `(tlist, None)`, and the resulting arrays are returned.
 
         Returns:
             A list of Hamiltonian terms. The first entry may be a single Qobj instance if there is a static term.
@@ -730,8 +746,8 @@ class HamiltonianBuilder:
                             hint.append([h_x, fn_x])
                             hint.append([h_y, fn_y])
                         else:
-                            hint.append([h_x, fn_x(tlist, args)])
-                            hint.append([h_y, fn_y(tlist, args)])
+                            hint.append([h_x, fn_x(tlist, None)])
+                            hint.append([h_y, fn_y(tlist, None)])
 
         if np.any(hstatic.data.data):
             hint.insert(0, hstatic)
