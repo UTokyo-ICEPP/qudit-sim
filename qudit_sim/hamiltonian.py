@@ -187,6 +187,9 @@ class HamiltonianBuilder:
 
         self.set_global_frame(self.default_frame, keep_phase=True)
 
+    def identity_op(self) -> qtp.Qobj:
+        return qtp.tensor([qtp.qeye(self._num_levels)] * self.num_qudits)
+
     def eigenvalues(self) -> np.ndarray:
         r"""Compute the energy eigenvalues of the static Hamiltonian (free and coupling).
 
@@ -854,11 +857,12 @@ class HamiltonianBuilder:
         num_cycles: Optional[int] = None,
         duration: Optional[float] = None,
         num_points: Optional[int] = None,
-        rwa: bool = False
+        rwa: bool = False,
+        frame: Optional[FrameSpec] = None
     ) -> np.ndarray:
         r"""Build a list of time points using the maximum frequency in the Hamiltonian.
 
-        Raises an exception if the maximum frequency is 0.
+        If the Hamiltonian is static, uses the maximum level spacing.
 
         Use one of ``num_cycles``, ``duration``, or ``num_points`` to specify the total number of time points.
 
@@ -868,6 +872,7 @@ class HamiltonianBuilder:
             duration: Maximum value of the tlist.
             num_points: Total number of time points including 0.
             rwa: Whether to use the rotating wave approximation to find the maximum frequency.
+            frame: If specified, the frame in which to find the maximum frequency.
 
         Returns:
             Array of time points.
@@ -877,11 +882,17 @@ class HamiltonianBuilder:
 
         max_frequency = 0.
 
-        for q1, q2 in self._coupling.keys():
-            max_freq_diffs = np.amax(np.abs(np.subtract.outer(self._frame[q1].frequency, self._frame[q2].frequency)))
+        if frame is not None:
+            hgen = self.copy()
+            hgen.set_global_frame(frame)
+        else:
+            hgen = self
+
+        for q1, q2 in hgen._coupling.keys():
+            max_freq_diffs = np.amax(np.abs(np.subtract.outer(hgen._frame[q1].frequency, hgen._frame[q2].frequency)))
             max_frequency = max(max_frequency, max_freq_diffs)
 
-        for qid, drives in self._drive.items():
+        for qid, drives in hgen._drive.items():
             if len(drives) == 0:
                 continue
 
@@ -891,11 +902,15 @@ class HamiltonianBuilder:
             else:
                 rel_sign = 1
 
-            max_frame_drive_freqs = np.amax(np.abs(np.add.outer(rel_sign * drive_freqs, self._frame[qid].frequency)))
+            max_frame_drive_freqs = np.amax(np.abs(np.add.outer(rel_sign * drive_freqs, hgen._frame[qid].frequency)))
             max_frequency = max(max_frequency, max_frame_drive_freqs)
 
         if max_frequency == 0.:
-            raise RuntimeError('Maximum frequency in the Hamiltonian is zero')
+            eigvals = self.eigenvalues()
+
+            for axis in range(self.num_qudits):
+                level_gaps = np.diff(eigvals, axis=axis)
+                max_frequency = max(max_frequency, np.amax(level_gaps))
 
         cycle = 2. * np.pi / max_frequency
 
