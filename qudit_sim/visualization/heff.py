@@ -40,7 +40,7 @@ def inspect_heff_fit(
             limit_components is not None.
         tscale: Scale for the time axis.
         align_ylim: Whether to align the y axis limits for all plots.
-        limit_components: List of Pauli components to plot.
+        select_components: List of Pauli components to plot.
         metrics: If True, a figure for fit information is included.
 
     Returns:
@@ -181,7 +181,8 @@ def plot_amplitude_scan(
     threshold: Optional[float] = None,
     amp_scale: FrequencyScale = FrequencyScale.auto,
     compo_scale: FrequencyScale = FrequencyScale.auto,
-    max_poly_order: int = 4
+    max_poly_order: int = 4,
+    select_components: Optional[List[Tuple]] = None
 ) -> Tuple[mpl.figure.Figure, np.ndarray, FrequencyScale, FrequencyScale]:
     """Plot the result of the amplitude scan.
 
@@ -200,6 +201,7 @@ def plot_amplitude_scan(
         amp_scale: Scale of the drive amplitude.
         compo_scale: Scale of the components.
         max_poly_order: Maximum polynomial order for fitting the amplitude dependencies of the components.
+        select_components: List of Pauli components to plot.
 
     Returns:
         Plot Figure, polynomial coefficients from the fits, and the amplitude and components scale used to
@@ -215,74 +217,94 @@ def plot_amplitude_scan(
         amp_scale = FrequencyScale.find_energy_scale(np.amax(np.abs(amplitudes)))
 
     amp_scale_omega = amp_scale.pulsatance_value
-    amps_norm = amplitudes / amp_scale_omega
+    amplitudes = amplitudes / amp_scale_omega
 
     if compo_scale is FrequencyScale.auto:
         compo_scale = FrequencyScale.find_energy_scale(np.amax(np.abs(components)))
 
     compo_scale_omega = compo_scale.pulsatance_value
-    compos_norm = components / compo_scale_omega
+    components = components / compo_scale_omega
 
-    if threshold is None:
-        threshold = compo_scale_omega * 1.e-2
+    # Amplitudes and components are all divided by omega and are in terms of frequency
 
-    threshold /= compo_scale_omega
+    compo_maxima = np.amax(np.abs(components), axis=0)
 
-    # Amplitude, compo, and threshold are all divided by omega and are in terms of frequency
+    if select_components is None:
+        if threshold is None:
+            threshold = compo_scale_omega * 1.e-2
 
-    amax = np.amax(np.abs(compos_norm), axis=0)
-    num_above_threshold = np.count_nonzero(amax > threshold)
-    min_max = np.amin(np.where(amax > threshold, amax, np.amax(amax)))
+        threshold /= compo_scale_omega
 
-    # Mask to apply to the components array
+        select_components = list(zip(*np.nonzero(compo_maxima > threshold)))
 
-    plot_mask = np.where(amax > threshold, 1, 0)
-    plot_mask = np.where(amax > 50. * min_max, 2, plot_mask)
+    min_max = min(compo_maxima[index] for index in select_components)
 
-    # Array for polynomial fit results
+    coefficients = np.zeros((len(select_components), max_poly_order + 1), dtype=float)
 
-    coefficients = np.zeros(components.shape[1:] + (max_poly_order + 1,), dtype=float)
+    pauli_dim = (comp_dim,) * num_qudits
+    basis_labels = paulis.labels(pauli_dim, symbol='',
+                                 delimiter=('' if comp_dim == 2 else ','), norm=False)
+    is_diagonal = np.asarray(paulis.symmetry(pauli_dim) == 0, dtype=bool)
 
-    if num_qudits > 1 and num_above_threshold > 6:
-        # Which Pauli components of the first qudit have plots to draw?
-        has_passing_compos = np.any(amax.reshape(num_paulis, -1) > threshold, axis=1)
-        num_plots = np.sum(has_passing_compos)
+    amplitudes_fine = np.linspace(amplitudes[0], amplitudes[-1], 100)
+    num_amps = amplitudes.shape[0]
 
-        nv = np.ceil(np.sqrt(num_plots)).astype(int)
-        nh = np.ceil(num_plots / nv).astype(int)
-        fig, axes = plt.subplots(nv, nh, figsize=(16, 12))
+    filled_markers = MarkerStyle.filled_markers
+    num_markers = len(filled_markers)
 
-        prefixes = paulis.labels(comp_dim, symbol='', norm=False)
+    ymax = 0.
+    ymin = 0.
 
-        iax = 0
+    fig, ax = plt.subplots(1, 1)
 
-        for ip in range(num_paulis):
-            if not has_passing_compos[ip]:
-                continue
+    for icompo, index in enumerate(select_components):
+        label = basis_labels[index]
 
-            ax = axes.reshape(-1)[iax]
-            _plot_amplitude_scan_on(ax, amps_norm, compos_norm[:, ip], plot_mask[ip],
-                                    max_poly_order, coefficients[ip], prefix=prefixes[ip])
+        plot_label = f'${label}$'
 
-            iax += 1
+        if compo_maxima[index] > 50. * min_max:
+            plot_scale = 0.1
+            plot_label += r' ($\times 0.1$)'
+        else:
+            plot_scale = 1.
 
-    else:
-        num_plots = 1
-        fig, axes = plt.subplots(1, 1, squeeze=False)
-        _plot_amplitude_scan_on(axes[0, 0], amps_norm, compos_norm, plot_mask, max_poly_order, coefficients)
+        # First axis: amplitudes
+        compos = components[(slice(None),) + index]
 
-    cmax = np.amax(compos_norm, axis=0)
-    cmin = np.amin(compos_norm, axis=0)
-    ymax = np.amax(np.where(plot_mask == 2, cmax * 0.1, cmax))
-    ymin = np.amin(np.where(plot_mask == 2, cmin * 0.1, cmin))
+        ymax = max(ymax, np.amax(compos) * plot_scale)
+        ymin = min(ymin, np.amin(compos) * plot_scale)
 
-    for ax in axes.reshape(-1)[:num_plots]:
-        ax.set_ylim(ymin * 1.2, ymax * 1.2)
-        ax.grid(True)
-        # Since amp and nu are normalized by (2*pi*frequency), displayed values are frequencies
-        ax.set_xlabel(fr'Drive amplitude ($2\pi\,\mathrm{{{amp_scale.frequency_unit}}}$)')
-        ax.set_ylabel(fr'$\nu$ ($2\pi\,\mathrm{{{compo_scale.frequency_unit}}}$)')
-        ax.legend()
+        pathcol = ax.scatter(amplitudes, compos * plot_scale, marker=filled_markers[icompo % num_markers], label=plot_label)
+
+        # Perform a polynomial fit
+        if is_diagonal[index]:
+            curve = _poly_even
+            p0 = np.zeros(max_poly_order // 2 + 1)
+        else:
+            curve = _poly_odd
+            p0 = np.zeros((max_poly_order + 1) // 2)
+
+        try:
+            popt, _ = sciopt.curve_fit(curve, amplitudes, compos, p0=p0)
+        except RuntimeError:
+            logging.warning(f'Components for {label} could not be fit with an order {max_poly_order} polynomial.')
+            continue
+        except OptimizeWarning:
+            logging.warning(f'Covariance of the fit parameters for {label} could not be determined.')
+
+        if is_diagonal[index]:
+            coefficients[icompo][::2] = popt
+        else:
+            coefficients[icompo][1::2] = popt
+
+        ax.plot(amplitudes_fine, curve(amplitudes_fine, *popt) * plot_scale, color=pathcol.get_edgecolor())
+
+    ax.set_ylim(ymin * 1.2, ymax * 1.2)
+    ax.grid(True)
+    # Since amp and nu are normalized by (2*pi*frequency), displayed values are frequencies
+    ax.set_xlabel(fr'Drive amplitude ($2\pi\,\mathrm{{{amp_scale.frequency_unit}}}$)')
+    ax.set_ylabel(fr'$\nu$ ($2\pi\,\mathrm{{{compo_scale.frequency_unit}}}$)')
+    ax.legend()
 
     fig.tight_layout()
 
