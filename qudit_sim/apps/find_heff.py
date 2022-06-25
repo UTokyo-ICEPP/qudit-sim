@@ -23,7 +23,7 @@ from ..hamiltonian import HamiltonianBuilder
 from ..util import PulseSimResult, save_sim_result, load_sim_result
 from ..pulse import GaussianSquare
 from ..pulse_sim import pulse_sim
-from .heff_tools import unitary_subtraction, trace_norm_squared
+from .heff_tools import unitary_subtraction, trace_norm_squared, heff_fidelity
 
 QuditSpec = Union[Hashable, Tuple[Hashable, ...]]
 FrequencySpec = Union[float, Tuple[float, ...]]
@@ -43,7 +43,7 @@ def find_heff(
     optimizer_args: Any = 0.05,
     max_updates: int = 10000,
     convergence: float = 1.e-4,
-    eigvals_tol: float = 0.1,
+    min_fidelity: float = 0.9,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
 ) -> Union[np.ndarray, List[np.ndarray]]:
@@ -111,7 +111,7 @@ def find_heff(
                              for itask in range(num_tasks))
         common_kwargs = {'comp_dim': comp_dim, 'optimizer': optimizer, 'optimizer_args': optimizer_args,
                          'max_updates': max_updates, 'convergence': convergence,
-                         'eigvals_tol': eigvals_tol, 'log_level': log_level}
+                         'min_fidelity': min_fidelity, 'log_level': log_level}
 
         components = parallel_map(heff_fit, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
                                   common_kwargs=common_kwargs, log_level=log_level, thread_based=True)
@@ -126,7 +126,7 @@ def find_heff(
 
         components = heff_fit(sim_result, hdiag, comp_dim=comp_dim, fit_start_time=fit_start_time,
                               optimizer=optimizer, optimizer_args=optimizer_args, max_updates=max_updates,
-                              convergence=convergence, eigvals_tol=eigvals_tol,
+                              convergence=convergence, min_fidelity=min_fidelity,
                               save_result_to=save_result_to, log_level=log_level)
 
     logger.setLevel(original_log_level)
@@ -185,7 +185,7 @@ def heff_fit(
     optimizer_args: Any = 0.05,
     max_updates: int = 10000,
     convergence: float = 1.e-4,
-    eigvals_tol: float = 0.1,
+    min_fidelity: float = 0.9,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
     logger_name: str = __name__
@@ -218,12 +218,10 @@ def heff_fit(
     tlist = sim_result.times[fit_start:] - sim_result.times[fit_start]
 
     # Remove the global phase from time evolution
-    diag_components = paulis.components(hdiag.full(), sim_result.dim).real
-    zeroth_index = (0,) * len(sim_result.dim)
-    zeroth_component = diag_components[zeroth_index]
-    zeroth_norm = np.power(2. * sim_result.dim[0], -len(sim_result.dim) / 2.) * 2.
-
-    global_phase = np.exp(1.j * zeroth_component * zeroth_norm * sim_result.times[fit_start:])
+    num_levels = sim_result.dim[0]
+    num_qudits = len(sim_result.dim)
+    identity_component = np.trace(hdiag.full()).real / (num_levels ** num_qudits)
+    global_phase = np.exp(1.j * identity_component * sim_result.times[fit_start:])
     time_evolution *= global_phase[:, None, None]
 
     heff_compos, offset_compos = _maximize_fidelity(time_evolution,
@@ -233,16 +231,20 @@ def heff_fit(
                                                     optimizer_args,
                                                     max_updates,
                                                     convergence,
-                                                    eigvals_tol,
+                                                    min_fidelity,
                                                     save_result_to,
                                                     logger)
 
     # Restore the global phase
+    # ν_0 = 1/2 tr[⊗λ0 H] = 1/2 √(2/L)^n tr[H] = 1/2 √(2L)^n id_comp
+    zeroth_component = identity_component
+    zeroth_component *= np.power(2. * num_levels, num_qudits / 2.) / 2.
+    zeroth_index = (0,) * num_qudits
     heff_compos[zeroth_index] = zeroth_component
     offset_compos[zeroth_index] = zeroth_component * fit_start_time
 
-    if sim_result.dim[0] != comp_dim:
-        reduced_dim = (comp_dim,) * len(sim_result.dim)
+    if num_levels != comp_dim:
+        reduced_dim = (comp_dim,) * num_qudits
         components_original = heff_compos
         components = paulis.truncate(heff_compos, reduced_dim)
     else:
@@ -272,7 +274,7 @@ def _maximize_fidelity(
     optimizer_args: Any,
     max_updates: int,
     convergence: float,
-    eigvals_tol: float,
+    min_fidelity: float,
     save_result_to: Union[str, None],
     logger: logging.Logger
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -368,21 +370,14 @@ def _maximize_fidelity(
         if not np.all(np.isfinite(heff_compos)) or not np.all(np.isfinite(offset_compos)):
             raise ValueError('Optimized components not finite')
 
-        ## Test the optimized values
-        target = unitary_subtraction(time_evolution, heff_compos, offset_compos, tlist, basis_list)
+        ## Test the optimized values - is the minimum fidelity above the threshold?
+        fidelity = np.amin(heff_fidelity(time_evolution, heff_compos, offset_compos, tlist, basis_list))
 
-        generators, eigvals = matrix_angle(target, with_diagonals=True)
-        generators *= -1.
-
-        # Are the eigenvalues flat?
-        eigvals = np.sort(eigvals, axis=1)
-        variance = np.amax(np.amax(eigvals, axis=0) - np.amin(eigvals, axis=0))
-
-        if variance < eigvals_tol:
-            logger.info(f'Found Heff and offsets that satisfy the eigenvalues tolerance.')
+        if fidelity > min_fidelity:
+            logger.info(f'Found Heff and offsets that satisfy the minimum fidelity test.')
             break
         else:
-            logger.info(f'Maximum eigenvalue variance: {variance}')
+            logger.info(f'Minimum fidelity value: {fidelity}')
             logger.info(f'Fit attempt {iatt} (tend={tend}) converged but did not produce a valid result.')
 
             tend = int(tend / 1.5)
@@ -392,6 +387,12 @@ def _maximize_fidelity(
                 break
 
             logger.info(f'Reducing tend to {tend}.')
+
+            # Add the slope of the unitary-subtracted time evolution to the initial value
+            target = unitary_subtraction(time_evolution, heff_compos, offset_compos, tlist, basis_list)
+
+            generators, eigvals = matrix_angle(target, with_diagonals=True)
+            generators *= -1.
 
             generator_compos = paulis.components(generators, dim=dim).real
             generator_compos = generator_compos.reshape(tlist.shape[0], -1)[:, 1:]
