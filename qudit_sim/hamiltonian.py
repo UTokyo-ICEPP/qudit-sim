@@ -34,6 +34,16 @@ class QuditParams:
     anharmonicity: float
     drive_amplitude: float
 
+
+def add_outer_multi(arr):
+    # Compute the summation "kron"
+    diagonal = np.zeros(1)
+    for subarr in arr:
+        diagonal = np.add.outer(diagonal, subarr).reshape(-1)
+
+    return diagonal
+
+
 class HamiltonianBuilder:
     r"""Hamiltonian with static transverse couplings and external drive terms.
 
@@ -272,6 +282,45 @@ class HamiltonianBuilder:
         else:
             return frequencies[qudit_id]
 
+    def noiz_frequencies(
+        self,
+        qudit_id: Optional[Hashable] = None
+    ) -> Union[np.ndarray, Dict[Hashable, np.ndarray]]:
+        r"""Return the no-IZ frequencies.
+
+        No-IZ frame cancels the phase drift of a qudit on average, i.e., when the other qudits are in a fully
+        mixed state. The frame defining matrix is
+
+        .. math::
+
+            D_{\mathrm{noIZ}} = \sum_{j=1}^{n} \sum_{l} \frac{1}{L^{n-1}}
+                                \mathrm{tr} \left[ \left(I_{\hat{j}} \otimes | l \rangle_j \langle l |_j\right) E \right]
+                                I_{\hat{j}} \otimes | l \rangle_j \langle l |_j.
+
+        Args:
+            qudit_id: Qudit ID. If None, a dict of no-IZ frequencies for all qudits is returned.
+
+        Returns:
+            The no-IZ frequency of the specified qudit ID, or a full mapping of qudit ID to frequency arrays.
+        """
+        if len(self._coupling) == 0:
+            return self.free_frequencies(qudit_id)
+
+        eigvals = self.eigenvalues()
+
+        frequencies = dict()
+
+        for iq, qid in enumerate(self._qudit_params):
+            partial_trace = np.sum(np.moveaxis(eigvals, iq, 0).reshape(self.num_levels, -1), axis=1)
+            partial_trace /= self.num_levels ** (self.num_qudits - 1)
+
+            frequencies[qid] = np.diff(partial_trace)
+
+        if qudit_id is None:
+            return frequencies
+        else:
+            return frequencies[qudit_id]
+
     def set_frame(
         self,
         qudit_id: Hashable,
@@ -302,7 +351,7 @@ class HamiltonianBuilder:
         if isinstance(frame_spec, str):
             drive_frame = False
 
-            if frame_spec == 'dressed' and len(self._coupling) == 0:
+            if frame_spec in ['dressed', 'noiz'] and len(self._coupling) == 0:
                 frame_spec = 'qudit'
 
             elif frame_spec == 'drive':
@@ -319,6 +368,9 @@ class HamiltonianBuilder:
                 frequencies = np.zeros((self.num_qudits, self._num_levels - 1))
             elif frame_spec == 'dressed':
                 freqs = self.dressed_frequencies()
+                frequencies = np.array([freqs[qudit_id] for qudit_id in qudit_ids])
+            elif frame_spec == 'noiz':
+                freqs = self.noiz_frequencies()
                 frequencies = np.array([freqs[qudit_id] for qudit_id in qudit_ids])
 
             if drive_frame:
@@ -420,14 +472,8 @@ class HamiltonianBuilder:
         energies = np.concatenate((np.zeros(self.num_qudits)[:, None], np.cumsum(frequencies, axis=1)), axis=1)
         offsets = np.concatenate((np.zeros(self.num_qudits)[:, None], np.cumsum(phases, axis=1)), axis=1)
 
-        # Compute the summation "kron"
-        en_diagonal = np.zeros(1)
-        for en_arr in energies:
-            en_diagonal = np.add.outer(en_diagonal, en_arr).reshape(-1)
-
-        offset_diagonal = np.zeros(1)
-        for off_arr in offsets:
-            offset_diagonal = np.add.outer(offset_diagonal, off_arr).reshape(-1)
+        en_diagonal = add_outer_multi(energies)
+        offset_diagonal = add_outer_multi(offsets)
 
         return en_diagonal, offset_diagonal
 
