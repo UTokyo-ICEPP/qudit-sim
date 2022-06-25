@@ -1,7 +1,9 @@
 """Parallel execution function wrapper."""
 
 from typing import Callable, List, Sequence, Tuple, Optional, Union, Any
+import sys
 import time
+import traceback
 import multiprocessing
 import threading
 import logging
@@ -50,13 +52,19 @@ def _wait_procs(processes, results, max_num, wait=2):
         else:
             break
 
-def _process_wrapper(target, args, kwargs, conn, proc_config=None):
+def _process_wrapper(target, args, kwargs, conn, proc_name, proc_config=None):
     if proc_config:
         for key, value in proc_config.items():
             setattr(config, key, value)
 
-    result = target(*args, **kwargs)
-    conn.send(result)
+    try:
+        result = target(*args, **kwargs)
+    except Exception:
+        sys.stderr.write(f'Exception in {proc_name}:\n')
+        traceback.print_exc()
+        conn.send(None)
+    else:
+        conn.send(result)
 
 def parallel_map(
     target: Callable,
@@ -173,20 +181,22 @@ def parallel_map(
         if common_kwargs is not None:
             k.update(common_kwargs)
 
+        proc_name = f'task{itask}'
+
         if thread_based:
             conn = ThreadConn()
             conn_recv = conn
             # In thread-based parallelization, each thread sees only one GPU
             jax_device_id = config.jax_devices[itask % len(config.jax_devices)]
             proc_config = {'jax_devices': [jax_device_id]}
-            proc_args = (target, a, k, conn, proc_config)
-            process = threading.Thread(target=_process_wrapper, args=proc_args, name=f'task{itask}')
+            proc_args = (target, a, k, conn, proc_name, proc_config)
+            process = threading.Thread(target=_process_wrapper, args=proc_args, name=proc_name)
         else:
             conn_recv, conn_send = multiprocessing.Pipe()
             # JAX (or CUDA in general?) does not seem to work with multiprocessing
             proc_config = {'jax_devices': []}
-            proc_args = (target, a, k, conn_send, proc_config)
-            process = multiprocessing.Process(target=_process_wrapper, args=proc_args, name=f'task{itask}')
+            proc_args = (target, a, k, conn_send, proc_name, proc_config)
+            process = multiprocessing.Process(target=_process_wrapper, args=proc_args, name=proc_name)
 
         process.start()
         processes.append((process, itask, conn_recv))
