@@ -317,6 +317,14 @@ def _simulate_drive(
 
     hamiltonian = hgen.build(rwa=False, **tlist_arg)
 
+    # # sesolve generates O(1e-6) error in the global phase when the Hamiltonian is not traceless.
+    # # Since we run the simulation in the lab frame, the only traceful term is hdiag.
+    # # We therefore subtract the diagonals to make hdiag traceless, and later apply a global phase
+    # # according to the shift.
+    # hdiag = hamiltonian[0]
+    # global_phase = np.trace(hdiag.full()).real / hdiag.shape[0]
+    # hamiltonian[0] -= global_phase
+
     ## Reunitarization and interval running setting
 
     if final_only and interval_len < tlist.shape[0]:
@@ -346,8 +354,6 @@ def _simulate_drive(
         local_hamiltonian = hamiltonian
 
     ## Arrays to store the states and expectation values
-
-
 
     if not calculator.e_ops or solve_options.store_states:
         state_shape = calculator.psi0_arr.shape
@@ -408,6 +414,10 @@ def _simulate_drive(
                     v, _, wdag = np.linalg.svd(evolution)
                     evolution = v @ wdag
 
+                # # Restore the actual global phase
+                # evolution *= np.exp(-1.j * global_phase * local_tlist[:, None, None])
+
+                # Compute the states and expectation values in the original frame
                 local_states, local_expect = calculator.calculate(evolution, local_tlist)
 
                 # Indices for the output arrays
