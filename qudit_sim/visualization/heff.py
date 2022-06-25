@@ -204,8 +204,8 @@ def plot_amplitude_scan(
         select_components: List of Pauli components to plot.
 
     Returns:
-        Plot Figure, polynomial coefficients from the fits, and the amplitude and components scale used to
-        normalize the amplitude variable in the polynomials.
+        Plot Figure, polynomial coefficients from the fits, list of selected components, and the amplitude
+        and components scale used to normalize the amplitude variable in the polynomials.
     """
     components = np.asarray(components)
 
@@ -239,7 +239,7 @@ def plot_amplitude_scan(
 
     min_max = min(compo_maxima[index] for index in select_components)
 
-    coefficients = np.zeros((len(select_components), max_poly_order + 1), dtype=float)
+    coefficients = list(np.zeros(max_poly_order + 1) for _ in range(len(select_components)))
 
     pauli_dim = (comp_dim,) * num_qudits
     basis_labels = paulis.labels(pauli_dim, symbol='',
@@ -308,75 +308,8 @@ def plot_amplitude_scan(
 
     fig.tight_layout()
 
-    return fig, coefficients, amp_scale, compo_scale
+    return fig, coefficients, select_components, amp_scale, compo_scale
 
-
-def _plot_amplitude_scan_on(ax, amps_norm, compos_norm, plot_mask, max_poly_order, coefficients, prefix=''):
-    num_qudits = len(compos_norm.shape) - 1 # first dimension: amplitudes
-    comp_dim = int(np.around(np.sqrt(compos_norm.shape[1])))
-
-    basis_labels = paulis.labels((comp_dim,) * num_qudits, symbol='',
-                                 delimiter=('' if comp_dim == 2 else ','), norm=False)
-
-    amps_norm_fine = np.linspace(amps_norm[0], amps_norm[-1], 100)
-    num_amps = amps_norm.shape[0]
-
-    filled_markers = MarkerStyle.filled_markers
-    num_markers = len(filled_markers)
-
-    imarker = 0
-
-    for index in np.ndindex(compos_norm.shape[1:]):
-        if plot_mask[index] == 0:
-            continue
-
-        if comp_dim == 2:
-            label = prefix + basis_labels[index]
-        else:
-            if prefix:
-                label = f'{prefix},{basis_labels[index]}'
-            else:
-                label = basis_labels[index]
-
-        plot_label = f'${label}$'
-
-        if plot_mask[index] == 2:
-            plot_scale = 0.1
-            plot_label += r' ($\times 0.1$)'
-        else:
-            plot_scale = 1.
-
-        compos = compos_norm[(slice(None),) + index]
-
-        pathcol = ax.scatter(amps_norm, compos * plot_scale, marker=filled_markers[imarker % num_markers], label=plot_label)
-
-        imarker += 1
-
-        # Perform a polynomial fit
-
-        even = np.sum(compos[:num_amps // 2] * compos[-num_amps // 2:]) > 0.
-
-        if even:
-            curve = _poly_even
-            p0 = np.zeros(max_poly_order // 2 + 1)
-        else:
-            curve = _poly_odd
-            p0 = np.zeros((max_poly_order + 1) // 2)
-
-        try:
-            popt, _ = sciopt.curve_fit(curve, amps_norm, compos, p0=p0)
-        except RuntimeError:
-            logging.warning(f'Components for {label} could not be fit with an order {max_poly_order} polynomial.')
-            continue
-        except OptimizeWarning:
-            logging.warning(f'Covariance of the fit parameters for {label} could not be determined.')
-
-        if even:
-            coefficients[index][::2] = popt
-        else:
-            coefficients[index][1::2] = popt
-
-        ax.plot(amps_norm_fine, curve(amps_norm_fine, *popt) * plot_scale, color=pathcol.get_edgecolor())
 
 def _poly_even(x, *args):
     value = args[0]
@@ -397,7 +330,8 @@ else:
     print_type = str
 
 def print_amplitude_scan(
-    coefficients: np.ndarray,
+    coefficients: List[np.ndarray],
+    select_components: List[Tuple[int, ...]],
     amp_scale: FrequencyScale,
     compo_scale: FrequencyScale
 ) -> print_type:
@@ -411,26 +345,18 @@ def print_amplitude_scan(
     Returns:
         A LaTeX representation of the polynomials.
     """
-    num_qudits = len(coefficients.shape) - 1 # last dimension is for polynomial coefficients
-    comp_dim = int(np.around(np.sqrt(coefficients.shape[0])))
-
-    basis_labels = paulis.labels((comp_dim,) * num_qudits, symbol='',
-                                 delimiter=('' if comp_dim == 2 else ','), norm=False)
-
-    poly_order = coefficients.shape[-1]
+    poly_order = coefficients[0].shape[0]
 
     lines = []
 
-    for index in np.ndindex(coefficients.shape[:-1]):
-        if np.allclose(coefficients[index], np.zeros(poly_order)):
-            continue
-
+    for coeff, index in zip(coefficients, select_components):
+        basis_label = ','.join(f'{i}' for i in index)
         if has_ipython:
-            line = fr'\frac{{\nu_{{{basis_labels[index]}}}}}{{2\pi\,\mathrm{{{compo_scale.frequency_unit}}}}} &='
+            line = fr'\frac{{\nu_{{{basis_label}}}}}{{2\pi\,\mathrm{{{compo_scale.frequency_unit}}}}} &='
         else:
-            line = f'nu[{basis_labels[index]}]/(2π {compo_scale.frequency_unit}) ='
+            line = f'nu[{basis_label}]/(2π {compo_scale.frequency_unit}) ='
 
-        for order, p in enumerate(coefficients[index]):
+        for order, p in enumerate(coeff):
             if p == 0.:
                 continue
 
