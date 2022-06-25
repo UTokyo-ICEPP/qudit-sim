@@ -12,6 +12,7 @@ import jax
 import jax.numpy as jnp
 from jaxlib.xla_extension import Device
 import optax
+from qutip import Qobj
 
 import rqutils.paulis as paulis
 from rqutils.math import matrix_exp, matrix_angle
@@ -42,7 +43,7 @@ def find_heff(
     optimizer_args: Any = 0.05,
     max_updates: int = 10000,
     convergence: float = 1.e-4,
-    eigvals_tol: float = 0.01,
+    eigvals_tol: float = 0.1,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
 ) -> Union[np.ndarray, List[np.ndarray]]:
@@ -104,24 +105,29 @@ def find_heff(
         else:
             save_result_path = lambda itask: None
 
+        args = list((result, hgen.build_hdiag()) for result, hgen in zip(sim_results, hgens))
         kwarg_keys = ('fit_start_time', 'logger_name', 'save_result_to',)
         kwarg_values = list((fit_start_times[itask], f'{__name__}.{itask}', save_result_path(itask))
                              for itask in range(num_tasks))
         common_kwargs = {'comp_dim': comp_dim, 'optimizer': optimizer, 'optimizer_args': optimizer_args,
-                         'max_updates': max_updates, 'convergence': convergence, 'eigvals_tol': eigvals_tol,
-                         'log_level': log_level}
+                         'max_updates': max_updates, 'convergence': convergence,
+                         'eigvals_tol': eigvals_tol, 'log_level': log_level}
 
-        components = parallel_map(heff_fit, args=sim_results, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
+        components = parallel_map(heff_fit, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
                                   common_kwargs=common_kwargs, log_level=log_level, thread_based=True)
 
     else:
-        hgen, tlist, fit_start_time = _add_drive(hgen, qudit, drive_spec[0], drive_spec[1], cycles, ramp_cycles)
+        hgen, tlist, fit_start_time = _add_drive(hgen, qudit, drive_spec[0], drive_spec[1],
+                                                 cycles, ramp_cycles)
 
         sim_result = pulse_sim(hgen, tlist, save_result_to=save_result_to, log_level=log_level)
 
-        components = heff_fit(sim_result, comp_dim=comp_dim, fit_start_time=fit_start_time, optimizer=optimizer,
-                              optimizer_args=optimizer_args, max_updates=max_updates, convergence=convergence,
-                              eigvals_tol=eigvals_tol, save_result_to=save_result_to, log_level=log_level)
+        hdiag = hgen.build_hdiag()
+
+        components = heff_fit(sim_result, hdiag, comp_dim=comp_dim, fit_start_time=fit_start_time,
+                              optimizer=optimizer, optimizer_args=optimizer_args, max_updates=max_updates,
+                              convergence=convergence, eigvals_tol=eigvals_tol,
+                              save_result_to=save_result_to, log_level=log_level)
 
     logger.setLevel(original_log_level)
 
@@ -172,13 +178,14 @@ def _add_drive(
 
 def heff_fit(
     sim_result: Union[PulseSimResult, str],
+    hdiag: Qobj,
     comp_dim: Optional[int] = None,
     fit_start_time: Optional[float] = None,
     optimizer: str = 'adam',
     optimizer_args: Any = 0.05,
     max_updates: int = 10000,
     convergence: float = 1.e-4,
-    eigvals_tol: float = 0.01,
+    eigvals_tol: float = 0.1,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
     logger_name: str = __name__
@@ -210,6 +217,15 @@ def heff_fit(
     time_evolution = sim_result.states[fit_start:]
     tlist = sim_result.times[fit_start:] - sim_result.times[fit_start]
 
+    # Remove the global phase from time evolution
+    diag_components = paulis.components(hdiag.full(), sim_result.dim).real
+    zeroth_index = (0,) * len(sim_result.dim)
+    zeroth_component = diag_components[zeroth_index]
+    zeroth_norm = np.power(2. * sim_result.dim[0], -len(sim_result.dim) / 2.) * 2.
+
+    global_phase = np.exp(1.j * zeroth_component * zeroth_norm * sim_result.times[fit_start:])
+    time_evolution *= global_phase[:, None, None]
+
     heff_compos, offset_compos = _maximize_fidelity(time_evolution,
                                                     tlist,
                                                     sim_result.dim,
@@ -220,6 +236,10 @@ def heff_fit(
                                                     eigvals_tol,
                                                     save_result_to,
                                                     logger)
+
+    # Restore the global phase
+    heff_compos[zeroth_index] = zeroth_component
+    offset_compos[zeroth_index] = zeroth_component * fit_start_time
 
     if sim_result.dim[0] != comp_dim:
         reduced_dim = (comp_dim,) * len(sim_result.dim)
@@ -390,8 +410,8 @@ def _maximize_fidelity(
             out.create_dataset('grad', data=grad_values[:num_updates])
 
     ## Recover the shape and normalization of the components arrays before returning
+    ## Zeroth component is filled in the calling function
     heff_compos = np.concatenate(([0.], heff_compos / time_norm)).reshape(basis.shape[:-2])
-
     offset_compos = np.concatenate(([0.], offset_compos)).reshape(basis.shape[:-2])
 
     return heff_compos, offset_compos
