@@ -293,7 +293,9 @@ def _maximize_fidelity(
     # Flattened list of basis operators excluding the identity operator
     basis_list = basis.reshape(-1, *basis.shape[-2:])[1:]
 
-    offdiagonals = np.nonzero(paulis.symmetry(dim).reshape(-1)[1:])
+    symmetry = paulis.symmetry(dim).reshape(-1)[1:]
+    diagonals = np.nonzero(symmetry == 0)
+    offdiagonals = np.nonzero(symmetry)
 
     ## Set the initial Heff values from a rough slope estimate
     # Compute ilog(U(t))
@@ -325,7 +327,8 @@ def _maximize_fidelity(
         else:
             compo_values = loss_values = grad_values = None
 
-    basis_list_dev = jax.device_put(basis_list, device=jax_device)
+    basis_diag = jax.device_put(basis_list[diagonals], device=jax_device)
+    basis_offdiag = jax.device_put(basis_list[offdiagonals], device=jax_device)
 
     tend = tlist.shape[0]
     iatt = 1
@@ -344,11 +347,18 @@ def _maximize_fidelity(
             # diverges when matrix_exp is used with a diagonal hermitian where some parameters
             # only control off-diagonal elements.
 
-            components = heff_compos[None, :] * tlist_dev[:, None] + offset_compos
-            is_diagonal = ~jnp.any(components.T[offdiagonals], axis=0)
-            has_diagonal = jnp.any(is_diagonal)
+            heff_diag = heff_compos[diagonals]
+            heff_offdiag = heff_compos[offdiagonals]
+            offset_diag = offset_compos[diagonals]
+            offset_offdiag = offset_compos[offdiagonals]
 
-            mat = 1.j * jnp.tensordot(components, basis_list_dev, (1, 0))
+            compos_diag = heff_diag[None, :] * tlist_dev[:, None] + offset_diag
+            compos_offdiag = heff_offdiag[None, :] * tlist_dev[:, None] + offset_offdiag
+
+            has_diagonal = jnp.any(jnp.all(jnp.isclose(compos_offdiag, 0.), axis=1))
+
+            mat = 1.j * jnp.tensordot(compos_diag, basis_diag, (1, 0))
+            mat += 1.j * jnp.tensordot(compos_offdiag, basis_offdiag, (1, 0))
 
             unitary = jax.lax.cond(has_diagonal, _vexpm, _matexp, mat)
 
