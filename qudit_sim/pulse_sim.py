@@ -317,13 +317,13 @@ def _simulate_drive(
 
     hamiltonian = hgen.build(rwa=False, **tlist_arg)
 
-    # # sesolve generates O(1e-6) error in the global phase when the Hamiltonian is not traceless.
-    # # Since we run the simulation in the lab frame, the only traceful term is hdiag.
-    # # We therefore subtract the diagonals to make hdiag traceless, and later apply a global phase
-    # # according to the shift.
-    # hdiag = hamiltonian[0]
-    # global_phase = np.trace(hdiag.full()).real / hdiag.shape[0]
-    # hamiltonian[0] -= global_phase
+    # sesolve generates O(1e-6) error in the global phase when the Hamiltonian is not traceless.
+    # Since we run the simulation in the lab frame, the only traceful term is hdiag.
+    # We therefore subtract the diagonals to make hdiag traceless, and later apply a global phase
+    # according to the shift.
+    hdiag = hamiltonian[0]
+    global_phase = np.trace(hdiag.full()).real / hdiag.shape[0]
+    hamiltonian[0] -= global_phase
 
     ## Reunitarization and interval running setting
 
@@ -414,8 +414,10 @@ def _simulate_drive(
                     v, _, wdag = np.linalg.svd(evolution)
                     evolution = v @ wdag
 
-                # # Restore the actual global phase
-                # evolution *= np.exp(-1.j * global_phase * local_tlist[:, None, None])
+                last_unitary = evolution[-1].copy()
+
+                # Restore the actual global phase
+                evolution *= np.exp(-1.j * global_phase * local_tlist[:, None, None])
 
                 # Compute the states and expectation values in the original frame
                 local_states, local_expect = calculator.calculate(evolution, local_tlist)
@@ -440,7 +442,7 @@ def _simulate_drive(
 
                 if start < tlist.shape[0] - 1:
                     # evolution[-1] is the lab-frame evolution operator
-                    local_psi0 = qtp.Qobj(inpt=evolution[-1], dims=local_psi0.dims)
+                    local_psi0 = qtp.Qobj(inpt=last_unitary, dims=local_psi0.dims)
                 else:
                     break
 
