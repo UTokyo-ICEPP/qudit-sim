@@ -122,13 +122,20 @@ def find_heff(
     elif num_tasks > 0:
         ramp_cycles = [ramp_cycles] * num_tasks
 
-    if num_tasks == 1:
-        frequency = frequency[0]
-        amplitude = amplitude[0]
-        cycles = cycles[0]
-        ramp_cycles = ramp_cycles[0]
+    if num_tasks == 0:
+        hgen, tlist, fit_start_time = _add_drive(hgen, qudit, frequency, amplitude, cycles, ramp_cycles)
 
-    if num_tasks > 1:
+        sim_result = pulse_sim(hgen, tlist, save_result_to=save_result_to, log_level=log_level)
+
+        hdiag = hgen.build_hdiag()
+
+        components = heff_fit(sim_result, hdiag, comp_dim=comp_dim, fit_start_time=fit_start_time,
+                              optimizer=optimizer, optimizer_args=optimizer_args, max_updates=max_updates,
+                              convergence=convergence, convergence_window=convergence_window,
+                              min_fidelity=min_fidelity,
+                              save_result_to=save_result_to, log_level=log_level)
+
+    else:
         hgens = list()
         tlists = list()
         fit_start_times = list()
@@ -158,19 +165,6 @@ def find_heff(
         components = parallel_map(heff_fit, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
                                   common_kwargs=common_kwargs, log_level=log_level, thread_based=True)
 
-    else:
-        hgen, tlist, fit_start_time = _add_drive(hgen, qudit, frequency, amplitude, cycles, ramp_cycles)
-
-        sim_result = pulse_sim(hgen, tlist, save_result_to=save_result_to, log_level=log_level)
-
-        hdiag = hgen.build_hdiag()
-
-        components = heff_fit(sim_result, hdiag, comp_dim=comp_dim, fit_start_time=fit_start_time,
-                              optimizer=optimizer, optimizer_args=optimizer_args, max_updates=max_updates,
-                              convergence=convergence, convergence_window=convergence_window,
-                              min_fidelity=min_fidelity,
-                              save_result_to=save_result_to, log_level=log_level)
-
     logger.setLevel(original_log_level)
 
     return components
@@ -196,15 +190,13 @@ def _add_drive(
         len(frequency) != len(qudit) or len(amplitude) != len(qudit):
         raise RuntimeError('Inconsistent qudit, frequency, and amplitude specification')
 
-    tlist = {'points_per_cycle': 8}
-
     if len(qudit) > 0:
         max_cycle = 2. * np.pi / min(frequency)
         duration = max_cycle * (ramp_cycles + cycles)
         width = max_cycle * cycles
         sigma = (duration - width) / 4.
 
-        tlist['duration'] = duration
+        tlist = {'points_per_cycle': 8, 'duration': duration}
         fit_start_time = 4. * sigma
 
         for qid, freq, amp in zip(qudit, frequency, amplitude):
@@ -214,8 +206,8 @@ def _add_drive(
             pulse = GaussianSquare(duration, amp, sigma, width, fall=False)
             hgen.add_drive(qid, frequency=freq, amplitude=pulse)
 
-    if not any(hgen.drive()):
-        tlist['num_cycles'] = int(cycles)
+    if not any(len(drive) != 0 for drive in hgen.drive().values()):
+        tlist = {'points_per_cycle': 8, 'num_cycles': int(cycles)}
         fit_start_time = 0.
 
     return hgen, tlist, fit_start_time
