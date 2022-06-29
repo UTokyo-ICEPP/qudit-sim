@@ -49,18 +49,36 @@ def find_heff(
 ) -> Union[np.ndarray, List[np.ndarray]]:
     r"""Determine the effective Hamiltonian from the result of constant-drive simulations.
 
-    The input to this function must be the result of pulse_sim with constant drives.
+    The function first sets up one-sided GuassianSquare pulses according to the ``cycles`` and ``ramp_cycles``
+    parameters and runs the pulse simulation. The resulting time evolution operator in the plateau region
+    of the pulse is then used to extract the effective Hamiltonian through the maximization of the unitary
+    fidelity.
+
+    Multiple qudits can be driven simultaneously by passing tuples to ``qudit``, ``frequency``, and ``amplitude``
+    parameters.
+
+    To evaluate multiple drive specifications in parallel (e.g. when performing an amplitude scan), pass a
+    list to either of ``frequency`` or ``amplitude``. When both are lists, their lengths must match.
 
     Args:
-        sim_result: Result from pulse_sim.
+        hgen: Qudits and couplings specification.
+        qudit: The qudit(s) to apply the drive to.
+        frequency: Drive frequency(ies).
+        amplitude: Drive amplitude(s).
         comp_dim: Dimensionality of the computational space.
-        method: Pauli component extraction method. Currently possible values are 'fidelity' and 'leastsq'.
-        method_params: Optional keyword arguments to pass to the extraction function.
+        cycles: Number of drive signal cycles in the plateau of the GaussianSquare pulse.
+        ramp_cycles: Number of drive signal cycles to use for ramp-up.
+        optimizer: The name of the optax function to use as the optimizer.
+        optimizer_args: Arguments to the optimizer.
+        max_updates: Maximum number of optimization iterations.
+        convergence: The cutoff value for the maximum absolute gradient to stop the fit at.
+        min_fidelity: Final fidelity threshold. If the unitary fidelity of the fit result goes below this
+            value, the fit is repeated over a shortened interval.
         save_result_to: File name (without the extension) to save the extraction results to.
         log_level: Log level.
 
     Returns:
-        An array of Pauli components or a list thereof (if a list is passed to ``sim_result``).
+        An array of Pauli components or a list thereof (if a list is passed to ``frequency`` and/or ``amplitude).
     """
     original_log_level = logger.level
     logger.setLevel(log_level)
@@ -217,13 +235,6 @@ def heff_fit(
     time_evolution = sim_result.states[fit_start:]
     tlist = sim_result.times[fit_start:] - sim_result.times[fit_start]
 
-    # Remove the global phase from time evolution
-    num_levels = sim_result.dim[0]
-    num_qudits = len(sim_result.dim)
-    identity_component = np.trace(hdiag.full()).real / (num_levels ** num_qudits)
-    global_phase = np.exp(1.j * identity_component * sim_result.times[fit_start:])
-    time_evolution *= global_phase[:, None, None]
-
     heff_compos, offset_compos = _maximize_fidelity(time_evolution,
                                                     tlist,
                                                     sim_result.dim,
@@ -234,14 +245,6 @@ def heff_fit(
                                                     min_fidelity,
                                                     save_result_to,
                                                     logger)
-
-    # Restore the global phase
-    # ν_0 = 1/2 tr[⊗λ0 H] = 1/2 √(2/L)^n tr[H] = 1/2 √(2L)^n id_comp
-    zeroth_component = identity_component
-    zeroth_component *= np.power(2. * num_levels, num_qudits / 2.) / 2.
-    zeroth_index = (0,) * num_qudits
-    heff_compos[zeroth_index] = zeroth_component
-    offset_compos[zeroth_index] = zeroth_component * fit_start_time
 
     if num_levels != comp_dim:
         reduced_dim = (comp_dim,) * num_qudits
