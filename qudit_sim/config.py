@@ -1,21 +1,31 @@
-"""Global configuration parameters.
-
-Because we want to be using independenty configuration parameters in parallel threads, we define
-`config` as a thread-local data storage.
-"""
+"""Global configuration parameters."""
 import threading
 
-config = threading.local()
+class Config:
+    """Global configuration parameters.
 
-config.num_cpus = 0
-"""Number of threads to use in parallelization routines. If <=0, set to `multiprocessing.cpu_count()`.
-For extraction methods that use GPUs, the combination of `jax_devices` and this parameter controls
-how many processes will be run on each device."""
+    Some parameters are held as thread-local data to allow per-thread configuration.
+    """
+    def __init__(self):
+        self.num_cpus = 0
 
-try:
-    import jax
-except ImportError:
-    config.jax_devices = []
-else:
-    config.jax_devices = list(range(jax.local_device_count()))
-    """List of GPU ids (integers starting at 0) to use."""
+        self._local = threading.local()
+        self._local.jax_devices = None
+
+    @property
+    def jax_devices(self):
+        if self._local.jax_devices is None:
+            try:
+                import jax
+            except ImportError:
+                self._local.jax_devices = []
+            else:
+                self._local.jax_devices = list(range(jax.local_device_count()))
+
+        return self._local.jax_devices
+
+    @jax_devices.setter
+    def jax_devices(self, value):
+        self._local.jax_devices = value
+
+config = Config()
