@@ -37,12 +37,13 @@ def find_heff(
     frequency: Union[FrequencySpec, List[FrequencySpec], np.ndarray],
     amplitude: Union[AmplitudeSpec, List[AmplitudeSpec], np.ndarray],
     comp_dim: int = 2,
-    cycles: float = 1000.,
-    ramp_cycles: float = 100.,
+    cycles: Union[float, List[float]] = 1000.,
+    ramp_cycles: Union[float, List[float]] = 100.,
     optimizer: str = 'adam',
     optimizer_args: Any = 0.05,
     max_updates: int = 10000,
     convergence: float = 1.e-4,
+    convergence_window: int = 5,
     min_fidelity: float = 0.9,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
@@ -71,7 +72,8 @@ def find_heff(
         optimizer: The name of the optax function to use as the optimizer.
         optimizer_args: Arguments to the optimizer.
         max_updates: Maximum number of optimization iterations.
-        convergence: The cutoff value for the maximum absolute gradient to stop the fit at.
+        convergence: The cutoff value for the change of fidelity within the last ``convergence_window`` iterations.
+        convergence_window: The number of updates to use to compute the mean of change of fidelity.
         min_fidelity: Final fidelity threshold. If the unitary fidelity of the fit result goes below this
             value, the fit is repeated over a shortened interval.
         save_result_to: File name (without the extension) to save the extraction results to.
@@ -87,30 +89,51 @@ def find_heff(
         frequency = list(frequency)
     if isinstance(amplitude, np.ndarray):
         amplitude = list(amplitude)
+    if isinstance(cycles, np.ndarray):
+        cycles = list(cycles)
+    if isinstance(ramp_cycles, np.ndarray):
+        ramp_cycles = list(ramp_cycles)
+
+    num_tasks = 0
 
     if isinstance(frequency, list) and isinstance(amplitude, list):
         if len(frequency) != len(amplitude):
             raise ValueError('Inconsistent length of frequency and amplitude lists')
 
-        drive_spec = list(zip(frequency, amplitude))
+        num_tasks = len(frequency)
 
     elif isinstance(frequency, list):
-        drive_spec = list((freq, amplitude) for freq in frequency)
+        num_tasks = len(frequency)
+        amplitude = [amplitude] * num_tasks
 
     elif isinstance(amplitude, list):
-        drive_spec = list((frequency, amp) for amp in amplitude)
+        num_tasks = len(amplitude)
+        frequency = [frequency] * num_tasks
 
-    else:
-        drive_spec = (frequency, amplitude)
+    if isinstance(cycles, list):
+        if len(cycles) != num_tasks:
+            raise ValueError('Inconsistent length of cycles list')
+    elif num_tasks > 0:
+        cycles = [cycles] * num_tasks
 
-    if isinstance(drive_spec, list):
-        num_tasks = len(drive_spec)
+    if isinstance(ramp_cycles, list):
+        if len(ramp_cycles) != num_tasks:
+            raise ValueError('Inconsistent length of ramp_cycles list')
+    elif num_tasks > 0:
+        ramp_cycles = [ramp_cycles] * num_tasks
 
+    if num_tasks == 1:
+        frequency = frequency[0]
+        amplitude = amplitude[0]
+        cycles = cycles[0]
+        ramp_cycles = ramp_cycles[0]
+
+    if num_tasks > 1:
         hgens = list()
         tlists = list()
         fit_start_times = list()
-        for freq, amp in drive_spec:
-            hgen, tlist, fit_start_time = _add_drive(hgen, qudit, freq, amp, cycles, ramp_cycles)
+        for freq, amp, cyc, rmp in zip(frequency, amplitude, cycles, ramp_cycles):
+            hgen, tlist, fit_start_time = _add_drive(hgen, qudit, freq, amp, cyc, rmp)
             hgens.append(hgen)
             tlists.append(tlist)
             fit_start_times.append(fit_start_time)
@@ -123,26 +146,29 @@ def find_heff(
         else:
             save_result_path = lambda itask: None
 
-        args = sim_results
+        args = list((result, hgen.build_hdiag()) for result, hgen in zip(sim_results, hgens))
         kwarg_keys = ('fit_start_time', 'logger_name', 'save_result_to',)
         kwarg_values = list((fit_start_times[itask], f'{__name__}.{itask}', save_result_path(itask))
                              for itask in range(num_tasks))
         common_kwargs = {'comp_dim': comp_dim, 'optimizer': optimizer, 'optimizer_args': optimizer_args,
                          'max_updates': max_updates, 'convergence': convergence,
+                         'convergence_window': convergence_window,
                          'min_fidelity': min_fidelity, 'log_level': log_level}
 
         components = parallel_map(heff_fit, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
                                   common_kwargs=common_kwargs, log_level=log_level, thread_based=True)
 
     else:
-        hgen, tlist, fit_start_time = _add_drive(hgen, qudit, drive_spec[0], drive_spec[1],
-                                                 cycles, ramp_cycles)
+        hgen, tlist, fit_start_time = _add_drive(hgen, qudit, frequency, amplitude, cycles, ramp_cycles)
 
         sim_result = pulse_sim(hgen, tlist, save_result_to=save_result_to, log_level=log_level)
 
-        components = heff_fit(sim_result, comp_dim=comp_dim, fit_start_time=fit_start_time,
+        hdiag = hgen.build_hdiag()
+
+        components = heff_fit(sim_result, hdiag, comp_dim=comp_dim, fit_start_time=fit_start_time,
                               optimizer=optimizer, optimizer_args=optimizer_args, max_updates=max_updates,
-                              convergence=convergence, min_fidelity=min_fidelity,
+                              convergence=convergence, convergence_window=convergence_window,
+                              min_fidelity=min_fidelity,
                               save_result_to=save_result_to, log_level=log_level)
 
     logger.setLevel(original_log_level)
@@ -172,34 +198,39 @@ def _add_drive(
 
     tlist = {'points_per_cycle': 8}
 
-    if len(qudit) == 0:
-        # Looking for a no-drive effective Hamiltonian
+    if len(qudit) > 0:
+        max_cycle = 2. * np.pi / min(frequency)
+        duration = max_cycle * (ramp_cycles + cycles)
+        width = max_cycle * cycles
+        sigma = (duration - width) / 4.
+
+        tlist['duration'] = duration
+        fit_start_time = 4. * sigma
+
+        for qid, freq, amp in zip(qudit, frequency, amplitude):
+            if amp == 0.:
+                continue
+
+            pulse = GaussianSquare(duration, amp, sigma, width, fall=False)
+            hgen.add_drive(qid, frequency=freq, amplitude=pulse)
+
+    if not any(hgen.drive()):
         tlist['num_cycles'] = int(cycles)
+        fit_start_time = 0.
 
-        return hgen, tlist, 0.
-
-    max_cycle = 2. * np.pi / min(frequency)
-    duration = max_cycle * (ramp_cycles + cycles)
-    width = max_cycle * cycles
-    sigma = (duration - width) / 4.
-
-    for qid, freq, amp in zip(qudit, frequency, amplitude):
-        pulse = GaussianSquare(duration, amp, sigma, width, fall=False)
-        hgen.add_drive(qid, frequency=freq, amplitude=pulse)
-
-    tlist['duration'] = duration
-
-    return hgen, tlist, 4. * sigma
+    return hgen, tlist, fit_start_time
 
 
 def heff_fit(
     sim_result: Union[PulseSimResult, str],
+    hdiag: Optional[Qobj] = None,
     comp_dim: Optional[int] = None,
     fit_start_time: Optional[float] = None,
     optimizer: str = 'adam',
     optimizer_args: Any = 0.05,
     max_updates: int = 10000,
     convergence: float = 1.e-4,
+    convergence_window: int = 5,
     min_fidelity: float = 0.9,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
@@ -212,12 +243,15 @@ def heff_fit(
 
     Args:
         sim_result: Simulation result object or the name of the file that contains one.
+        hdiag: The diagonal part of the Hamiltonian. If None, the identity component of the returned
+            effective Hamiltonian is set to zero.
         comp_dim: Dimensionality of the computational space.
         fit_start_time: Time at which the drive pulses hit the plateau.
         optimizer: The name of the optax function to use as the optimizer.
         optimizer_args: Arguments to the optimizer.
         max_updates: Maximum number of optimization iterations.
-        convergence: The cutoff value for the maximum absolute gradient to stop the fit at.
+        convergence: The cutoff value for the change of fidelity within the last ``convergence_window`` iterations.
+        convergence_window: The number of updates to use to compute the mean of change of fidelity.
         min_fidelity: Final fidelity threshold. If the unitary fidelity of the fit result goes below this
             value, the fit is repeated over a shortened interval.
         save_result_to: File name (without the extension) to save the extraction results to.
@@ -261,12 +295,25 @@ def heff_fit(
                                                     optimizer_args,
                                                     max_updates,
                                                     convergence,
+                                                    convergence_window,
                                                     min_fidelity,
                                                     save_result_to,
                                                     logger)
 
-    if num_levels != comp_dim:
-        reduced_dim = (comp_dim,) * num_qudits
+    if hdiag is not None:
+        # Add the zeroth component
+        num_levels = sim_result.dim[0]
+        num_qudits = len(sim_result.dim)
+        # ν_0 = 1/2 tr[⊗λ0 H] = 1/2 √(2/L)^n tr[H]
+        zeroth_component = np.trace(hdiag.full()).real
+        zeroth_component *= np.power(2. / num_levels, num_qudits / 2.) / 2.
+
+        zeroth_index = (0,) * num_qudits
+        heff_compos[zeroth_index] = zeroth_component
+        offset_compos[zeroth_index] = zeroth_component * fit_start_time
+
+    if sim_result.dim[0] != comp_dim:
+        reduced_dim = (comp_dim,) * len(sim_result.dim)
         components_original = heff_compos
         components = paulis.truncate(heff_compos, reduced_dim)
     else:
@@ -296,6 +343,7 @@ def _maximize_fidelity(
     optimizer_args: Any,
     max_updates: int,
     convergence: float,
+    convergence_window: int,
     min_fidelity: float,
     save_result_to: Union[str, None],
     logger: logging.Logger
@@ -349,8 +397,9 @@ def _maximize_fidelity(
         else:
             compo_values = loss_values = grad_values = None
 
-    basis_diag = jax.device_put(basis_list[diagonals], device=jax_device)
-    basis_offdiag = jax.device_put(basis_list[offdiagonals], device=jax_device)
+    # basis_diag = jax.device_put(basis_list[diagonals], device=jax_device)
+    # basis_offdiag = jax.device_put(basis_list[offdiagonals], device=jax_device)
+    basis_list_dev = jax.device_put(basis_list, device=jax_device)
 
     tend = tlist.shape[0]
     iatt = 1
@@ -369,20 +418,27 @@ def _maximize_fidelity(
             # diverges when matrix_exp is used with a diagonal hermitian where some parameters
             # only control off-diagonal elements.
 
-            heff_diag = heff_compos[diagonals]
-            heff_offdiag = heff_compos[offdiagonals]
-            offset_diag = offset_compos[diagonals]
-            offset_offdiag = offset_compos[offdiagonals]
+            # OK maybe the whole thing isn't necessary - we are calling this function at most
+            # O(1000) times, so slowness of vexpm may not be such a problem after all..
 
-            compos_diag = heff_diag[None, :] * tlist_dev[:, None] + offset_diag
-            compos_offdiag = heff_offdiag[None, :] * tlist_dev[:, None] + offset_offdiag
+            # heff_diag = heff_compos[diagonals]
+            # heff_offdiag = heff_compos[offdiagonals]
+            # offset_diag = offset_compos[diagonals]
+            # offset_offdiag = offset_compos[offdiagonals]
 
-            has_diagonal = jnp.any(jnp.all(jnp.isclose(compos_offdiag, 0.), axis=1))
+            # compos_diag = heff_diag[None, :] * tlist_dev[:, None] + offset_diag
+            # compos_offdiag = heff_offdiag[None, :] * tlist_dev[:, None] + offset_offdiag
 
-            mat = 1.j * jnp.tensordot(compos_diag, basis_diag, (1, 0))
-            mat += 1.j * jnp.tensordot(compos_offdiag, basis_offdiag, (1, 0))
+            # has_diagonal = jnp.any(jnp.all(jnp.isclose(compos_offdiag, 0., atol=1.e-6), axis=1))
 
-            unitary = jax.lax.cond(has_diagonal, _vexpm, _matexp, mat)
+            # mat = 1.j * jnp.tensordot(compos_diag, basis_diag, (1, 0))
+            # mat += 1.j * jnp.tensordot(compos_offdiag, basis_offdiag, (1, 0))
+
+            # unitary = jax.lax.cond(has_diagonal, _vexpm, _matexp, mat)
+
+            generator_compos = heff_compos[None, :] * tlist_dev[:, None] + offset_compos
+            mat = 1.j * jnp.tensordot(generator_compos, basis_list_dev, (1, 0))
+            unitary = _vexpm(mat)
 
             target = jnp.matmul(time_evolution_dev, unitary)
 
@@ -395,7 +451,7 @@ def _maximize_fidelity(
             result = _minimize_minuit(loss_fn, initial_dev, logger)
         else:
             result = _minimize(grad_trans, loss_fn, initial_dev, max_updates, convergence,
-                               compo_values, loss_values, grad_values, logger)
+                               convergence_window, compo_values, loss_values, grad_values, logger)
 
         heff_compos, offset_compos, num_updates = result
 
@@ -436,7 +492,7 @@ def _maximize_fidelity(
             iatt += 1
 
     if optimizer != 'minuit' and save_result_to:
-        compo_values[:][0] /= time_norm
+        compo_values[:, 0] /= time_norm
         with h5py.File(f'{save_result_to}.h5', 'a') as out:
             out.create_dataset('compos', data=compo_values[:num_updates])
             out.create_dataset('loss', data=loss_values[:num_updates])
@@ -500,6 +556,7 @@ def _minimize(
     initial: jnp.DeviceArray,
     max_updates: int,
     convergence: float,
+    convergence_window: int,
     compo_values: Union[np.ndarray, None],
     loss_values: Union[np.ndarray, None],
     grad_values: Union[np.ndarray, None],
@@ -526,6 +583,8 @@ def _minimize(
     opt_params = {'c': initial}
     opt_state = grad_trans.init(opt_params)
 
+    losses = np.ones(convergence_window)
+
     for iup in range(max_updates):
         new_params, opt_state, loss, gradient = step(opt_params, opt_state)
 
@@ -534,11 +593,13 @@ def _minimize(
             loss_values[iup] = loss
             grad_values[iup] = gradient['c']
 
-        max_grad = np.amax(np.abs(gradient['c']))
+        losses[iup % convergence_window] = loss
+        change = np.amax(losses) - np.amin(losses)
 
-        logger.debug('Iteration %d: loss %f max_grad %f', iup, loss, max_grad)
+        logger.debug('Iteration %d: loss %f, last %d change %f',
+                     iup, loss, convergence_window, change)
 
-        if max_grad < convergence:
+        if change < convergence:
             break
 
         opt_params = new_params

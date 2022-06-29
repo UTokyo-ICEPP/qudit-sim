@@ -326,9 +326,9 @@ class HamiltonianBuilder:
         frequencies = dict()
 
         for iq, qid in enumerate(self._qudit_params):
-            indexing = (slice(None),) + (slice(comp_dim),) * (self.num_qudits - 1)
-            traceable_form = np.moveaxis(eigvals, iq, 0)[indexing]
-            partial_trace = np.sum(traceable_form.reshape(self.num_levels, -1), axis=1)
+            indexing = (slice(comp_dim),) * (self.num_qudits - 1)
+            traceable_form = np.moveaxis(eigvals, iq, -1)[indexing]
+            partial_trace = np.sum(traceable_form.reshape(-1, self.num_levels), axis=0)
             partial_trace /= comp_dim ** (self.num_qudits - 1)
 
             frequencies[qid] = np.diff(partial_trace)

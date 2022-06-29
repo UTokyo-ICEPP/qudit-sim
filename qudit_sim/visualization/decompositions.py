@@ -276,7 +276,7 @@ def plot_evolution(
         labels = paulis.labels(dim, norm=False)
 
         if align_ylim:
-            indices_array = np.array(tuple(zip(select_components)))
+            indices_array = tuple(zip(*select_components))
             selected_compos = components[indices_array]
             ymax = np.amax(selected_compos)
             ymin = np.amin(selected_compos)
