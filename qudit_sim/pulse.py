@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 import numpy as np
 
-from .util import CallableCoefficient
+from .drive import CallableCoefficient
 
 logger = logging.getLogger(__name__)
 

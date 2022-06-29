@@ -12,7 +12,9 @@ from typing import Callable, Optional, Union, Tuple
 from dataclasses import dataclass
 import numpy as np
 
-from .util import HamiltonianCoefficient
+# Type for the callable time-dependent Hamiltonian coefficient
+CallableCoefficient = Callable[[Union[float, np.ndarray], dict], Union[complex, np.ndarray]]
+HamiltonianCoefficient = Union[str, np.ndarray, CallableCoefficient]
 
 def cos_freq(freq, phase=0.):
     """`cos(freq * t + phase)`"""

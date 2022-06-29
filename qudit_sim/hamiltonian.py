@@ -23,7 +23,12 @@ import qutip as qtp
 
 from .pulse import PulseSequence, SetFrequency
 from .drive import DriveTerm, cos_freq, sin_freq
-from .util import Frame
+
+@dataclass(frozen=True)
+class Frame:
+    """Frame specification for a single level gap of a qudit."""
+    frequency: np.ndarray
+    phase: np.ndarray
 
 FrameSpec = Union[str, Dict[Hashable, Frame], Sequence[Frame]]
 
@@ -284,7 +289,8 @@ class HamiltonianBuilder:
 
     def noiz_frequencies(
         self,
-        qudit_id: Optional[Hashable] = None
+        qudit_id: Optional[Hashable] = None,
+        comp_dim: int = 0
     ) -> Union[np.ndarray, Dict[Hashable, np.ndarray]]:
         r"""Return the no-IZ frequencies.
 
@@ -351,7 +357,7 @@ class HamiltonianBuilder:
         if isinstance(frame_spec, str):
             drive_frame = False
 
-            if frame_spec in ['dressed', 'noiz'] and len(self._coupling) == 0:
+            if (frame_spec == 'dressed' or frame_spec.startswith('noiz')) and len(self._coupling) == 0:
                 frame_spec = 'qudit'
 
             elif frame_spec == 'drive':
@@ -369,8 +375,13 @@ class HamiltonianBuilder:
             elif frame_spec == 'dressed':
                 freqs = self.dressed_frequencies()
                 frequencies = np.array([freqs[qudit_id] for qudit_id in qudit_ids])
-            elif frame_spec == 'noiz':
-                freqs = self.noiz_frequencies()
+            elif frame_spec.startswith('noiz'):
+                if len(frame_spec) > 4:
+                    comp_dim = int(frame_spec[4:])
+                else:
+                    comp_dim = 0
+
+                freqs = self.noiz_frequencies(comp_dim=comp_dim)
                 frequencies = np.array([freqs[qudit_id] for qudit_id in qudit_ids])
 
             if drive_frame:

@@ -14,7 +14,7 @@ else:
 
 from rqutils.qprint import QPrintBraKet
 
-from ..util import HamiltonianCoefficient
+from ..drive import HamiltonianCoefficient
 
 def print_hamiltonian(
     hamiltonian: List[Union[qtp.Qobj, Tuple[qtp.Qobj, HamiltonianCoefficient]]],

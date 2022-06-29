@@ -21,7 +21,7 @@ import rqutils.paulis as paulis
 from rqutils.math import matrix_angle
 
 from ..apps.heff_tools import unitary_subtraction, heff_fidelity
-from ..util import FrequencyScale
+from ..scale import FrequencyScale
 from .decompositions import print_components, plot_evolution
 
 def inspect_heff_fit(

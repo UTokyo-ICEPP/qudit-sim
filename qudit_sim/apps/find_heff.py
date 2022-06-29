@@ -20,9 +20,8 @@ from rqutils.math import matrix_exp, matrix_angle
 from ..config import config
 from ..parallel import parallel_map
 from ..hamiltonian import HamiltonianBuilder
-from ..util import PulseSimResult, save_sim_result, load_sim_result
 from ..pulse import GaussianSquare
-from ..pulse_sim import pulse_sim
+from ..pulse_sim import pulse_sim, PulseSimResult, save_sim_result, load_sim_result
 from .heff_tools import unitary_subtraction, trace_norm_squared, heff_fidelity
 
 QuditSpec = Union[Hashable, Tuple[Hashable, ...]]

@@ -1,13 +1,13 @@
 """Pulse simulation frontend."""
 
 from typing import Any, Dict, List, Tuple, Sequence, Optional, Union
-import typing
 import os
 import tempfile
 import logging
 import time
 import copy
 import collections
+from dataclasses import dataclass
 
 import numpy as np
 import h5py
@@ -15,8 +15,7 @@ import qutip as qtp
 
 from rqutils.math import matrix_exp
 
-from .hamiltonian import HamiltonianBuilder
-from .util import PulseSimResult, save_sim_result
+from .hamiltonian import HamiltonianBuilder, Frame
 from .parallel import parallel_map
 
 logger = logging.getLogger(__name__)
@@ -37,7 +36,7 @@ def pulse_sim(
     options: Optional[qtp.solver.Options] = None,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING
-) -> Union[PulseSimResult, List[PulseSimResult]]:
+) -> Union['PulseSimResult', List['PulseSimResult']]:
     r"""Run a pulse simulation.
 
     Build the Hamiltonian terms from the HamiltonianBuilder, determine the time points for the simulation if necessary,
@@ -476,3 +475,46 @@ def _exponentiate(
         evolution = matrix_exp(-1.j * hamiltonian[None, ...] * tlist[:, None, None], hermitian=-1)
 
     return calculator.calculate(evolution, tlist)
+
+
+@dataclass(frozen=True)
+class PulseSimResult:
+    """Return type of pulse_sim.
+
+    See the docstring of pulse_sim for why this class is necessary.
+    """
+    times: np.ndarray
+    expect: Union[List[np.ndarray], None]
+    states: Union[np.ndarray, None]
+    dim: Tuple[int, ...]
+    frame: Tuple[Frame, ...]
+
+
+def save_sim_result(filename: str, result: PulseSimResult):
+    """Save the pulse simulation result to an HDF5 file."""
+    with h5py.File(filename, 'w') as out:
+        out.create_dataset('times', data=result.times)
+        if result.expect is not None:
+            out.create_dataset('expect', data=result.expect)
+        if result.states is not None:
+            out.create_dataset('states', data=result.states)
+        out.create_dataset('dim', data=np.array(result.dim, dtype=int))
+        out.create_dataset('frame', data=np.array([[frame.frequency, frame.phase] for frame in result.frame]))
+
+
+def load_sim_result(filename: str) -> PulseSimResult:
+    """Load the pulse simulation result from an HDF5 file."""
+    with h5py.File(filename, 'r') as source:
+        times = source['times'][()]
+        try:
+            expect = source['expect'][()]
+        except KeyError:
+            expect = None
+        try:
+            states = source['states'][()]
+        except KeyError:
+            states = None
+        dim = tuple(source['dim'][()])
+        frame = tuple(Frame(d[0], d[1]) for d in source['frame'][()])
+
+    return PulseSimResult(times, expect, states, dim, frame)
