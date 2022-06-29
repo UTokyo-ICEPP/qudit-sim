@@ -303,6 +303,12 @@ class HamiltonianBuilder:
                                 \mathrm{tr} \left[ \left(I_{\hat{j}} \otimes | l \rangle_j \langle l |_j\right) E \right]
                                 I_{\hat{j}} \otimes | l \rangle_j \langle l |_j.
 
+        For ``comp_dim = d != 0``, the trace above is replaced with the pseudo-trace
+
+        .. math::
+
+            \mathrm{ptr}^{j}_{d} (\cdot) = \bigotimes_{k!=j} \sum_{l_k < d} \langle l_k |_k \cdot | l_k \rangle_k.
+
         Args:
             qudit_id: Qudit ID. If None, a dict of no-IZ frequencies for all qudits is returned.
 
@@ -312,13 +318,18 @@ class HamiltonianBuilder:
         if len(self._coupling) == 0:
             return self.free_frequencies(qudit_id)
 
+        if comp_dim <= 0:
+            comp_dim = self.num_levels
+
         eigvals = self.eigenvalues()
 
         frequencies = dict()
 
         for iq, qid in enumerate(self._qudit_params):
-            partial_trace = np.sum(np.moveaxis(eigvals, iq, 0).reshape(self.num_levels, -1), axis=1)
-            partial_trace /= self.num_levels ** (self.num_qudits - 1)
+            indexing = (slice(None),) + (slice(comp_dim),) * (self.num_qudits - 1)
+            traceable_form = np.moveaxis(eigvals, iq, 0)[indexing]
+            partial_trace = np.sum(traceable_form.reshape(self.num_levels, -1), axis=1)
+            partial_trace /= comp_dim ** (self.num_qudits - 1)
 
             frequencies[qid] = np.diff(partial_trace)
 

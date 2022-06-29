@@ -17,7 +17,7 @@ from rqutils.math import matrix_angle
 from rqutils.qprint import QPrintPauli
 import rqutils.paulis as paulis
 
-from ..pulse_sim import PulseSimResult
+from ..sim_result import PulseSimResult
 from ..scale import FrequencyScale
 
 def print_components(

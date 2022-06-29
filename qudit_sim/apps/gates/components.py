@@ -4,7 +4,7 @@ import numpy as np
 from rqutils.math import matrix_angle
 import rqutils.paulis as paulis
 
-from ...pulse_sim import PulseSimResult
+from ...sim_result import PulseSimResult
 
 def gate_components(
     sim_result: Union[PulseSimResult, List[PulseSimResult]],
