@@ -78,7 +78,7 @@ def find_heff(
         log_level: Log level.
 
     Returns:
-        An array of Pauli components or a list thereof (if a list is passed to ``frequency`` and/or ``amplitude).
+        An array of Pauli components or a list thereof (if a list is passed to ``frequency`` and/or ``amplitude``).
     """
     original_log_level = logger.level
     logger.setLevel(log_level)
@@ -123,7 +123,7 @@ def find_heff(
         else:
             save_result_path = lambda itask: None
 
-        args = list((result, hgen.build_hdiag()) for result, hgen in zip(sim_results, hgens))
+        args = sim_results
         kwarg_keys = ('fit_start_time', 'logger_name', 'save_result_to',)
         kwarg_values = list((fit_start_times[itask], f'{__name__}.{itask}', save_result_path(itask))
                              for itask in range(num_tasks))
@@ -140,9 +140,7 @@ def find_heff(
 
         sim_result = pulse_sim(hgen, tlist, save_result_to=save_result_to, log_level=log_level)
 
-        hdiag = hgen.build_hdiag()
-
-        components = heff_fit(sim_result, hdiag, comp_dim=comp_dim, fit_start_time=fit_start_time,
+        components = heff_fit(sim_result, comp_dim=comp_dim, fit_start_time=fit_start_time,
                               optimizer=optimizer, optimizer_args=optimizer_args, max_updates=max_updates,
                               convergence=convergence, min_fidelity=min_fidelity,
                               save_result_to=save_result_to, log_level=log_level)
@@ -196,7 +194,6 @@ def _add_drive(
 
 def heff_fit(
     sim_result: Union[PulseSimResult, str],
-    hdiag: Qobj,
     comp_dim: Optional[int] = None,
     fit_start_time: Optional[float] = None,
     optimizer: str = 'adam',
@@ -207,7 +204,29 @@ def heff_fit(
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
     logger_name: str = __name__
-):
+) -> np.ndarray:
+    r"""Perform a fidelity-maximizing fit to the result of constant-drive simulation.
+
+    The function takes the result of a constant-drive (with ring-up) simulation and identifies the
+    effective Hamiltonian that best describes the time evolution.
+
+    Args:
+        sim_result: Simulation result object or the name of the file that contains one.
+        comp_dim: Dimensionality of the computational space.
+        fit_start_time: Time at which the drive pulses hit the plateau.
+        optimizer: The name of the optax function to use as the optimizer.
+        optimizer_args: Arguments to the optimizer.
+        max_updates: Maximum number of optimization iterations.
+        convergence: The cutoff value for the maximum absolute gradient to stop the fit at.
+        min_fidelity: Final fidelity threshold. If the unitary fidelity of the fit result goes below this
+            value, the fit is repeated over a shortened interval.
+        save_result_to: File name (without the extension) to save the extraction results to.
+        log_level: Log level.
+
+    Returns:
+        An array of Pauli components.
+    """
+
     logger = logging.getLogger(logger_name)
     original_log_level = logger.level
     logger.setLevel(log_level)

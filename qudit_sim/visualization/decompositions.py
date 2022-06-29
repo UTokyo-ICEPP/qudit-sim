@@ -9,9 +9,11 @@ try:
     get_ipython()
 except NameError:
     has_ipython = False
+    PrintReturnType = str
 else:
     has_ipython = True
     from IPython.display import Latex
+    PrintReturnType = Latex
 
 from rqutils.math import matrix_angle
 from rqutils.qprint import QPrintPauli
@@ -28,7 +30,7 @@ def print_components(
     threshold: float = 1.e-3,
     lhs_label: Optional[str] = None,
     scale: Union[FrequencyScale, str, None] = FrequencyScale.auto
-) -> Union[Latex, str]:
+) -> PrintReturnType:
     r"""Compose a LaTeX expression of the effective Hamiltonian from the Pauli components.
 
     Args:
@@ -38,6 +40,7 @@ def print_components(
         precision: Number of digits below the decimal point to show.
         threshold: Ignore terms with absolute components below this value relative to the given scale
             (if >0) or to the maximum absolute component (if <0).
+        lhs_label: Left-hand-side label.
         scale: Normalize the components with the frequency scale. If None, components are taken
             to be dimensionless. If `FrequencyScale.auto`, scale is found from the maximum absolute
             value of the components. String `'pi'` is also allowed, in which case the components are
@@ -188,8 +191,8 @@ def plot_evolution(
     sim_result: Optional[PulseSimResult] = None,
     time_evolution: Optional[np.ndarray] = None,
     tlist: Optional[np.ndarray] = None,
-    differential: bool = False,
     dim: Optional[Tuple[int, ...]] = None,
+    differential: bool = False,
     threshold: float = 0.01,
     select_components: Optional[List[Tuple[int, ...]]] = None,
     eigvals: bool = True,
@@ -197,7 +200,33 @@ def plot_evolution(
     tscale: Optional[FrequencyScale] = FrequencyScale.auto,
     fig: Optional[mpl.figure.Figure] = None,
     title: str = ''
-):
+) -> Tuple[List[Tuple[int, ...]], mpl.figure.Figure]:
+    r"""Plot the Pauli components of the generator of a time evolution as a function of time.
+
+    The time evolution, time points, and the operator dimension can either be passed as a simulation
+    result object or individually.
+
+    Args:
+        sim_result: Simulation result object. If not None, ``time_evolution``, ``tlist``, and ``dim``
+            are ignored.
+        time_evolution: Time evolution unitaries.
+        tlist: Time points.
+        dim: Operator dimension.
+        differential: If True, plot the differential of the time evolution, i.e.
+            :math:`U_{H}(t_i) U_{H}(t_{i-1})^{\dagger}`.
+        threshold: Only the Pauli components whose values exceed this value are plotted. Ignored if
+            ``select_components`` is not None.
+        select_components: List of indices of the components to plot.
+        eigvals: If True, add a plot of the generator eigenvalue evolution.
+        align_ylim: If True, the vertical axis limits are aligned over all plots.
+        tscale: Time scale.
+        fig: Figure to add the plots into.
+        title: Title of the figure.
+
+    Returns:
+        The indices of the plotted components and the plot figure.
+    """
+
     if sim_result is not None:
         time_evolution = sim_result.states
         tlist = sim_result.times

@@ -338,7 +338,8 @@ def print_amplitude_scan(
     """Print a LaTeX expression of the amplitude scan fit results.
 
     Args:
-        coefficients: array of polynomial coefficients given by plot_amplitude_scan.
+        coefficients: Array of polynomial coefficients given by plot_amplitude_scan.
+        select_components: List of indices of the Pauli components to print.
         amp_scale: Amplitude normalization scale.
         compo_scale: Pauli components normalization scale.
 

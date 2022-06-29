@@ -8,9 +8,11 @@ try:
     get_ipython()
 except NameError:
     has_ipython = False
+    PrintReturnType = str
 else:
     has_ipython = True
     from IPython.display import Latex
+    PrintReturnType = Latex
 
 from rqutils.qprint import QPrintBraKet
 
@@ -19,7 +21,7 @@ from ..drive import HamiltonianCoefficient
 def print_hamiltonian(
     hamiltonian: List[Union[qtp.Qobj, Tuple[qtp.Qobj, HamiltonianCoefficient]]],
     phase_norm: Tuple[float, str]=(np.pi, 'π')
-) -> Union[Latex, str]:
+) -> PrintReturnType:
     """Print the Hamiltonian list built by HamiltonianBuilder.
 
     Args:

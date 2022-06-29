@@ -1,26 +1,26 @@
-.. currentmodule:: qudit_sim
+.. currentmodule:: qudit_sim.apps
 
-================================
-Effective Hamiltonian extraction
-================================
+============
+Applications
+============
 
-Extraction routines
-===================
-
-.. autosummary::
-   :toctree: ../generated
-   :recursive:
-
-   heff.fidelity_maximization
-   heff.leastsq_minimization
-
-Utilities and visualization
-===========================
+Effective Hamiltonian identification
+====================================
 
 .. autosummary::
    :toctree: ../generated
    :recursive:
 
-   heff.common
-   heff.visualize
-   heff.analysis
+   find_heff
+   heff_fit
+   heff_tools
+
+Gate unitary identification and gate pulse calibration
+======================================================
+
+.. autosummary::
+   :toctree: ../generated
+   :recursive:
+
+   gates.gate_components
+   gates.pi_pulse

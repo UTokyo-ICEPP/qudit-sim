@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import numpy as np
 import h5py
 
+from .hamiltonian import Frame
+
 @dataclass(frozen=True)
 class PulseSimResult:
     """Return type of pulse_sim.

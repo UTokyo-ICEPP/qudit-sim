@@ -9,14 +9,16 @@
    Home <self>
    Qudit Hamiltonian <hamiltonian>
    Effective Hamiltonian <heff>
+   Gate unitary <gates>
 
 .. toctree::
    :hidden:
    :caption: API Reference
 
-   apidocs/frontend
-   apidocs/heff
-   apidocs/backend
+   apidocs/simulation
+   apidocs/apps
+   apidocs/visualization
+   apidocs/misc
 
 =====================================
 Welcome to qudit-sim's documentation!

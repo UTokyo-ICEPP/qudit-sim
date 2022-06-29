@@ -67,8 +67,8 @@ we first note that :math:`U_q` can be factored into commuting subsystem unitarie
 
 .. math::
 
-    U_q = \prod_j \exp \left\{ i \left[\left( \omega_j - \frac{\Delta_j}{2} \right) N_j + \frac{\Delta_j}{2} N_j^2 \right] t \right\}
-        =: \prod_j e^{i h_j t}.
+    U_q = \bigotimes_j \exp \left\{ i \left[\left( \omega_j - \frac{\Delta_j}{2} \right) N_j + \frac{\Delta_j}{2} N_j^2 \right] t \right\}
+        =: \bigotimes_j e^{i h_j t}.
 
 Each :math:`h_j` commutes with :math:`b_k` and :math:`b_k^{\dagger}` if :math:`k \neq j`, so
 
@@ -201,7 +201,8 @@ and the phase offset between level :math:`l` and :math:`l+1` be :math:`\xi_{j}^{
 
 .. math::
 
-    U_f := \exp \left[ i \sum_j \sum_l \left( \Xi_j^l t + \Phi_j^{l} \right) |l\rangle_j \langle l |_j \right].
+    U_f & := \bigotimes_j \exp \left[ i \sum_l \left( \Xi_j^l t + \Phi_j^{l} \right) |l\rangle_j \langle l |_j \right] \\
+    & = \bigotimes_j \sum_l \exp \left[ i \left( \Xi_j^l t + \Phi_j^{l} \right) \right] |l\rangle_j \langle l |_j.
 
 :math:`U_f` commutes with the free Hamiltonian :math:`H_0` but :math:`i \dot{U}_f U_f^{\dagger} \neq -H_0` in general, so
 

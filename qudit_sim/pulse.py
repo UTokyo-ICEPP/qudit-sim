@@ -1,14 +1,21 @@
-"""Pulse shape library."""
+r"""
+============================================
+Pulse shape library (:mod:`qudit_sim.pulse`)
+============================================
+
+.. currentmodule:: qudit_sim.pulse
+
+Classes in this module represent pulse envelopes. Subclasses of Pulse can be passed to
+``HamiltonianBuilder.add_drive`` either as the ``amplitude`` parameter or through the PulseSequence
+class (``sequence`` parameter).
+"""
 
 from typing import List, Union, Optional, Any
 import copy
-import logging
 from dataclasses import dataclass
 import numpy as np
 
 from .drive import CallableCoefficient
-
-logger = logging.getLogger(__name__)
 
 class PulseSequence(list):
     """Pulse sequence.

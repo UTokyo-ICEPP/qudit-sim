@@ -1,14 +1,15 @@
 .. currentmodule:: qudit_sim
 
-==============================
-Frontend functions and classes
-==============================
+===========================
+Simulation of driven qudits
+===========================
 
 .. autosummary::
    :toctree: ../generated
    :recursive:
 
-   HamiltonianGenerator
-   pulse_sim
-   find_heff
+   HamiltonianBuilder
+   drive
    pulse
+   pulse_sim
+   sim_result
