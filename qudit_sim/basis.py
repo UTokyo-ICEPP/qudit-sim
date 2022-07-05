@@ -45,6 +45,9 @@ def change_basis(
     if isinstance(to_basis, np.ndarray):
         conversion = to_basis
 
+    elif to_basis == from_basis:
+        return components
+
     else:
         if to_basis != 'gell-mann' and from_basis != 'gell-mann':
             components = change_basis(components, 'gell-mann', from_basis, num_qudits)
@@ -159,7 +162,10 @@ def diagonals(basis: Union[str, None, np.ndarray], dim: int) -> np.ndarray:
 
 
 def matrix_labels(basis: str, dim: int) -> List[str]:
-    if basis == 'qudit':
+    if basis == 'gell-mann':
+        symbol = list(fr'\lambda_{{{i}}}' for i in range(dim ** 2))
+
+    elif basis == 'qudit':
         symbol = ['I']
         for l in range(dim - 1):
             symbol += [f'{s}_{{{l}{l + 1}}}' for s in ['X', 'Y', 'Z']]
