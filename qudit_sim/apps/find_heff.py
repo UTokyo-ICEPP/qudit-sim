@@ -1,6 +1,6 @@
 """Effective Hamiltonian extraction frontend."""
 
-from typing import Any, List, Tuple, Optional, Hashable, Union, Callable
+from typing import Any, List, Tuple, Dict, Optional, Hashable, Union, Callable
 import os
 from functools import partial
 import logging
@@ -45,6 +45,7 @@ def find_heff(
     convergence: float = 1.e-4,
     convergence_window: int = 5,
     min_fidelity: float = 0.9,
+    set_components: Optional[Dict[Tuple[int, ...], Tuple[float, bool]]] = None,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
 ) -> Union[np.ndarray, List[np.ndarray]]:
@@ -76,6 +77,9 @@ def find_heff(
         convergence_window: The number of updates to use to compute the mean of change of fidelity.
         min_fidelity: Final fidelity threshold. If the unitary fidelity of the fit result goes below this
             value, the fit is repeated over a shortened interval.
+        set_components: Specify the initial values of components. Format is ``{index: (value, fix)}`` where ``index``
+            is the component index (tuple of ints), ``value`` is the value to set the component to, and ``fix``
+            specifies whether the component remains fixed in the fit.
         save_result_to: File name (without the extension) to save the extraction results to.
         log_level: Log level.
 
@@ -132,7 +136,7 @@ def find_heff(
         components = heff_fit(sim_result, hdiag, comp_dim=comp_dim, fit_start_time=fit_start_time,
                               optimizer=optimizer, optimizer_args=optimizer_args, max_updates=max_updates,
                               convergence=convergence, convergence_window=convergence_window,
-                              min_fidelity=min_fidelity,
+                              min_fidelity=min_fidelity, set_components=set_components,
                               save_result_to=save_result_to, log_level=log_level)
 
     else:
@@ -159,8 +163,8 @@ def find_heff(
                              for itask in range(num_tasks))
         common_kwargs = {'comp_dim': comp_dim, 'optimizer': optimizer, 'optimizer_args': optimizer_args,
                          'max_updates': max_updates, 'convergence': convergence,
-                         'convergence_window': convergence_window,
-                         'min_fidelity': min_fidelity, 'log_level': log_level}
+                         'convergence_window': convergence_window, 'min_fidelity': min_fidelity,
+                         'set_components': set_components, 'log_level': log_level}
 
         components = parallel_map(heff_fit, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
                                   common_kwargs=common_kwargs, log_level=log_level, thread_based=True)
@@ -224,6 +228,7 @@ def heff_fit(
     convergence: float = 1.e-4,
     convergence_window: int = 5,
     min_fidelity: float = 0.9,
+    set_components: Optional[Dict[Tuple[int, ...], Tuple[float, bool]]] = None,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
     logger_name: str = __name__
@@ -246,6 +251,9 @@ def heff_fit(
         convergence_window: The number of updates to use to compute the mean of change of fidelity.
         min_fidelity: Final fidelity threshold. If the unitary fidelity of the fit result goes below this
             value, the fit is repeated over a shortened interval.
+        set_components: Specify the initial values of components. Format is ``{index: (value, fix)}`` where ``index``
+            is the component index (tuple of ints), ``value`` is the value to set the component to, and ``fix``
+            specifies whether the component remains fixed in the fit.
         save_result_to: File name (without the extension) to save the extraction results to.
         log_level: Log level.
 
@@ -289,6 +297,7 @@ def heff_fit(
                                                     convergence,
                                                     convergence_window,
                                                     min_fidelity,
+                                                    set_components,
                                                     save_result_to,
                                                     logger)
 
@@ -337,6 +346,7 @@ def _maximize_fidelity(
     convergence: float,
     convergence_window: int,
     min_fidelity: float,
+    set_components: Union[Dict[Tuple[int, ...], Tuple[float, bool]], None],
     save_result_to: Union[str, None],
     logger: logging.Logger
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -361,18 +371,37 @@ def _maximize_fidelity(
 
     ## Set the initial Heff values from a rough slope estimate
     # Compute ilog(U(t))
-    generators, eigenvalues = matrix_angle(time_evolution, with_diagonals=True)
-    generators *= -1.
+    generator, eigenvalues = matrix_angle(time_evolution, with_diagonals=True)
+    generator *= -1.
 
-    generator_compos = paulis.components(generators, dim=dim).real
+    generator_compos = paulis.components(generator, dim=dim).real
     generator_compos = generator_compos.reshape(tlist.shape[0], -1)[:, 1:]
 
-    init = _get_initial_slope(tlist, eigenvalues, generator_compos)
+    heff_init = _get_initial_slope(tlist, eigenvalues, generator_compos)
 
-    ## Stack the initial parameter values
-    # initial[0]: initial slope
-    # initial[1]: offset components (initialized to generator_compos[0])
-    initial = np.stack((init, generator_compos[0]), axis=0)
+    heff_static = np.zeros_like(basis_list[0])
+    heff_compos_static = list()
+    variable = np.full(heff_init.shape, True, dtype=bool)
+
+    if set_components:
+        for key, (value, fix) in set_components.items():
+            idx = np.ravel_multi_index(key, np.square(dim)) - 1
+            logger.info('Setting the initial value of %s (%d) to %f (fix=%s)', key, idx, value, fix)
+
+            if fix:
+                variable[idx] = False
+                heff_static += basis_list[idx] * value
+                heff_compos_static.append(value)
+            else:
+                heff_init[idx] = value
+
+        basis_list_heff = basis_list[variable]
+        heff_init = heff_init[variable]
+
+    else:
+        basis_list_heff = basis_list
+
+    static = np.logical_not(variable)
 
     if optimizer != 'minuit':
         ## Set up the optimizer, loss & grad functions, and the parameter update function
@@ -383,22 +412,30 @@ def _maximize_fidelity(
 
         if save_result_to:
             ## With optax we have access to intermediate results, so we save them
-            compo_values = np.zeros((max_updates,) + initial.shape, dtype='f8')
-            loss_values = np.zeros(max_updates, dtype='f8')
-            grad_values = np.zeros((max_updates,) + initial.shape, dtype='f8')
+            intermediate_results = {
+                'heff_compos': np.zeros((max_updates, heff_init.shape[0]), dtype='f8'),
+                'heff_grads': np.zeros((max_updates, heff_init.shape[0]), dtype='f8'),
+                'offset_compos': np.zeros((max_updates, basis_list.shape[0]), dtype='f8'),
+                'offset_grads': np.zeros((max_updates, basis_list.shape[0]), dtype='f8'),
+                'loss': np.zeros(max_updates, dtype='f8')
+            }
         else:
-            compo_values = loss_values = grad_values = None
+            intermediate_results = None
 
-    # basis_diag = jax.device_put(basis_list[diagonals], device=jax_device)
-    # basis_offdiag = jax.device_put(basis_list[offdiagonals], device=jax_device)
     basis_list_dev = jax.device_put(basis_list, device=jax_device)
+    heff_static_dev = jax.device_put(heff_static, device=jax_device)
+    if basis_list_heff is basis_list:
+        basis_list_heff_dev = basis_list_dev
+    else:
+        basis_list_heff_dev = jax.device_put(basis_list_heff, device=jax_device)
+    offset_init_dev = jax.device_put(generator_compos[0], device=jax_device)
 
     tend = tlist.shape[0]
     iatt = 1
 
     while True:
         ## Working arrays
-        initial_dev = jax.device_put(initial, device=jax_device)
+        heff_init_dev = jax.device_put(heff_init, device=jax_device)
         time_evolution_dev = jax.device_put(time_evolution[:tend], device=jax_device)
         tlist_dev = jax.device_put(tlist[:tend], device=jax_device)
 
@@ -410,27 +447,11 @@ def _maximize_fidelity(
             # diverges when matrix_exp is used with a diagonal hermitian where some parameters
             # only control off-diagonal elements.
 
-            # OK maybe the whole thing isn't necessary - we are calling this function at most
-            # O(1000) times, so slowness of vexpm may not be such a problem after all..
-
-            # heff_diag = heff_compos[diagonals]
-            # heff_offdiag = heff_compos[offdiagonals]
-            # offset_diag = offset_compos[diagonals]
-            # offset_offdiag = offset_compos[offdiagonals]
-
-            # compos_diag = heff_diag[None, :] * tlist_dev[:, None] + offset_diag
-            # compos_offdiag = heff_offdiag[None, :] * tlist_dev[:, None] + offset_offdiag
-
-            # has_diagonal = jnp.any(jnp.all(jnp.isclose(compos_offdiag, 0., atol=1.e-6), axis=1))
-
-            # mat = 1.j * jnp.tensordot(compos_diag, basis_diag, (1, 0))
-            # mat += 1.j * jnp.tensordot(compos_offdiag, basis_offdiag, (1, 0))
-
-            # unitary = jax.lax.cond(has_diagonal, _vexpm, _matexp, mat)
-
-            generator_compos = heff_compos[None, :] * tlist_dev[:, None] + offset_compos
-            mat = 1.j * jnp.tensordot(generator_compos, basis_list_dev, (1, 0))
-            unitary = _vexpm(mat)
+            heff = jnp.tensordot(heff_compos, basis_list_heff_dev, (0, 0))
+            heff += heff_static_dev
+            offset = jnp.tensordot(offset_compos, basis_list_dev, (0, 0))
+            generator = heff[None, ...] * tlist_dev[:, None, None] + offset
+            unitary = _vexpm(1.j * generator)
 
             target = jnp.matmul(time_evolution_dev, unitary)
 
@@ -440,10 +461,10 @@ def _maximize_fidelity(
 
         ## Minimize
         if optimizer == 'minuit':
-            result = _minimize_minuit(loss_fn, initial_dev, logger)
+            result = _minimize_minuit(loss_fn, heff_init_dev, offset_init_dev, logger)
         else:
-            result = _minimize(grad_trans, loss_fn, initial_dev, max_updates, convergence,
-                               convergence_window, compo_values, loss_values, grad_values, logger)
+            result = _minimize(grad_trans, loss_fn, heff_init_dev, offset_init_dev, max_updates,
+                               convergence, convergence_window, intermediate_results, logger)
 
         heff_compos, offset_compos, num_updates = result
 
@@ -451,13 +472,18 @@ def _maximize_fidelity(
             raise ValueError('Optimized components not finite')
 
         ## Test the optimized values - is the minimum fidelity above the threshold?
-        fidelity = np.amin(heff_fidelity(time_evolution, heff_compos, offset_compos, tlist, basis_list))
+        heff_compos_full = np.empty(basis_list.shape[0])
+        heff_compos_full[variable] = heff_compos
+        heff_compos_full[static] = heff_compos_static
+        fidelity = heff_fidelity(time_evolution, heff_compos_full, offset_compos,
+                                 tlist, basis_list)
+        minf = np.amin(fidelity)
 
-        if fidelity > min_fidelity:
+        if minf > min_fidelity:
             logger.info(f'Found Heff and offsets that satisfy the minimum fidelity test.')
             break
         else:
-            logger.info(f'Minimum fidelity value: {fidelity}')
+            logger.info(f'Minimum fidelity value: {minf}')
             logger.info(f'Fit attempt {iatt} (tend={tend}) converged but did not produce a valid result.')
 
             tend = int(tend / 1.5)
@@ -469,30 +495,34 @@ def _maximize_fidelity(
             logger.info(f'Reducing tend to {tend}.')
 
             # Add the slope of the unitary-subtracted time evolution to the initial value
-            target = unitary_subtraction(time_evolution, heff_compos, offset_compos, tlist, basis_list)
+            target = unitary_subtraction(time_evolution, heff_compos_full, offset_compos,
+                                         tlist, basis_list)
 
-            generators, eigvals = matrix_angle(target, with_diagonals=True)
-            generators *= -1.
+            generator, eigvals = matrix_angle(target, with_diagonals=True)
+            generator *= -1.
 
-            generator_compos = paulis.components(generators, dim=dim).real
+            generator_compos = paulis.components(generator, dim=dim).real
             generator_compos = generator_compos.reshape(tlist.shape[0], -1)[:, 1:]
 
             slope = _get_initial_slope(tlist, eigvals, generator_compos)
 
-            initial[0] += slope
+            heff_init += slope[variable]
 
             iatt += 1
 
     if optimizer != 'minuit' and save_result_to:
-        compo_values[:, 0] /= time_norm
+        intermediate_results['heff_compos'] /= time_norm
         with h5py.File(f'{save_result_to}.h5', 'a') as out:
-            out.create_dataset('compos', data=compo_values[:num_updates])
-            out.create_dataset('loss', data=loss_values[:num_updates])
-            out.create_dataset('grad', data=grad_values[:num_updates])
+            for key, value in intermediate_results.items():
+                out.create_dataset(key, data=value[:num_updates])
 
     ## Recover the shape and normalization of the components arrays before returning
     ## Zeroth component is filled in the calling function
-    heff_compos = np.concatenate(([0.], heff_compos / time_norm)).reshape(basis.shape[:-2])
+    heff_compos_full = np.empty(basis_list.shape[0])
+    heff_compos_full[variable] = heff_compos
+    heff_compos_full[static] = heff_compos_static
+    heff_compos_full /= time_norm
+    heff_compos = np.concatenate(([0.], heff_compos_full)).reshape(basis.shape[:-2])
     offset_compos = np.concatenate(([0.], offset_compos)).reshape(basis.shape[:-2])
 
     return heff_compos, offset_compos
@@ -500,33 +530,42 @@ def _maximize_fidelity(
 
 def _get_initial_slope(tlist, eigenvalues, generator_compos):
     # Find the first t where an eigenvalue does a 2pi jump
-    last_valid_tidx = tlist.shape[0]
+    last_valid_tidx = tlist.shape[0] - 1
     for eigenvalue_envelope in [np.amin(eigenvalues, axis=1), -np.amax(eigenvalues, axis=1)]:
         margin = 0.1
         hits_minus_pi = np.asarray(eigenvalue_envelope < -np.pi + margin).nonzero()[0]
         if hits_minus_pi.shape[0] != 0:
-            last_valid_tidx = min(last_valid_tidx, hits_minus_pi[0])
+            last_valid_tidx = min(last_valid_tidx, hits_minus_pi[0] - 1)
 
-    if last_valid_tidx <= 1:
+    if last_valid_tidx <= 0:
         raise RuntimeError('Failed to obtain an initial estimate of the slopes')
 
-    init = (generator_compos[last_valid_tidx - 1] - generator_compos[0]) / tlist[last_valid_tidx - 1]
+    # If C_i = a t_i + b = a (t_L / L * i) + b,
+    # S = sum_{i=0}^{L} C_i = a t_L / L * 1/2 * L * (L + 1) + b (L + 1)
+    # => a = (S / (L + 1) - b) * 2/t_L
+
+    init = np.sum(generator_compos[:last_valid_tidx + 1], axis=0) / (last_valid_tidx + 1) - generator_compos[0]
+    init *= 2. / tlist[last_valid_tidx]
 
     return init
 
 
 def _minimize_minuit(
     loss_fn: Callable,
-    initial: jnp.DeviceArray,
+    heff_init: jnp.DeviceArray,
+    offset_init: jnp.DeviceArray,
     logger: logging.Logger
 ):
     from iminuit import Minuit
 
-    jax_device = initial.device()
+    jax_device = heff_init.device()
+
+    initial = jnp.concatenate((heff_init, offset_init))
+    num_heff = heff_init.shape[0]
 
     @partial(jax.jit, device=jax_device)
     def _loss_fn(params):
-        return loss_fn(params[0], params[1])
+        return loss_fn(params[:num_heff], params[num_heff:])
 
     grad = jax.jit(jax.grad(_loss_fn), device=jax_device)
 
@@ -545,20 +584,19 @@ def _minimize_minuit(
 def _minimize(
     grad_trans,
     loss_fn: Callable,
-    initial: jnp.DeviceArray,
+    heff_init: jnp.DeviceArray,
+    offset_init: jnp.DeviceArray,
     max_updates: int,
     convergence: float,
     convergence_window: int,
-    compo_values: Union[np.ndarray, None],
-    loss_values: Union[np.ndarray, None],
-    grad_values: Union[np.ndarray, None],
+    intermediate_results: Union[Dict[str, np.ndarray], None],
     logger: logging.Logger
 ):
-    jax_device = initial.device()
+    jax_device = heff_init.device()
 
     @partial(jax.jit, device=jax_device)
     def _loss_fn(opt_params):
-        return loss_fn(opt_params['c'][0], opt_params['c'][1])
+        return loss_fn(opt_params['heff'], opt_params['offset'])
 
     loss_and_grad = jax.jit(jax.value_and_grad(_loss_fn), device=jax_device)
 
@@ -572,7 +610,7 @@ def _minimize(
     ## Start the fidelity maximization loop
     logger.info('Starting maximization loop..')
 
-    opt_params = {'c': initial}
+    opt_params = {'heff': heff_init, 'offset': offset_init}
     opt_state = grad_trans.init(opt_params)
 
     losses = np.ones(convergence_window)
@@ -580,10 +618,11 @@ def _minimize(
     for iup in range(max_updates):
         new_params, opt_state, loss, gradient = step(opt_params, opt_state)
 
-        if compo_values is not None:
-            compo_values[iup] = opt_params['c']
-            loss_values[iup] = loss
-            grad_values[iup] = gradient['c']
+        if intermediate_results is not None:
+            intermediate_results['loss'][iup] = loss
+            for key in ['heff', 'offset']:
+                intermediate_results[f'{key}_compos'][iup] = opt_params[key]
+                intermediate_results[f'{key}_grads'][iup] = gradient[key]
 
         losses[iup % convergence_window] = loss
         change = np.amax(losses) - np.amin(losses)
@@ -600,4 +639,4 @@ def _minimize(
 
     logger.info('Done after %d steps.', num_updates)
 
-    return np.array(opt_params['c'][0]), np.array(opt_params['c'][1]), num_updates
+    return np.array(opt_params['heff']), np.array(opt_params['offset']), num_updates
