@@ -27,7 +27,7 @@ def gate_components(
         return _single_gate_components(sim_result, comp_dim)
 
 
-def _single_gate_components(sim_result: PulseSimResult, comp_dim):
+def _single_gate_components(sim_result: PulseSimResult, comp_dim: int):
     gate = sim_result.states[-1]
     components = paulis.components(-matrix_angle(gate), sim_result.dim).real
 

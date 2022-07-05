@@ -9,6 +9,7 @@ from .sim_result import PulseSimResult, save_sim_result, load_sim_result
 from .drive import CallableCoefficient, HamiltonianCoefficient, DriveTerm
 from .pulse import PulseSequence
 from .scale import FrequencyScale
+from .basis import change_basis, diagonals, matrix_labels
 
 from .parallel import parallel_map
 from .config import config

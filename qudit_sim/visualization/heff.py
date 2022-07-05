@@ -22,6 +22,7 @@ from rqutils.math import matrix_angle
 
 from ..apps.heff_tools import unitary_subtraction, heff_fidelity
 from ..scale import FrequencyScale
+from ..basis import change_basis, diagonals, matrix_labels
 from .decompositions import print_components, plot_evolution
 
 def inspect_heff_fit(
@@ -30,7 +31,9 @@ def inspect_heff_fit(
     tscale: FrequencyScale = FrequencyScale.auto,
     align_ylim: bool = True,
     select_components: Optional[List[Tuple]] = None,
-    metrics: bool = True
+    metrics: bool = True,
+    basis: Optional[Union[str, np.ndarray]] = None,
+    symbol: Optional[str] = None
 ) -> List[mpl.figure.Figure]:
     """Plot the time evolution of Pauli components before and after fidelity maximization.
 
@@ -42,6 +45,8 @@ def inspect_heff_fit(
         align_ylim: Whether to align the y axis limits for all plots.
         select_components: List of Pauli components to plot.
         metrics: If True, a figure for fit information is included.
+        basis: Represent the components in the given matrix basis.
+        symbol: Symbol to use instead of the numeric indices for the matrices.
 
     Returns:
         A list of two (three if metrics=True) figures.
@@ -84,12 +89,21 @@ def inspect_heff_fit(
                                             eigvals=True,
                                             align_ylim=align_ylim,
                                             tscale=tscale,
-                                            title='Original time evolution vs $H_{eff}$')
+                                            title='Original time evolution vs $H_{eff}$',
+                                            basis=basis,
+                                            symbol=symbol)
     figures.append(fig_generator)
 
     # Add lines with slope=compo for terms above threshold
     xval = (tlist_fit + tlist[fit_start]) * tscale.frequency_value
     x0 = tlist[fit_start] * tscale.frequency_value
+
+    components_orig = components
+    offset_components_orig = offset_components
+
+    if basis is not None:
+        components = change_basis(components, basis)
+        offset_components = change_basis(offset_components, basis)
 
     for iax, index in enumerate(indices):
         ax = fig_generator.axes[iax]
@@ -102,7 +116,7 @@ def inspect_heff_fit(
         if ax.get_lines():
             ax.axvline(x0, linestyle='dotted', color='black', linewidth=0.5)
 
-    _highlight_comp_dim_components(fig_generator, indices, comp_dim)
+    _highlight_comp_dim_components(fig_generator, indices, comp_dim, basis)
 
     colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
     handles = [
@@ -116,7 +130,7 @@ def inspect_heff_fit(
     fig_generator.legend(handles, labels, 'upper right')
 
     ## Second figure: subtracted unitaries
-    target = unitary_subtraction(time_evolution[fit_start:], components, offset_components, tlist_fit)
+    target = unitary_subtraction(time_evolution[fit_start:], components_orig, offset_components_orig, tlist_fit)
 
     indices, fig_target = plot_evolution(time_evolution=target,
                                          tlist=(tlist_fit + tlist[fit_start]),
@@ -125,10 +139,12 @@ def inspect_heff_fit(
                                          select_components=select_components,
                                          align_ylim=align_ylim,
                                          tscale=tscale,
-                                         title='Unitary-subtracted time evolution')
+                                         title='Unitary-subtracted time evolution',
+                                         basis=basis,
+                                         symbol=symbol)
     figures.append(fig_target)
 
-    _highlight_comp_dim_components(fig_target, indices, comp_dim)
+    _highlight_comp_dim_components(fig_target, indices, comp_dim, basis)
 
     if metrics:
         ## Third figure: fit metrics plots
@@ -137,7 +153,7 @@ def inspect_heff_fit(
         fig_metrics.suptitle('Fit metrics', fontsize=16)
 
         # fidelity
-        final_fidelity = heff_fidelity(time_evolution[fit_start:], components, offset_components, tlist_fit)
+        final_fidelity = heff_fidelity(time_evolution[fit_start:], components_orig, offset_components_orig, tlist_fit)
         ax = axes[0]
         ax.set_title('Final fidelity')
         ax.set_xlabel(f't ({tscale.time_unit})')
@@ -166,13 +182,18 @@ def inspect_heff_fit(
     return figures
 
 
-def _highlight_comp_dim_components(fig, indices, comp_dim):
+def _highlight_comp_dim_components(fig, indices, comp_dim, basis):
     for iax, index in enumerate(indices):
         ax = fig.axes[iax]
 
-        if np.all(np.array(index) < comp_dim ** 2):
-            for spine in ax.spines.values():
-                spine.set(linewidth=2.)
+        if basis is None or basis == 'gell-mann':
+            if np.all(np.array(index) < comp_dim ** 2):
+                for spine in ax.spines.values():
+                    spine.set(linewidth=2.)
+
+        else:
+            # Not implemented yet
+            pass
 
 
 def plot_amplitude_scan(
@@ -182,7 +203,9 @@ def plot_amplitude_scan(
     amp_scale: FrequencyScale = FrequencyScale.auto,
     compo_scale: FrequencyScale = FrequencyScale.auto,
     max_poly_order: int = 4,
-    select_components: Optional[List[Tuple]] = None
+    select_components: Optional[List[Tuple]] = None,
+    basis: Optional[Union[str, np.ndarray]] = None,
+    symbol: Optional[str] = None
 ) -> Tuple[mpl.figure.Figure, np.ndarray, FrequencyScale, FrequencyScale]:
     """Plot the result of the amplitude scan.
 
@@ -202,6 +225,8 @@ def plot_amplitude_scan(
         compo_scale: Scale of the components.
         max_poly_order: Maximum polynomial order for fitting the amplitude dependencies of the components.
         select_components: List of Pauli components to plot.
+        basis: Represent the components in the given matrix basis.
+        symbol: Symbol to use instead of the numeric indices for the matrices.
 
     Returns:
         Plot Figure, polynomial coefficients from the fits, list of selected components, and the amplitude
@@ -212,6 +237,11 @@ def plot_amplitude_scan(
     num_qudits = len(components.shape) - 1 # first dim: amplitudes
     comp_dim = int(np.around(np.sqrt(components.shape[1])))
     num_paulis = comp_dim ** 2
+
+    if basis is not None:
+        components = change_basis(components, basis, num_qudits=num_qudits)
+        if symbol is None:
+            symbol = matrix_labels(basis, comp_dim)
 
     if amp_scale is FrequencyScale.auto:
         amp_scale = FrequencyScale.find_energy_scale(np.amax(np.abs(amplitudes)))
@@ -242,9 +272,18 @@ def plot_amplitude_scan(
     coefficients = list(np.zeros(max_poly_order + 1) for _ in range(len(select_components)))
 
     pauli_dim = (comp_dim,) * num_qudits
-    basis_labels = paulis.labels(pauli_dim, symbol='',
-                                 delimiter=('' if comp_dim == 2 else ','), norm=False)
-    is_diagonal = np.asarray(paulis.symmetry(pauli_dim) == 0, dtype=bool)
+
+    if symbol is None:
+        symbol = ''
+        delimiter = r'\,' if comp_dim == 2 else ','
+    else:
+        delimiter = r'\,'
+
+    symbol = [symbol] * num_qudits
+
+    basis_labels = paulis.labels(pauli_dim, symbol=symbol, delimiter=delimiter, norm=False)
+
+    diag_indices = diagonals(basis, comp_dim)
 
     amplitudes_fine = np.linspace(amplitudes[0], amplitudes[-1], 100)
     num_amps = amplitudes.shape[0]
@@ -259,6 +298,7 @@ def plot_amplitude_scan(
 
     for icompo, index in enumerate(select_components):
         label = basis_labels[index]
+        is_diagonal = all(idx in diag_indices for idx in index)
 
         plot_label = f'${label}$'
 
@@ -277,7 +317,7 @@ def plot_amplitude_scan(
         pathcol = ax.scatter(amplitudes, compos * plot_scale, marker=filled_markers[icompo % num_markers], label=plot_label)
 
         # Perform a polynomial fit
-        if is_diagonal[index]:
+        if is_diagonal:
             curve = _poly_even
             p0 = np.zeros(max_poly_order // 2 + 1)
         else:
@@ -292,7 +332,7 @@ def plot_amplitude_scan(
         except OptimizeWarning:
             logging.warning(f'Covariance of the fit parameters for {label} could not be determined.')
 
-        if is_diagonal[index]:
+        if is_diagonal:
             coefficients[icompo][::2] = popt
         else:
             coefficients[icompo][1::2] = popt
@@ -333,7 +373,8 @@ def print_amplitude_scan(
     coefficients: List[np.ndarray],
     select_components: List[Tuple[int, ...]],
     amp_scale: FrequencyScale,
-    compo_scale: FrequencyScale
+    compo_scale: FrequencyScale,
+    symbols: Optional[List[str]] = None
 ) -> print_type:
     """Print a LaTeX expression of the amplitude scan fit results.
 
@@ -342,6 +383,7 @@ def print_amplitude_scan(
         select_components: List of indices of the Pauli components to print.
         amp_scale: Amplitude normalization scale.
         compo_scale: Pauli components normalization scale.
+        symbols: Symbols to use instead of the numeric indices for the matrices.
 
     Returns:
         A LaTeX representation of the polynomials.
@@ -351,7 +393,11 @@ def print_amplitude_scan(
     lines = []
 
     for coeff, index in zip(coefficients, select_components):
-        basis_label = ','.join(f'{i}' for i in index)
+        if symbol is None:
+            basis_label = ','.join(f'{i}' for i in index)
+        else:
+            basis_label = ''.join(symbols[i] for i in index)
+
         if has_ipython:
             line = fr'\frac{{\nu_{{{basis_label}}}}}{{2\pi\,\mathrm{{{compo_scale.frequency_unit}}}}} &='
         else:

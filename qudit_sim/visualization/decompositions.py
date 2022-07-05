@@ -21,6 +21,7 @@ import rqutils.paulis as paulis
 
 from ..sim_result import PulseSimResult
 from ..scale import FrequencyScale
+from ..basis import change_basis, matrix_labels
 
 def print_components(
     components: np.ndarray,
@@ -29,7 +30,8 @@ def print_components(
     precision: int = 3,
     threshold: float = 1.e-3,
     lhs_label: Optional[str] = None,
-    scale: Union[FrequencyScale, str, None] = FrequencyScale.auto
+    scale: Union[FrequencyScale, str, None] = FrequencyScale.auto,
+    basis: Optional[str] = None
 ) -> PrintReturnType:
     r"""Compose a LaTeX expression of the effective Hamiltonian from the Pauli components.
 
@@ -45,10 +47,17 @@ def print_components(
             to be dimensionless. If `FrequencyScale.auto`, scale is found from the maximum absolute
             value of the components. String `'pi'` is also allowed, in which case the components are
             normalized by :math:`\pi`.
+        basis: Represent the components in the given matrix basis.
 
     Returns:
         A representation object for a LaTeX expression or an expression string for the effective Hamiltonian.
     """
+    if basis is not None:
+        components = change_basis(components, to_basis=basis)
+        if symbol is None:
+            dim = np.around(np.sqrt(components.shape)).astype(int)[0]
+            symbol = matrix_labels(basis, dim)
+
     max_abs = np.amax(np.abs(components))
 
     if scale is FrequencyScale.auto:
@@ -79,7 +88,13 @@ def print_components(
     else:
         amp_cutoff = -threshold / scale_omega
 
+    if symbol is not None:
+        symbol = [symbol] * len(components.shape)
+
     if uncertainties is not None:
+        if basis is not None:
+            uncertainties = change_basis(uncertainties, to_basis=basis)
+
         selected = np.nonzero(np.abs(components) > amp_cutoff * max_abs)
         unc = np.zeros_like(uncertainties)
         unc[selected] = uncertainties[selected] / scale_omega
@@ -109,15 +124,18 @@ def print_components(
 def plot_components(
     components: np.ndarray,
     uncertainties: Optional[np.ndarray] = None,
+    symbol: Optional[str] = None,
     threshold: float = 1.e-2,
     scale: Union[FrequencyScale, str, None] = FrequencyScale.auto,
-    ignore_identity: bool = True
+    ignore_identity: bool = True,
+    basis: Optional[str] = None
 ) -> mpl.figure.Figure:
     """Plot the Hamiltonian components as a bar graph in the decreasing order in the absolute value.
 
     Args:
         components: Array of Pauli components returned by find_heff.
         uncertainties: Array of component uncertainties.
+        symbol: Symbol to use instead of the numeric indices for the matrices.
         threshold: Ignore terms with absolute components below this value relative to the given scale
             (if >0) or to the maximum absolute component (if <0).
         scale: Normalize the components with the frequency scale. If None, components are taken
@@ -125,25 +143,41 @@ def plot_components(
             value of the components. String `'pi'` is also allowed, in which case the components are
             normalized by :math:`\pi`.
         ignore_identity: Ignore the identity term.
+        basis: Represent the components in the given matrix basis.
 
     Returns:
         A Figure object containing the bar graph.
     """
+    pauli_dim = np.around(np.sqrt(components.shape)).astype(int)
+    num_qudits = len(components.shape)
+
+    if basis is not None:
+        components = change_basis(components, to_basis=basis)
+        if symbol is None:
+            symbol = matrix_labels(basis, pauli_dim[0])
+
     max_abs = np.amax(np.abs(components))
 
     if scale is FrequencyScale.auto:
         scale = FrequencyScale.find_energy_scale(max_abs)
 
+    if num_qudits == 1:
+        power_of_two_sup = ''
+    elif num_qudits == 2:
+        power_of_two_sup = '/2'
+    else:
+        power_of_two_sup = f'/ 2^{{{num_qudits - 1}}}'
+
     if scale is None:
         scale_omega = 1.
-        ylabel = r'$\theta$'
+        ylabel = fr'$\theta {power_of_two_sup}$'
     elif scale == 'pi':
         scale_omega = np.pi
-        ylabel = r'$\theta/\pi$'
+        ylabel = fr'$\theta {power_of_two_sup}/\pi$'
     else:
         scale_omega = scale.pulsatance_value
         # If we normalize by 2*pi*frequency, the displayed values are in frequency
-        ylabel = r'$\nu\,(2\pi\,\mathrm{' + scale.frequency_unit + '})$'
+        ylabel = fr'$\nu {power_of_two_sup}\,(2\pi\,\mathrm{{{scale.frequency_unit}}})$'
 
     # Dividing by omega -> now everything is in terms of frequency (not angular)
     # Note: Don't use '/='!
@@ -161,12 +195,17 @@ def plot_components(
     nterms = np.count_nonzero(np.abs(components) > threshold)
     indices = np.unravel_index(flat_indices[:nterms], components.shape)
 
+    # Renormalize the components to account for the power-of-two suppression
+    components /= 2 ** (num_qudits - 1)
+
     if uncertainties is None:
         yerr = None
     else:
         uncertainties = uncertainties / scale_omega
         if ignore_identity:
             uncertainties[identity_index] = 0.
+
+        uncertainties /= 2 ** (num_qudits - 1)
 
         yerr = uncertainties[indices]
 
@@ -175,9 +214,15 @@ def plot_components(
 
     ax.axhline(0., color='black', linewidth=0.5)
 
-    pauli_dim = np.around(np.sqrt(components.shape)).astype(int)
-    labels = paulis.labels(pauli_dim, symbol='',
-                           delimiter=('' if pauli_dim[0] == 2 else ','))
+    if symbol is None:
+        symbol = ''
+        delimiter = r'\,' if pauli_dim[0] == 2 else ','
+    else:
+        delimiter = r'\,'
+
+    symbol = [symbol] * len(pauli_dim)
+
+    labels = paulis.labels(pauli_dim, symbol=symbol, delimiter=delimiter, norm=False)
 
     xticks = np.char.add(np.char.add('$', labels), '$')
 
@@ -199,7 +244,9 @@ def plot_evolution(
     align_ylim: bool = True,
     tscale: Optional[FrequencyScale] = FrequencyScale.auto,
     fig: Optional[mpl.figure.Figure] = None,
-    title: str = ''
+    title: str = '',
+    basis: Optional[str] = None,
+    symbol: Optional[str] = None
 ) -> Tuple[List[Tuple[int, ...]], mpl.figure.Figure]:
     r"""Plot the Pauli components of the generator of a time evolution as a function of time.
 
@@ -222,11 +269,12 @@ def plot_evolution(
         tscale: Time scale.
         fig: Figure to add the plots into.
         title: Title of the figure.
+        basis: Represent the components in the given matrix basis.
+        symbol: Symbol to use instead of the numeric indices for the matrices.
 
     Returns:
         The indices of the plotted components and the plot figure.
     """
-
     if sim_result is not None:
         time_evolution = sim_result.states
         tlist = sim_result.times
@@ -244,6 +292,12 @@ def plot_evolution(
 
     generator, ev = matrix_angle(time_evolution, with_diagonals=True)
     components = paulis.components(-1. * generator, dim=dim).real
+
+    if basis is not None:
+        components = change_basis(components, basis, num_qudits=len(dim))
+        if symbol is None:
+            symbol = matrix_labels(basis, dim[0])
+
     components = np.moveaxis(components, 0, -1)
 
     if select_components is None:
@@ -273,7 +327,10 @@ def plot_evolution(
         fig.subplots(ny, nx)
 
     if len(select_components) > 0:
-        labels = paulis.labels(dim, norm=False)
+        if symbol is not None:
+            symbol = [symbol] * len(dim)
+
+        labels = paulis.labels(dim, symbol=symbol, norm=False)
 
         if align_ylim:
             indices_array = tuple(zip(*select_components))
