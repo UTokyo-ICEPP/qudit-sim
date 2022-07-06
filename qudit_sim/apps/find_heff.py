@@ -24,6 +24,7 @@ from ..pulse import GaussianSquare
 from ..pulse_sim import pulse_sim
 from ..sim_result import PulseSimResult, save_sim_result, load_sim_result
 from .heff_tools import unitary_subtraction, trace_norm_squared, heff_fidelity
+from .gates.components import gate_components
 
 QuditSpec = Union[Hashable, Tuple[Hashable, ...]]
 FrequencySpec = Union[float, Tuple[float, ...]]
@@ -46,6 +47,7 @@ def find_heff(
     convergence_window: int = 5,
     min_fidelity: float = 0.9,
     set_components: Optional[Dict[Tuple[int, ...], Tuple[float, bool]]] = None,
+    zero_suppression: bool = True,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
 ) -> Union[np.ndarray, List[np.ndarray]]:
@@ -80,6 +82,7 @@ def find_heff(
         set_components: Specify the initial values of components. Format is ``{index: (value, fix)}`` where ``index``
             is the component index (tuple of ints), ``value`` is the value to set the component to, and ``fix``
             specifies whether the component remains fixed in the fit.
+        zero_suppression: Simulate two probe pulses to identify components that should be fixed to zero.
         save_result_to: File name (without the extension) to save the extraction results to.
         log_level: Log level.
 
@@ -127,47 +130,83 @@ def find_heff(
         ramp_cycles = [ramp_cycles] * num_tasks
 
     if num_tasks == 0:
-        hgen, tlist, fit_start_time = _add_drive(hgen, qudit, frequency, amplitude, cycles, ramp_cycles)
+        hgen_drv, tlist, fit_start_time = _add_drive(hgen, qudit, frequency, amplitude, cycles,
+                                                     ramp_cycles, logger_name=logger.name)
 
-        sim_result = pulse_sim(hgen, tlist, save_result_to=save_result_to, log_level=log_level)
+        sim_result = pulse_sim(hgen_drv, tlist, save_result_to=save_result_to, log_level=log_level)
+
+        if zero_suppression:
+            logger.info('Performing zero suppression')
+
+            init = _zero_suppression(hgen, qudit, frequency, amplitude, cycles, ramp_cycles,
+                                     parallelize=True, logger_name=logger.name)
+            if set_components:
+                init.update(set_components)
+        else:
+            init = set_components
 
         hdiag = hgen.build_hdiag()
 
         components = heff_fit(sim_result, hdiag, comp_dim=comp_dim, fit_start_time=fit_start_time,
                               optimizer=optimizer, optimizer_args=optimizer_args, max_updates=max_updates,
                               convergence=convergence, convergence_window=convergence_window,
-                              min_fidelity=min_fidelity, set_components=set_components,
+                              min_fidelity=min_fidelity, set_components=init,
                               save_result_to=save_result_to, log_level=log_level)
 
     else:
+        logger_names = list(f'{__name__}.{i}' for i in range(num_tasks))
+
         hgens = list()
         tlists = list()
         fit_start_times = list()
         for freq, amp, cyc, rmp in zip(frequency, amplitude, cycles, ramp_cycles):
-            hgen, tlist, fit_start_time = _add_drive(hgen, qudit, freq, amp, cyc, rmp)
-            hgens.append(hgen)
+            hgen_drv, tlist, fit_start_time = _add_drive(hgen, qudit, freq, amp, cyc, rmp,
+                                                         logger_name=logger.name)
+            hgens.append(hgen_drv)
             tlists.append(tlist)
             fit_start_times.append(fit_start_time)
 
         sim_results = pulse_sim(hgens, tlists, save_result_to=save_result_to, log_level=log_level)
 
+        if zero_suppression:
+            logger.info('Performing zero suppression')
+
+            args = list(zip(frequency, amplitude, cycles, ramp_cycles))
+            arg_position = tuple(range(2, 6))
+            common_args = (hgen, qudit)
+            kwarg_keys = ('logger_name',)
+            kwarg_values = list(zip(logger_names))
+            inits = parallel_map(_zero_suppression, args=args, arg_position=arg_position,
+                                 kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
+                                 common_args=common_args)
+
+            if set_components:
+                for init in inits:
+                    init.update(set_components)
+
+        else:
+            inits = [set_components] * num_tasks
+
         if save_result_to:
             num_digits = int(np.log10(num_tasks)) + 1
-            save_result_path = lambda itask: os.path.join(save_result_to, f'%0{num_digits}d' % itask)
+            fmt = f'%0{num_digits}d'
+            save_result_paths = list(os.path.join(save_result_to, fmt % i) for i in range(num_tasks))
         else:
-            save_result_path = lambda itask: None
+            save_result_paths = [None] * num_tasks
 
-        args = list((result, hgen.build_hdiag()) for result, hgen in zip(sim_results, hgens))
-        kwarg_keys = ('fit_start_time', 'logger_name', 'save_result_to',)
-        kwarg_values = list((fit_start_times[itask], f'{__name__}.{itask}', save_result_path(itask))
-                             for itask in range(num_tasks))
-        common_kwargs = {'comp_dim': comp_dim, 'optimizer': optimizer, 'optimizer_args': optimizer_args,
-                         'max_updates': max_updates, 'convergence': convergence,
-                         'convergence_window': convergence_window, 'min_fidelity': min_fidelity,
-                         'set_components': set_components, 'log_level': log_level}
+        args = sim_results
+
+        kwarg_keys = ('fit_start_time', 'set_components', 'logger_name', 'save_result_to',)
+        kwarg_values = list(zip(fit_start_times, inits, logger_names, save_result_paths))
+
+        common_kwargs = {'hdiag': hgen.build_hdiag(), 'comp_dim': comp_dim, 'optimizer': optimizer,
+                         'optimizer_args': optimizer_args, 'max_updates': max_updates,
+                         'convergence': convergence, 'convergence_window': convergence_window,
+                         'min_fidelity': min_fidelity, 'log_level': log_level}
 
         components = parallel_map(heff_fit, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
-                                  common_kwargs=common_kwargs, log_level=log_level, thread_based=True)
+                                  common_kwargs=common_kwargs,
+                                  log_level=log_level, thread_based=True)
 
     logger.setLevel(original_log_level)
 
@@ -180,8 +219,12 @@ def _add_drive(
     frequency: FrequencySpec,
     amplitude: AmplitudeSpec,
     cycles: float,
-    ramp_cycles: float
+    ramp_cycles: float,
+    full_pulse: bool = False,
+    logger_name: str = __name__
 ) -> Tuple[HamiltonianBuilder, np.ndarray, float]:
+    """Add GaussianSquare pulses to the HamiltonianBuilder."""
+    logger = logging.getLogger(logger_name)
 
     hgen = hgen.copy(clear_drive=True)
 
@@ -200,6 +243,9 @@ def _add_drive(
         width = max_cycle * cycles
         sigma = (duration - width) / 4.
 
+        if full_pulse:
+            duration += max_cycle * ramp_cycles
+
         tlist = {'points_per_cycle': 8, 'duration': duration}
         fit_start_time = 4. * sigma
 
@@ -207,7 +253,7 @@ def _add_drive(
             if amp == 0.:
                 continue
 
-            pulse = GaussianSquare(duration, amp, sigma, width, fall=False)
+            pulse = GaussianSquare(duration, amp, sigma, width, fall=full_pulse)
             hgen.add_drive(qid, frequency=freq, amplitude=pulse)
 
     if not any(len(drive) != 0 for drive in hgen.drive().values()):
@@ -215,6 +261,44 @@ def _add_drive(
         fit_start_time = 0.
 
     return hgen, tlist, fit_start_time
+
+
+def _zero_suppression(
+    hgen: HamiltonianBuilder,
+    qudit: QuditSpec,
+    frequency: FrequencySpec,
+    amplitude: AmplitudeSpec,
+    cycles: float,
+    ramp_cycles: float,
+    parallelize: bool = False,
+    logger_name: str = __name__
+) -> Dict[Tuple[int, ...], Tuple[float, bool]]:
+    """Perform probe pulse simulations and identify the components to zero-suppress."""
+    logger = logging.getLogger(logger_name)
+
+    hgens = list()
+    tlists = list()
+    for cyc in np.linspace(cycles * 0.5, cycles, 5):
+        hgen_drv, tlist, _ = _add_drive(hgen, qudit, frequency, amplitude, cyc, ramp_cycles,
+                                        full_pulse=True, logger_name=logger_name)
+        hgens.append(hgen_drv)
+        tlists.append(tlist)
+
+    if parallelize:
+        sim_results = pulse_sim(hgens, tlists, log_level=logger.getEffectiveLevel())
+    else:
+        sim_results = list()
+        for hgen_drv, tlist in zip(hgens, tlists):
+            res = pulse_sim(hgen_drv, tlist, log_level=logger.getEffectiveLevel())
+            sim_results.append(res)
+
+    components = np.array(gate_components(sim_results))
+
+    indices = np.nonzero(np.all(np.isclose(components, 0., atol=1.e-4), axis=0))
+
+    init = dict((idx, (0., True)) for idx in zip(*indices))
+
+    return init
 
 
 def heff_fit(
