@@ -32,6 +32,8 @@ AmplitudeSpec = Union[float, complex, Tuple[Union[float, complex], ...]]
 
 logger = logging.getLogger(__name__)
 
+default_optimizer_args = optax.exponential_decay(0.001, 10, 0.99)
+
 def find_heff(
     hgen: HamiltonianBuilder,
     qudit: QuditSpec,
@@ -40,13 +42,13 @@ def find_heff(
     comp_dim: int = 2,
     cycles: Union[float, List[float]] = 1000.,
     ramp_cycles: Union[float, List[float]] = 100.,
+    init: Optional[Union[np.ndarray, Dict[Tuple[int, ...], Union[float, Tuple[float, bool]]]]] = None,
     optimizer: str = 'adam',
-    optimizer_args: Any = 0.05,
+    optimizer_args: Any = default_optimizer_args,
     max_updates: int = 10000,
     convergence: float = 1.e-4,
     convergence_window: int = 5,
     min_fidelity: float = 0.9,
-    set_components: Optional[Dict[Tuple[int, ...], Tuple[float, bool]]] = None,
     zero_suppression: bool = True,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
@@ -72,6 +74,11 @@ def find_heff(
         comp_dim: Dimensionality of the computational space.
         cycles: Number of drive signal cycles in the plateau of the GaussianSquare pulse.
         ramp_cycles: Number of drive signal cycles to use for ramp-up.
+        init: Initial values of the effective Hamiltonian components. An array specifies all initial values.
+            If a dict is passed, the format is ``{index: value or (value, fixed)}`` where ``index`` is the component
+            index (tuple of ints), ``value`` is the value to set the component to, and ``fixed`` specifies whether
+            the component remains fixed in the fit (default False). Initial values for the unmentioned components
+            are set from a crude slope estimate.
         optimizer: The name of the optax function to use as the optimizer.
         optimizer_args: Arguments to the optimizer.
         max_updates: Maximum number of optimization iterations.
@@ -79,9 +86,6 @@ def find_heff(
         convergence_window: The number of updates to use to compute the mean of change of fidelity.
         min_fidelity: Final fidelity threshold. If the unitary fidelity of the fit result goes below this
             value, the fit is repeated over a shortened interval.
-        set_components: Specify the initial values of components. Format is ``{index: (value, fix)}`` where ``index``
-            is the component index (tuple of ints), ``value`` is the value to set the component to, and ``fix``
-            specifies whether the component remains fixed in the fit.
         zero_suppression: Simulate two probe pulses to identify components that should be fixed to zero.
         save_result_to: File name (without the extension) to save the extraction results to.
         log_level: Log level.
@@ -129,28 +133,18 @@ def find_heff(
     elif num_tasks > 0:
         ramp_cycles = [ramp_cycles] * num_tasks
 
+    hdiag = hgen.build_hdiag()
+
     if num_tasks == 0:
-        hgen_drv, tlist, fit_start_time = _add_drive(hgen, qudit, frequency, amplitude, cycles,
-                                                     ramp_cycles, logger_name=logger.name)
+        hgen_drv, tlist, start_time, end_time = _add_drive(hgen, qudit, frequency, amplitude, cycles,
+                                                           ramp_cycles, logger_name=logger.name)
 
         sim_result = pulse_sim(hgen_drv, tlist, save_result_to=save_result_to, log_level=log_level)
 
-        if zero_suppression:
-            logger.info('Performing zero suppression')
-
-            init = _zero_suppression(hgen, qudit, frequency, amplitude, cycles, ramp_cycles,
-                                     parallelize=True, logger_name=logger.name)
-            if set_components:
-                init.update(set_components)
-        else:
-            init = set_components
-
-        hdiag = hgen.build_hdiag()
-
-        components = heff_fit(sim_result, hdiag, comp_dim=comp_dim, fit_start_time=fit_start_time,
-                              optimizer=optimizer, optimizer_args=optimizer_args, max_updates=max_updates,
-                              convergence=convergence, convergence_window=convergence_window,
-                              min_fidelity=min_fidelity, set_components=init,
+        components = heff_fit(sim_result, hgen, comp_dim=comp_dim, start_time=start_time, end_time=end_time,
+                              init=init, optimizer=optimizer, optimizer_args=optimizer_args,
+                              max_updates=max_updates, convergence=convergence,
+                              convergence_window=convergence_window, min_fidelity=min_fidelity,
                               save_result_to=save_result_to, log_level=log_level)
 
     else:
@@ -158,34 +152,17 @@ def find_heff(
 
         hgens = list()
         tlists = list()
-        fit_start_times = list()
+        start_times = list()
+        end_times = list()
         for freq, amp, cyc, rmp in zip(frequency, amplitude, cycles, ramp_cycles):
-            hgen_drv, tlist, fit_start_time = _add_drive(hgen, qudit, freq, amp, cyc, rmp,
-                                                         logger_name=logger.name)
+            hgen_drv, tlist, start_time, end_time = _add_drive(hgen, qudit, freq, amp, cyc, rmp,
+                                                               logger_name=logger.name)
             hgens.append(hgen_drv)
             tlists.append(tlist)
-            fit_start_times.append(fit_start_time)
+            start_times.append(start_time)
+            end_times.append(end_time)
 
         sim_results = pulse_sim(hgens, tlists, save_result_to=save_result_to, log_level=log_level)
-
-        if zero_suppression:
-            logger.info('Performing zero suppression')
-
-            args = list(zip(frequency, amplitude, cycles, ramp_cycles))
-            arg_position = tuple(range(2, 6))
-            common_args = (hgen, qudit)
-            kwarg_keys = ('logger_name',)
-            kwarg_values = list(zip(logger_names))
-            inits = parallel_map(_zero_suppression, args=args, arg_position=arg_position,
-                                 kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
-                                 common_args=common_args)
-
-            if set_components:
-                for init in inits:
-                    init.update(set_components)
-
-        else:
-            inits = [set_components] * num_tasks
 
         if save_result_to:
             num_digits = int(np.log10(num_tasks)) + 1
@@ -196,10 +173,10 @@ def find_heff(
 
         args = sim_results
 
-        kwarg_keys = ('fit_start_time', 'set_components', 'logger_name', 'save_result_to',)
-        kwarg_values = list(zip(fit_start_times, inits, logger_names, save_result_paths))
+        kwarg_keys = ('start_time', 'end_time', 'logger_name', 'save_result_to',)
+        kwarg_values = list(zip(start_times, end_times, logger_names, save_result_paths))
 
-        common_kwargs = {'hdiag': hgen.build_hdiag(), 'comp_dim': comp_dim, 'optimizer': optimizer,
+        common_kwargs = {'hgen': hgen, 'comp_dim': comp_dim, 'init': init, 'optimizer': optimizer,
                          'optimizer_args': optimizer_args, 'max_updates': max_updates,
                          'convergence': convergence, 'convergence_window': convergence_window,
                          'min_fidelity': min_fidelity, 'log_level': log_level}
@@ -220,9 +197,8 @@ def _add_drive(
     amplitude: AmplitudeSpec,
     cycles: float,
     ramp_cycles: float,
-    full_pulse: bool = False,
     logger_name: str = __name__
-) -> Tuple[HamiltonianBuilder, np.ndarray, float]:
+) -> Tuple[HamiltonianBuilder, np.ndarray, float, float]:
     """Add GaussianSquare pulses to the HamiltonianBuilder."""
     logger = logging.getLogger(logger_name)
 
@@ -239,80 +215,43 @@ def _add_drive(
 
     if len(qudit) > 0:
         max_cycle = 2. * np.pi / min(frequency)
-        duration = max_cycle * (ramp_cycles + cycles)
+        ramp = max_cycle * ramp_cycles
+        sigma = ramp / 4. # let the ramp correspond to four sigmas
         width = max_cycle * cycles
-        sigma = (duration - width) / 4.
-
-        if full_pulse:
-            duration += max_cycle * ramp_cycles
+        duration = 2. * ramp + width
 
         tlist = {'points_per_cycle': 8, 'duration': duration}
-        fit_start_time = 4. * sigma
+        start_time = ramp
+        end_time = ramp + width
 
         for qid, freq, amp in zip(qudit, frequency, amplitude):
             if amp == 0.:
                 continue
 
-            pulse = GaussianSquare(duration, amp, sigma, width, fall=full_pulse)
+            pulse = GaussianSquare(duration, amp, sigma, width)
             hgen.add_drive(qid, frequency=freq, amplitude=pulse)
 
     if not any(len(drive) != 0 for drive in hgen.drive().values()):
         tlist = {'points_per_cycle': 8, 'num_cycles': int(cycles)}
-        fit_start_time = 0.
+        start_time = 0.
+        end_time = hgen.make_tlist(**tlist)[-1]
 
-    return hgen, tlist, fit_start_time
-
-
-def _zero_suppression(
-    hgen: HamiltonianBuilder,
-    qudit: QuditSpec,
-    frequency: FrequencySpec,
-    amplitude: AmplitudeSpec,
-    cycles: float,
-    ramp_cycles: float,
-    parallelize: bool = False,
-    logger_name: str = __name__
-) -> Dict[Tuple[int, ...], Tuple[float, bool]]:
-    """Perform probe pulse simulations and identify the components to zero-suppress."""
-    logger = logging.getLogger(logger_name)
-
-    hgens = list()
-    tlists = list()
-    for cyc in np.linspace(cycles * 0.5, cycles, 5):
-        hgen_drv, tlist, _ = _add_drive(hgen, qudit, frequency, amplitude, cyc, ramp_cycles,
-                                        full_pulse=True, logger_name=logger_name)
-        hgens.append(hgen_drv)
-        tlists.append(tlist)
-
-    if parallelize:
-        sim_results = pulse_sim(hgens, tlists, log_level=logger.getEffectiveLevel())
-    else:
-        sim_results = list()
-        for hgen_drv, tlist in zip(hgens, tlists):
-            res = pulse_sim(hgen_drv, tlist, log_level=logger.getEffectiveLevel())
-            sim_results.append(res)
-
-    components = np.array(gate_components(sim_results))
-
-    indices = np.nonzero(np.all(np.isclose(components, 0., atol=1.e-4), axis=0))
-
-    init = dict((idx, (0., True)) for idx in zip(*indices))
-
-    return init
+    return hgen, tlist, start_time, end_time
 
 
 def heff_fit(
     sim_result: Union[PulseSimResult, str],
-    hdiag: Optional[Qobj] = None,
+    hgen: HamiltonianBuilder,
     comp_dim: Optional[int] = None,
-    fit_start_time: Optional[float] = None,
+    start_time: Optional[float] = None,
+    end_time: Optional[float] = None,
+    init: Optional[Union[np.ndarray, Dict[Tuple[int, ...], Union[float, Tuple[float, bool]]]]] = None,
     optimizer: str = 'adam',
     optimizer_args: Any = 0.05,
     max_updates: int = 10000,
     convergence: float = 1.e-4,
     convergence_window: int = 5,
     min_fidelity: float = 0.9,
-    set_components: Optional[Dict[Tuple[int, ...], Tuple[float, bool]]] = None,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
     logger_name: str = __name__
@@ -327,7 +266,7 @@ def heff_fit(
         hdiag: The diagonal part of the Hamiltonian. If None, the identity component of the returned
             effective Hamiltonian is set to zero.
         comp_dim: Dimensionality of the computational space.
-        fit_start_time: Time at which the drive pulses hit the plateau.
+        start_time: Time at which the drive pulses hit the plateau.
         optimizer: The name of the optax function to use as the optimizer.
         optimizer_args: Arguments to the optimizer.
         max_updates: Maximum number of optimization iterations.
@@ -335,16 +274,12 @@ def heff_fit(
         convergence_window: The number of updates to use to compute the mean of change of fidelity.
         min_fidelity: Final fidelity threshold. If the unitary fidelity of the fit result goes below this
             value, the fit is repeated over a shortened interval.
-        set_components: Specify the initial values of components. Format is ``{index: (value, fix)}`` where ``index``
-            is the component index (tuple of ints), ``value`` is the value to set the component to, and ``fix``
-            specifies whether the component remains fixed in the fit.
         save_result_to: File name (without the extension) to save the extraction results to.
         log_level: Log level.
 
     Returns:
         An array of Pauli components.
     """
-
     logger = logging.getLogger(logger_name)
     original_log_level = logger.level
     logger.setLevel(log_level)
@@ -356,46 +291,92 @@ def heff_fit(
         with h5py.File(filename, 'r') as source:
             if comp_dim is None:
                 comp_dim = source['comp_dim'][()]
-            if fit_start_time is None:
-                fit_start_time = sim_result.times[source['fit_start'][()]]
+            if start_time is None:
+                start_time = sim_result.times[source['fit_range'][0]]
+            if end_time is None:
+                end_time = sim_result.times[source['fit_range'][1]]
 
         if save_result_to:
             save_sim_result(f'{save_result_to}.h5', sim_result)
 
-    fit_start = np.searchsorted(sim_result.times, fit_start_time, 'right') - 1
+    ## Time bins for the GaussianSquare plateau
+    flat_start = np.searchsorted(sim_result.times, start_time, 'right') - 1
+    flat_end = np.searchsorted(sim_result.times, end_time, 'right') - 1
 
-    if save_result_to:
-        with h5py.File(f'{save_result_to}.h5', 'a') as out:
-            out.create_dataset('comp_dim', data=comp_dim)
-            out.create_dataset('fit_start', data=fit_start)
+    ## Find the initial values for the fit
+    logger.info('Determining the initial values for Heff and offset..')
 
-    time_evolution = sim_result.states[fit_start:]
-    tlist = sim_result.times[fit_start:] - sim_result.times[fit_start]
+    heff_init, fixed, offset_init = _find_init(sim_result, hgen, init,
+                                               flat_start, flat_end, logger)
+    # Fix the identity component because its gradient is identically zero
+    fixed[(0,) * len(sim_result.dim)] = True
 
-    heff_compos, offset_compos = _maximize_fidelity(time_evolution,
-                                                    tlist,
-                                                    sim_result.dim,
-                                                    optimizer,
-                                                    optimizer_args,
-                                                    max_updates,
-                                                    convergence,
-                                                    convergence_window,
-                                                    min_fidelity,
-                                                    set_components,
-                                                    save_result_to,
-                                                    logger)
+    logger.debug('Heff initial values: %s', heff_init)
+    logger.debug('Fixed components: %s', fixed)
+    logger.debug('Offset initial values: %s', offset_init)
 
-    if hdiag is not None:
-        # Add the zeroth component
-        num_levels = sim_result.dim[0]
-        num_qudits = len(sim_result.dim)
-        # ν_0 = 1/2 tr[⊗λ0 H] = 1/2 √(2/L)^n tr[H]
-        zeroth_component = np.trace(hdiag.full()).real
-        zeroth_component *= np.power(2. / num_levels, num_qudits / 2.) / 2.
+    ## Time normalization: make tlist equivalent to arange(len(tlist)) / len(tlist)
+    # Normalize the tlist and Heff components for a better numerical stability in fit
+    time_norm = sim_result.times[-1] + sim_result.times[1]
+    tlist_full = sim_result.times.copy()
+    tlist_full /= time_norm
+    heff_init *= time_norm
 
-        zeroth_index = (0,) * num_qudits
-        heff_compos[zeroth_index] = zeroth_component
-        offset_compos[zeroth_index] = zeroth_component * fit_start_time
+    fit_start = flat_start
+    fit_end = flat_end
+
+    attempt = 1
+
+    while True:
+        time_evolution = sim_result.states[fit_start:fit_end + 1]
+        tlist = tlist_full[fit_start:fit_end + 1] - tlist_full[fit_start]
+
+        logger.info('Maximizing mean fidelity..')
+        result = _maximize_fidelity(time_evolution, tlist, sim_result.dim,
+                                    heff_init, fixed, offset_init,
+                                    optimizer, optimizer_args, max_updates,
+                                    convergence, convergence_window, logger)
+
+        heff_compos, offset_compos, intermediate_results = result
+
+        logger.debug('Heff component values: %s', heff_compos / time_norm)
+        logger.debug('Offset component values: %s', offset_compos)
+
+        ## Test the optimized values - is the minimum fidelity above the threshold?
+        fidelity = heff_fidelity(sim_result.states[flat_start:flat_end + 1], heff_compos, offset_compos,
+                                 tlist_full[flat_start:flat_end + 1] - tlist_full[flat_start])
+        minf = np.amin(fidelity)
+
+        if minf > min_fidelity:
+            logger.info('Found Heff and offsets with minimum fidelity %f', minf)
+            break
+        else:
+            logger.info('Minimum fidelity value: %f', minf)
+            logger.info('Fit attempt %d (fit_end=%d) did not produce a valid result.', attempt, fit_end)
+
+            fit_end = int(fit_end / 1.5)
+
+            if fit_end <= 64:
+                logger.warning('Reached the minimum possible fit_end value %d.', fit_end)
+                break
+
+            logger.info('Reducing fit_end to %d.', fit_end)
+
+            attempt += 1
+
+    # Recover the normalization
+    heff_compos /= time_norm
+
+    # Add the zeroth component
+    num_levels = sim_result.dim[0]
+    num_qudits = len(sim_result.dim)
+    # ν_0 = 1/2 tr[⊗λ0 H] = 1/2 √(2/L)^n tr[H]
+    zeroth_component = np.trace(hgen.build_hdiag().full()).real
+    zeroth_component *= np.power(2. / num_levels, num_qudits / 2.) / 2.
+
+    zeroth_index = (0,) * num_qudits
+    heff_compos[zeroth_index] = zeroth_component
+    offset_compos[zeroth_index] = zeroth_component * start_time
 
     if sim_result.dim[0] != comp_dim:
         reduced_dim = (comp_dim,) * len(sim_result.dim)
@@ -407,14 +388,105 @@ def heff_fit(
 
     if save_result_to:
         with h5py.File(f'{save_result_to}.h5', 'a') as out:
+            out.create_dataset('comp_dim', data=comp_dim)
+            out.create_dataset('fit_range', data=[fit_start, fit_end])
+
+            out.create_dataset('fixed', data=fixed)
+
             out.create_dataset('components', data=components)
             out.create_dataset('offset_components', data=offset_compos)
             if components_original is not None:
                 out.create_dataset('components_original', data=components_original)
 
+            if intermediate_results is not None:
+                intermediate_results['heff_compos'] /= time_norm
+                for key, value in intermediate_results.items():
+                    out.create_dataset(key, data=value)
+
     logger.setLevel(original_log_level)
 
     return components
+
+
+def _find_init(
+    sim_result: PulseSimResult,
+    hgen: HamiltonianBuilder,
+    init: Union[np.ndarray, Dict[Tuple[int, ...], Union[float, Tuple[float, bool]]], None],
+    flat_start: int,
+    flat_end: int,
+    logger: logging.Logger
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Find the initial values of the effective Hamiltonian components."""
+    generator, eigenvalues = matrix_angle(sim_result.states, with_diagonals=True)
+    generator_compos = paulis.components(-generator, dim=sim_result.dim).real
+    offset_init = generator_compos[flat_start]
+
+    fixed = np.zeros_like(offset_init, dtype=bool)
+
+    if isinstance(init, np.ndarray):
+        heff_init = init
+    else:
+        ## Default: set the initial Heff values from a rough slope estimate
+        # Find the first t where an eigenvalue does a 2pi jump
+
+        last_valid_tidx = flat_end
+        for eigenvalue_envelope in [np.amin(eigenvalues, axis=1), -np.amax(eigenvalues, axis=1)]:
+            margin = 0.1
+            hits_minus_pi = np.asarray(eigenvalue_envelope < -np.pi + margin).nonzero()[0]
+            if hits_minus_pi.shape[0] != 0:
+                last_valid_tidx = min(last_valid_tidx, hits_minus_pi[0] - 1)
+
+        if last_valid_tidx > 0:
+            # If C_i = a t_i + b = a (t_L / L * i) + b,
+            # S = sum_{i=0}^{L} C_i = a t_L / L * 1/2 * L * (L + 1) + b (L + 1)
+            # => a = (S / (L + 1) - b) * 2/t_L
+
+            heff_init = np.sum(generator_compos[flat_start:last_valid_tidx + 1], axis=0) / (last_valid_tidx - flat_start + 1)
+            heff_init -= generator_compos[flat_start]
+            heff_init *= 2. / (sim_result.times[last_valid_tidx] - sim_result.times[flat_start])
+
+        else:
+            logger.warning('Failed to obtain an initial estimate of the slopes')
+            heff_init = np.zeros(generator_compos.shape[1:])
+
+        ## Off-diagonals with finite values under no drive -> zero slope
+
+        hgen_nodrv = hgen.copy(clear_drive=True)
+        sim_result_nodrive = pulse_sim(hgen_nodrv, sim_result.times, log_level=logger.getEffectiveLevel())
+
+        generator_nodrv = matrix_angle(sim_result_nodrive.states)
+        nodrv_compos = paulis.components(-generator_nodrv, dim=sim_result.dim).real
+        is_finite = np.logical_not(np.all(np.isclose(nodrv_compos, 0., atol=1.e-4), axis=0))
+
+        symmetry = paulis.symmetry(sim_result.dim)
+        finite_offdiag = is_finite & np.asarray(symmetry, dtype=bool)
+
+        logger.debug('Off-diagonals with finite values under no drive: %s', list(zip(*np.nonzero(finite_offdiag))))
+
+        heff_init[finite_offdiag] = 0.
+
+        ## Finite values converging to zero at the end of the pulse -> zero slope & offset
+
+        is_significant = np.any(np.abs(generator_compos) > 0.01, axis=0)
+        converges = is_significant & (np.abs(generator_compos[-1]) < 0.01)
+
+        logger.debug('Converging components: %s', list(zip(*np.nonzero(converges))))
+
+        heff_init[converges] = 0.
+        offset_init[converges] = 0.
+
+        ## Values set by hand
+
+        if isinstance(init, dict):
+            for key, value in init.items():
+                if isinstance(value, tuple):
+                    if value[0] is not None:
+                        heff_init[key] = value[0]
+                    fixed[key] = value[1]
+                else:
+                    heff_init[key] = value
+
+    return heff_init, fixed, offset_init
 
 
 _vexpm = jax.vmap(jax.scipy.linalg.expm, in_axes=0, out_axes=0)
@@ -424,214 +496,84 @@ def _maximize_fidelity(
     time_evolution: np.ndarray,
     tlist: np.ndarray,
     dim: Tuple[int, ...],
+    heff_init: np.ndarray,
+    fixed: np.ndarray,
+    offset_init: np.ndarray,
     optimizer: str,
     optimizer_args: Any,
     max_updates: int,
     convergence: float,
     convergence_window: int,
-    min_fidelity: float,
-    set_components: Union[Dict[Tuple[int, ...], Tuple[float, bool]], None],
-    save_result_to: Union[str, None],
     logger: logging.Logger
 ) -> Tuple[np.ndarray, np.ndarray]:
+    ## Set up the Pauli product basis of the space of Hermitian operators
+    basis = paulis.paulis(dim)
+
+    ## Static and dynamic Heff components and basis list
+    floating = np.logical_not(fixed)
+
+    heff_static = np.tensordot(heff_init[fixed], basis[fixed], (0, 0))
+
+    ## Working arrays
     if not config.jax_devices:
         jax_device = None
     else:
         # parallel.parallel_map sets jax_devices[0] to the ID of the GPU to be used in this thread
         jax_device = jax.devices()[config.jax_devices[0]]
 
-    ## Time normalization: make tlist equivalent to arange(len(tlist)) / len(tlist)
-    time_norm = tlist[-1] + tlist[1]
-    tlist = tlist / time_norm
+    time_evolution = jax.device_put(time_evolution, device=jax_device)
+    tlist = jax.device_put(tlist, device=jax_device)
+    heff_static = jax.device_put(heff_static, device=jax_device)
+    heff_init_dev = jax.device_put(heff_init[floating], device=jax_device)
+    heff_basis = jax.device_put(basis[floating], device=jax_device)
+    offset_init_dev = jax.device_put(offset_init.reshape(-1)[1:], device=jax_device)
+    offset_basis = jax.device_put(basis.reshape(-1, *basis.shape[-2:])[1:], device=jax_device)
 
-    ## Set up the Pauli product basis of the space of Hermitian operators
-    basis = paulis.paulis(dim)
-    # Flattened list of basis operators excluding the identity operator
-    basis_list = basis.reshape(-1, *basis.shape[-2:])[1:]
+    ## Loss function
+    @partial(jax.jit, device=jax_device)
+    def loss_fn(heff_compos, offset_compos):
+        # The following basically computes the same thing as heff_tools.heff_fidelity.
+        # We need to reimplement the fidelity calculation here because the gradient
+        # diverges when matrix_exp is used with a diagonal hermitian where some parameters
+        # only control off-diagonal elements.
 
-    symmetry = paulis.symmetry(dim).reshape(-1)[1:]
-    diagonals = np.nonzero(symmetry == 0)
-    offdiagonals = np.nonzero(symmetry)
+        heff = jnp.tensordot(heff_compos, heff_basis, (0, 0))
+        heff += heff_static
+        offset = jnp.tensordot(offset_compos, offset_basis, (0, 0))
+        generator = heff[None, ...] * tlist[:, None, None] + offset
+        unitary = _vexpm(1.j * generator)
 
-    ## Set the initial Heff values from a rough slope estimate
-    # Compute ilog(U(t))
-    generator, eigenvalues = matrix_angle(time_evolution, with_diagonals=True)
-    generator *= -1.
+        target = jnp.matmul(time_evolution, unitary)
 
-    generator_compos = paulis.components(generator, dim=dim).real
-    generator_compos = generator_compos.reshape(tlist.shape[0], -1)[:, 1:]
+        fidelity = trace_norm_squared(target, npmod=jnp)
 
-    heff_init = _get_initial_slope(tlist, eigenvalues, generator_compos)
+        return -jnp.mean(fidelity)
 
-    heff_static = np.zeros_like(basis_list[0])
-    heff_compos_static = list()
-    variable = np.full(heff_init.shape, True, dtype=bool)
-
-    if set_components:
-        for key, (value, fix) in set_components.items():
-            idx = np.ravel_multi_index(key, np.square(dim)) - 1
-            logger.info('Setting the initial value of %s (%d) to %f (fix=%s)', key, idx, value, fix)
-
-            if fix:
-                variable[idx] = False
-                heff_static += basis_list[idx] * value
-                heff_compos_static.append(value)
-            else:
-                heff_init[idx] = value
-
-        basis_list_heff = basis_list[variable]
-        heff_init = heff_init[variable]
-
+    ## Minimize
+    if optimizer == 'minuit':
+        heff_compos, offset_compos = _minimize_minuit(loss_fn, heff_init_dev, offset_init_dev,
+                                                      logger)
+        intermediate_results = None
     else:
-        basis_list_heff = basis_list
-
-    static = np.logical_not(variable)
-
-    if optimizer != 'minuit':
         ## Set up the optimizer, loss & grad functions, and the parameter update function
         if not isinstance(optimizer_args, tuple):
             optimizer_args = (optimizer_args,)
 
         grad_trans = getattr(optax, optimizer)(*optimizer_args)
 
-        if save_result_to:
-            ## With optax we have access to intermediate results, so we save them
-            intermediate_results = {
-                'heff_compos': np.zeros((max_updates, heff_init.shape[0]), dtype='f8'),
-                'heff_grads': np.zeros((max_updates, heff_init.shape[0]), dtype='f8'),
-                'offset_compos': np.zeros((max_updates, basis_list.shape[0]), dtype='f8'),
-                'offset_grads': np.zeros((max_updates, basis_list.shape[0]), dtype='f8'),
-                'loss': np.zeros(max_updates, dtype='f8')
-            }
-        else:
-            intermediate_results = None
+        heff_compos, offset_compos, intermediate_results = _minimize(grad_trans, loss_fn,
+                                                                     heff_init_dev, offset_init_dev,
+                                                                     max_updates, convergence,
+                                                                     convergence_window, logger)
 
-    basis_list_dev = jax.device_put(basis_list, device=jax_device)
-    heff_static_dev = jax.device_put(heff_static, device=jax_device)
-    if basis_list_heff is basis_list:
-        basis_list_heff_dev = basis_list_dev
-    else:
-        basis_list_heff_dev = jax.device_put(basis_list_heff, device=jax_device)
-    offset_init_dev = jax.device_put(generator_compos[0], device=jax_device)
+    if not np.all(np.isfinite(heff_compos)) or not np.all(np.isfinite(offset_compos)):
+        raise ValueError('Optimized components not finite')
 
-    tend = tlist.shape[0]
-    iatt = 1
+    heff_compos_full = heff_init.copy()
+    heff_compos_full[floating] = heff_compos
+    offset_compos_full = np.concatenate(([0.], offset_compos)).reshape(offset_init.shape)
 
-    while True:
-        ## Working arrays
-        heff_init_dev = jax.device_put(heff_init, device=jax_device)
-        time_evolution_dev = jax.device_put(time_evolution[:tend], device=jax_device)
-        tlist_dev = jax.device_put(tlist[:tend], device=jax_device)
-
-        ## Loss function
-        @partial(jax.jit, device=jax_device)
-        def loss_fn(heff_compos, offset_compos):
-            # The following basically computes the same thing as heff_tools.heff_fidelity.
-            # We need to reimplement the fidelity calculation here because the gradient
-            # diverges when matrix_exp is used with a diagonal hermitian where some parameters
-            # only control off-diagonal elements.
-
-            heff = jnp.tensordot(heff_compos, basis_list_heff_dev, (0, 0))
-            heff += heff_static_dev
-            offset = jnp.tensordot(offset_compos, basis_list_dev, (0, 0))
-            generator = heff[None, ...] * tlist_dev[:, None, None] + offset
-            unitary = _vexpm(1.j * generator)
-
-            target = jnp.matmul(time_evolution_dev, unitary)
-
-            fidelity = trace_norm_squared(target, npmod=jnp)
-
-            return -jnp.mean(fidelity)
-
-        ## Minimize
-        if optimizer == 'minuit':
-            result = _minimize_minuit(loss_fn, heff_init_dev, offset_init_dev, logger)
-        else:
-            result = _minimize(grad_trans, loss_fn, heff_init_dev, offset_init_dev, max_updates,
-                               convergence, convergence_window, intermediate_results, logger)
-
-        heff_compos, offset_compos, num_updates = result
-
-        if not np.all(np.isfinite(heff_compos)) or not np.all(np.isfinite(offset_compos)):
-            raise ValueError('Optimized components not finite')
-
-        ## Test the optimized values - is the minimum fidelity above the threshold?
-        heff_compos_full = np.empty(basis_list.shape[0])
-        heff_compos_full[variable] = heff_compos
-        heff_compos_full[static] = heff_compos_static
-        fidelity = heff_fidelity(time_evolution, heff_compos_full, offset_compos,
-                                 tlist, basis_list)
-        minf = np.amin(fidelity)
-
-        if minf > min_fidelity:
-            logger.info(f'Found Heff and offsets that satisfy the minimum fidelity test.')
-            break
-        else:
-            logger.info(f'Minimum fidelity value: {minf}')
-            logger.info(f'Fit attempt {iatt} (tend={tend}) converged but did not produce a valid result.')
-
-            tend = int(tend / 1.5)
-
-            if tend <= 2:
-                logger.warning(f'Reached the minimum possible tend value {tend}')
-                break
-
-            logger.info(f'Reducing tend to {tend}.')
-
-            # Add the slope of the unitary-subtracted time evolution to the initial value
-            target = unitary_subtraction(time_evolution, heff_compos_full, offset_compos,
-                                         tlist, basis_list)
-
-            generator, eigvals = matrix_angle(target, with_diagonals=True)
-            generator *= -1.
-
-            generator_compos = paulis.components(generator, dim=dim).real
-            generator_compos = generator_compos.reshape(tlist.shape[0], -1)[:, 1:]
-
-            slope = _get_initial_slope(tlist, eigvals, generator_compos)
-
-            heff_init += slope[variable]
-
-            iatt += 1
-
-    if optimizer != 'minuit' and save_result_to:
-        intermediate_results['heff_compos'] /= time_norm
-        with h5py.File(f'{save_result_to}.h5', 'a') as out:
-            for key, value in intermediate_results.items():
-                out.create_dataset(key, data=value[:num_updates])
-
-    ## Recover the shape and normalization of the components arrays before returning
-    ## Zeroth component is filled in the calling function
-    heff_compos_full = np.empty(basis_list.shape[0])
-    heff_compos_full[variable] = heff_compos
-    heff_compos_full[static] = heff_compos_static
-    heff_compos_full /= time_norm
-    heff_compos = np.concatenate(([0.], heff_compos_full)).reshape(basis.shape[:-2])
-    offset_compos = np.concatenate(([0.], offset_compos)).reshape(basis.shape[:-2])
-
-    return heff_compos, offset_compos
-
-
-def _get_initial_slope(tlist, eigenvalues, generator_compos):
-    # Find the first t where an eigenvalue does a 2pi jump
-    last_valid_tidx = tlist.shape[0] - 1
-    for eigenvalue_envelope in [np.amin(eigenvalues, axis=1), -np.amax(eigenvalues, axis=1)]:
-        margin = 0.1
-        hits_minus_pi = np.asarray(eigenvalue_envelope < -np.pi + margin).nonzero()[0]
-        if hits_minus_pi.shape[0] != 0:
-            last_valid_tidx = min(last_valid_tidx, hits_minus_pi[0] - 1)
-
-    if last_valid_tidx <= 0:
-        raise RuntimeError('Failed to obtain an initial estimate of the slopes')
-
-    # If C_i = a t_i + b = a (t_L / L * i) + b,
-    # S = sum_{i=0}^{L} C_i = a t_L / L * 1/2 * L * (L + 1) + b (L + 1)
-    # => a = (S / (L + 1) - b) * 2/t_L
-
-    init = np.sum(generator_compos[:last_valid_tidx + 1], axis=0) / (last_valid_tidx + 1) - generator_compos[0]
-    init *= 2. / tlist[last_valid_tidx]
-
-    return init
+    return heff_compos_full, offset_compos_full, intermediate_results
 
 
 def _minimize_minuit(
@@ -662,7 +604,7 @@ def _minimize_minuit(
 
     logger.info('Done.')
 
-    return minimizer.values[0], minimizer.values[1], minimizer.nfcn
+    return minimizer.values[0], minimizer.values[1]
 
 
 def _minimize(
@@ -673,7 +615,6 @@ def _minimize(
     max_updates: int,
     convergence: float,
     convergence_window: int,
-    intermediate_results: Union[Dict[str, np.ndarray], None],
     logger: logging.Logger
 ):
     jax_device = heff_init.device()
@@ -699,14 +640,21 @@ def _minimize(
 
     losses = np.ones(convergence_window)
 
+    intermediate_results = {
+        'heff_compos': np.zeros((max_updates, heff_init.shape[0]), dtype='f8'),
+        'heff_grads': np.zeros((max_updates, heff_init.shape[0]), dtype='f8'),
+        'offset_compos': np.zeros((max_updates, offset_init.shape[0]), dtype='f8'),
+        'offset_grads': np.zeros((max_updates, offset_init.shape[0]), dtype='f8'),
+        'loss': np.zeros(max_updates, dtype='f8')
+    }
+
     for iup in range(max_updates):
         new_params, opt_state, loss, gradient = step(opt_params, opt_state)
 
-        if intermediate_results is not None:
-            intermediate_results['loss'][iup] = loss
-            for key in ['heff', 'offset']:
-                intermediate_results[f'{key}_compos'][iup] = opt_params[key]
-                intermediate_results[f'{key}_grads'][iup] = gradient[key]
+        intermediate_results['loss'][iup] = loss
+        for key in ['heff', 'offset']:
+            intermediate_results[f'{key}_compos'][iup] = opt_params[key]
+            intermediate_results[f'{key}_grads'][iup] = gradient[key]
 
         losses[iup % convergence_window] = loss
         change = np.amax(losses) - np.amin(losses)
@@ -723,4 +671,7 @@ def _minimize(
 
     logger.info('Done after %d steps.', num_updates)
 
-    return np.array(opt_params['heff']), np.array(opt_params['offset']), num_updates
+    for key, value in intermediate_results.items():
+        intermediate_results[key] = value[:num_updates]
+
+    return np.array(opt_params['heff']), np.array(opt_params['offset']), intermediate_results

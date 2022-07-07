@@ -58,7 +58,7 @@ def inspect_heff_fit(
         time_evolution = source['states'][()]
         tlist = source['times'][()]
         comp_dim = int(source['comp_dim'][()])
-        fit_start = source['fit_start'][()]
+        fit_start, fit_end = source['fit_range'][()]
         if num_sim_levels != comp_dim:
             components = source['components_original'][()]
         else:
@@ -68,12 +68,14 @@ def inspect_heff_fit(
 
         try:
             loss = source['loss'][()]
-            grad = source['grad'][()]
+            heff_grads = source['heff_grads'][()]
+            offset_grads = source['offset_grads'][()]
         except KeyError:
             loss = None
-            grad = None
+            heff_grads = None
+            offset_grads = None
 
-    tlist_fit = tlist[fit_start:] - tlist[fit_start]
+    tlist_fit = tlist[fit_start:fit_end + 1] - tlist[fit_start]
 
     if tscale is FrequencyScale.auto:
         tscale = FrequencyScale.find_time_scale(tlist[-1])
@@ -97,6 +99,7 @@ def inspect_heff_fit(
     # Add lines with slope=compo for terms above threshold
     xval = (tlist_fit + tlist[fit_start]) * tscale.frequency_value
     x0 = tlist[fit_start] * tscale.frequency_value
+    x1 = tlist[fit_end] * tscale.frequency_value
 
     components_orig = components
     offset_components_orig = offset_components
@@ -115,6 +118,7 @@ def inspect_heff_fit(
     for ax in fig_generator.axes:
         if ax.get_lines():
             ax.axvline(x0, linestyle='dotted', color='black', linewidth=0.5)
+            ax.axvline(x1, linestyle='dotted', color='black', linewidth=0.5)
 
     _highlight_comp_dim_components(fig_generator, indices, comp_dim, basis)
 
@@ -130,7 +134,7 @@ def inspect_heff_fit(
     fig_generator.legend(handles, labels, 'upper right')
 
     ## Second figure: subtracted unitaries
-    target = unitary_subtraction(time_evolution[fit_start:], components_orig, offset_components_orig, tlist_fit)
+    target = unitary_subtraction(time_evolution[fit_start:fit_end + 1], components_orig, offset_components_orig, tlist_fit)
 
     indices, fig_target = plot_evolution(time_evolution=target,
                                          tlist=(tlist_fit + tlist[fit_start]),
@@ -153,7 +157,7 @@ def inspect_heff_fit(
         fig_metrics.suptitle('Fit metrics', fontsize=16)
 
         # fidelity
-        final_fidelity = heff_fidelity(time_evolution[fit_start:], components_orig, offset_components_orig, tlist_fit)
+        final_fidelity = heff_fidelity(time_evolution[fit_start:fit_end + 1], components_orig, offset_components_orig, tlist_fit)
         ax = axes[0]
         ax.set_title('Final fidelity')
         ax.set_xlabel(f't ({tscale.time_unit})')
@@ -174,8 +178,10 @@ def inspect_heff_fit(
             ax.set_title('Gradient evolution')
             ax.set_xlabel('steps')
             ax.set_ylabel('max(abs(grad))')
-            ax.plot(np.amax(np.abs(grad.reshape(grad.shape[0], -1)), axis=1))
+            ax.plot(np.amax(np.abs(heff_grads.reshape(heff_grads.shape[0], -1)), axis=1), label='$H_{eff}$')
+            ax.plot(np.amax(np.abs(offset_grads.reshape(offset_grads.shape[0], -1)), axis=1), label='Offset')
             ax.axhline(0., color='black', linewidth=0.5)
+            ax.legend()
 
         fig_metrics.tight_layout()
 
@@ -393,7 +399,7 @@ def print_amplitude_scan(
     lines = []
 
     for coeff, index in zip(coefficients, select_components):
-        if symbol is None:
+        if symbols is None:
             basis_label = ','.join(f'{i}' for i in index)
         else:
             basis_label = ''.join(symbols[i] for i in index)
