@@ -86,7 +86,8 @@ def find_heff(
         convergence_window: The number of updates to use to compute the mean of change of fidelity.
         min_fidelity: Final fidelity threshold. If the unitary fidelity of the fit result goes below this
             value, the fit is repeated over a shortened interval.
-        zero_suppression: Simulate two probe pulses to identify components that should be fixed to zero.
+        zero_suppression: Zero-fix the effective Hamiltonian components that appear to vanish at the end of a
+            Gaussian(Square) pulse.
         save_result_to: File name (without the extension) to save the extraction results to.
         log_level: Log level.
 
@@ -136,8 +137,8 @@ def find_heff(
     hdiag = hgen.build_hdiag()
 
     if num_tasks == 0:
-        hgen_drv, tlist, start_time, end_time = _add_drive(hgen, qudit, frequency, amplitude, cycles,
-                                                           ramp_cycles, logger_name=logger.name)
+        hgen_drv, tlist, start_time, end_time = setup(hgen, qudit, frequency, amplitude, cycles,
+                                                      ramp_cycles, logger_name=logger.name)
 
         sim_result = pulse_sim(hgen_drv, tlist, save_result_to=save_result_to, log_level=log_level)
 
@@ -145,6 +146,7 @@ def find_heff(
                               init=init, optimizer=optimizer, optimizer_args=optimizer_args,
                               max_updates=max_updates, convergence=convergence,
                               convergence_window=convergence_window, min_fidelity=min_fidelity,
+                              zero_suppression=zero_suppression,
                               save_result_to=save_result_to, log_level=log_level)
 
     else:
@@ -155,8 +157,8 @@ def find_heff(
         start_times = list()
         end_times = list()
         for freq, amp, cyc, rmp in zip(frequency, amplitude, cycles, ramp_cycles):
-            hgen_drv, tlist, start_time, end_time = _add_drive(hgen, qudit, freq, amp, cyc, rmp,
-                                                               logger_name=logger.name)
+            hgen_drv, tlist, start_time, end_time = setup(hgen, qudit, freq, amp, cyc, rmp,
+                                                          logger_name=logger.name)
             hgens.append(hgen_drv)
             tlists.append(tlist)
             start_times.append(start_time)
@@ -179,7 +181,8 @@ def find_heff(
         common_kwargs = {'hgen': hgen, 'comp_dim': comp_dim, 'init': init, 'optimizer': optimizer,
                          'optimizer_args': optimizer_args, 'max_updates': max_updates,
                          'convergence': convergence, 'convergence_window': convergence_window,
-                         'min_fidelity': min_fidelity, 'log_level': log_level}
+                         'min_fidelity': min_fidelity, 'zero_suppression': zero_suppression,
+                         'log_level': log_level}
 
         components = parallel_map(heff_fit, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
                                   common_kwargs=common_kwargs,
@@ -190,7 +193,7 @@ def find_heff(
     return components
 
 
-def _add_drive(
+def setup(
     hgen: HamiltonianBuilder,
     qudit: QuditSpec,
     frequency: FrequencySpec,
@@ -252,6 +255,7 @@ def heff_fit(
     convergence: float = 1.e-4,
     convergence_window: int = 5,
     min_fidelity: float = 0.9,
+    zero_suppression: bool = True,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
     logger_name: str = __name__
@@ -274,6 +278,8 @@ def heff_fit(
         convergence_window: The number of updates to use to compute the mean of change of fidelity.
         min_fidelity: Final fidelity threshold. If the unitary fidelity of the fit result goes below this
             value, the fit is repeated over a shortened interval.
+        zero_suppression: Zero-fix the effective Hamiltonian components that appear to vanish at the end of a
+            Gaussian(Square) pulse.
         save_result_to: File name (without the extension) to save the extraction results to.
         log_level: Log level.
 
@@ -306,7 +312,7 @@ def heff_fit(
     ## Find the initial values for the fit
     logger.info('Determining the initial values for Heff and offset..')
 
-    heff_init, fixed, offset_init = _find_init(sim_result, hgen, init,
+    heff_init, fixed, offset_init = _find_init(sim_result, hgen, init, zero_suppression,
                                                flat_start, flat_end, logger)
     # Fix the identity component because its gradient is identically zero
     fixed[(0,) * len(sim_result.dim)] = True
@@ -412,6 +418,7 @@ def _find_init(
     sim_result: PulseSimResult,
     hgen: HamiltonianBuilder,
     init: Union[np.ndarray, Dict[Tuple[int, ...], Union[float, Tuple[float, bool]]], None],
+    zero_suppression: bool,
     flat_start: int,
     flat_end: int,
     logger: logging.Logger
@@ -467,13 +474,16 @@ def _find_init(
 
         ## Finite values converging to zero at the end of the pulse -> zero slope & offset
 
-        is_significant = np.any(np.abs(generator_compos) > 0.01, axis=0)
-        converges = is_significant & (np.abs(generator_compos[-1]) < 0.01)
+        is_significant = np.any(np.abs(generator_compos) > 0.1, axis=0)
+        quiet_at_end = (np.abs(generator_compos[-1]) <= 0.01 * np.amax(generator_compos, axis=0))
+        converges = is_significant & quiet_at_end
 
         logger.debug('Converging components: %s', list(zip(*np.nonzero(converges))))
 
         heff_init[converges] = 0.
         offset_init[converges] = 0.
+        if zero_suppression:
+            fixed[converges] = True
 
         ## Values set by hand
 
