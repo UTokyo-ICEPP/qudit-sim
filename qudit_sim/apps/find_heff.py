@@ -341,7 +341,8 @@ def heff_fit(
         result = _maximize_fidelity(time_evolution, tlist, sim_result.dim,
                                     heff_init, fixed, offset_init,
                                     optimizer, optimizer_args, max_updates,
-                                    convergence, convergence_window, logger)
+                                    convergence, convergence_window,
+                                    bool(save_result_to), logger)
 
         heff_compos, offset_compos, intermediate_results = result
 
@@ -459,6 +460,8 @@ def _find_init(
         ## Off-diagonals with finite values under no drive -> zero slope
 
         hgen_nodrv = hgen.copy(clear_drive=True)
+        # Running pulse_sim (more specifically sesolve within) in multithread is not safe in general, but for this
+        # specific case (no drive) it's OK because sesolve is actually not invoked
         sim_result_nodrive = pulse_sim(hgen_nodrv, sim_result.times, log_level=logger.getEffectiveLevel())
 
         generator_nodrv = matrix_angle(sim_result_nodrive.states)
@@ -514,6 +517,7 @@ def _maximize_fidelity(
     max_updates: int,
     convergence: float,
     convergence_window: int,
+    return_intermediate: bool,
     logger: logging.Logger
 ) -> Tuple[np.ndarray, np.ndarray]:
     ## Set up the Pauli product basis of the space of Hermitian operators
@@ -540,7 +544,6 @@ def _maximize_fidelity(
     offset_basis = jax.device_put(basis.reshape(-1, *basis.shape[-2:])[1:], device=jax_device)
 
     ## Loss function
-    @partial(jax.jit, device=jax_device)
     def loss_fn(heff_compos, offset_compos):
         # The following basically computes the same thing as heff_tools.heff_fidelity.
         # We need to reimplement the fidelity calculation here because the gradient
@@ -574,7 +577,8 @@ def _maximize_fidelity(
         heff_compos, offset_compos, intermediate_results = _minimize(grad_trans, loss_fn,
                                                                      heff_init_dev, offset_init_dev,
                                                                      max_updates, convergence,
-                                                                     convergence_window, logger)
+                                                                     convergence_window,
+                                                                     return_intermediate, logger)
 
     if not np.all(np.isfinite(heff_compos)) or not np.all(np.isfinite(offset_compos)):
         raise ValueError('Optimized components not finite')
@@ -595,22 +599,23 @@ def _minimize_minuit(
     from iminuit import Minuit
 
     jax_device = heff_init.device()
+    logger.debug('Using JAX device %s', jax_device)
 
     initial = jnp.concatenate((heff_init, offset_init))
     num_heff = heff_init.shape[0]
 
-    @partial(jax.jit, device=jax_device)
-    def _loss_fn(params):
-        return loss_fn(params[:num_heff], params[num_heff:])
+    fcn = jax.jit(lambda p: loss_fn(p[:num_heff], p[num_heff:]))
+    grad = jax.jit(jax.grad(fcn))
 
-    grad = jax.jit(jax.grad(_loss_fn), device=jax_device)
-
-    minimizer = Minuit(_loss_fn, initial, grad=grad)
+    minimizer = Minuit(fcn, initial, grad=grad)
     minimizer.strategy = 0
 
     logger.info('Running MIGRAD..')
 
-    minimizer.migrad()
+    # https://github.com/google/jax/issues/11478
+    # default_device is thread-local
+    with jax.default_device(jax_device):
+        minimizer.migrad()
 
     logger.info('Done.')
 
@@ -625,46 +630,53 @@ def _minimize(
     max_updates: int,
     convergence: float,
     convergence_window: int,
+    return_intermediate: bool,
     logger: logging.Logger
 ):
     jax_device = heff_init.device()
+    logger.debug('Using JAX device %s', jax_device)
 
-    @partial(jax.jit, device=jax_device)
-    def _loss_fn(opt_params):
-        return loss_fn(opt_params['heff'], opt_params['offset'])
+    value_and_grad = jax.value_and_grad(lambda p: loss_fn(p['heff'], p['offset']))
 
-    loss_and_grad = jax.jit(jax.value_and_grad(_loss_fn), device=jax_device)
-
-    @partial(jax.jit, device=jax_device)
+    @jax.jit
     def step(opt_params, opt_state):
-        loss, gradient = loss_and_grad(opt_params)
-        updates, opt_state = grad_trans.update(gradient, opt_state)
-        new_params = optax.apply_updates(opt_params, updates)
+        # https://github.com/google/jax/issues/11478
+        # default_device is thread-local
+        with jax.default_device(jax_device):
+            loss, gradient = value_and_grad(opt_params)
+            updates, opt_state = grad_trans.update(gradient, opt_state)
+            new_params = optax.apply_updates(opt_params, updates)
+
         return new_params, opt_state, loss, gradient
 
     ## Start the fidelity maximization loop
     logger.info('Starting maximization loop..')
 
     opt_params = {'heff': heff_init, 'offset': offset_init}
-    opt_state = grad_trans.init(opt_params)
+    with jax.default_device(jax_device):
+        opt_state = grad_trans.init(opt_params)
 
     losses = np.ones(convergence_window)
 
-    intermediate_results = {
-        'heff_compos': np.zeros((max_updates, heff_init.shape[0]), dtype='f8'),
-        'heff_grads': np.zeros((max_updates, heff_init.shape[0]), dtype='f8'),
-        'offset_compos': np.zeros((max_updates, offset_init.shape[0]), dtype='f8'),
-        'offset_grads': np.zeros((max_updates, offset_init.shape[0]), dtype='f8'),
-        'loss': np.zeros(max_updates, dtype='f8')
-    }
+    if return_intermediate:
+        intermediate_results = {
+            'heff_compos': np.zeros((max_updates, heff_init.shape[0]), dtype='f8'),
+            'heff_grads': np.zeros((max_updates, heff_init.shape[0]), dtype='f8'),
+            'offset_compos': np.zeros((max_updates, offset_init.shape[0]), dtype='f8'),
+            'offset_grads': np.zeros((max_updates, offset_init.shape[0]), dtype='f8'),
+            'loss': np.zeros(max_updates, dtype='f8')
+        }
+    else:
+        intermediate_results = None
 
     for iup in range(max_updates):
         new_params, opt_state, loss, gradient = step(opt_params, opt_state)
 
-        intermediate_results['loss'][iup] = loss
-        for key in ['heff', 'offset']:
-            intermediate_results[f'{key}_compos'][iup] = opt_params[key]
-            intermediate_results[f'{key}_grads'][iup] = gradient[key]
+        if return_intermediate:
+            intermediate_results['loss'][iup] = loss
+            for key in ['heff', 'offset']:
+                intermediate_results[f'{key}_compos'][iup] = opt_params[key]
+                intermediate_results[f'{key}_grads'][iup] = gradient[key]
 
         losses[iup % convergence_window] = loss
         change = np.amax(losses) - np.amin(losses)
@@ -681,7 +693,8 @@ def _minimize(
 
     logger.info('Done after %d steps.', num_updates)
 
-    for key, value in intermediate_results.items():
-        intermediate_results[key] = value[:num_updates]
+    if return_intermediate:
+        for key, value in intermediate_results.items():
+            intermediate_results[key] = value[:num_updates]
 
     return np.array(opt_params['heff']), np.array(opt_params['offset']), intermediate_results
