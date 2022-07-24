@@ -8,13 +8,6 @@ Hamiltonian builder (:mod:`qudit_sim.hamiltonian`)
 See :doc:`/hamiltonian` for theoretical background.
 """
 
-# TODO: Qubit optimization
-
-# When only considering qubits, anharmonicity terms are dropped, making the formulae above somewhat simpler. In particular,
-# when one or more drives are resonant with qubit frequencies, some terms in the interaction and drive Hamiltonians
-# will have common frequencies (i.e. :math:`\delta_{jk}` and `\epsilon_{kj}` coincide). We should look into how to detect
-# and exploit such cases in the future.
-
 from typing import Any, Dict, Sequence, List, Tuple, Callable, Optional, Union, Hashable
 from dataclasses import dataclass
 import copy
@@ -38,6 +31,7 @@ class QuditParams:
     qubit_frequency: float
     anharmonicity: float
     drive_amplitude: float
+    drive_weight: np.ndarray
 
 
 def add_outer_multi(arr):
@@ -51,6 +45,11 @@ def add_outer_multi(arr):
 
 class HamiltonianBuilder:
     r"""Hamiltonian with static transverse couplings and external drive terms.
+
+    The class has two option flags that alter the Hamiltonian-building behavior:
+
+    - compile_hint: If True, interaction Hamiltonian terms are given as compilable strings.
+    - use_rwa: If True, apply the rotating-wave approximation to the drive Hamiltonian.
 
     Args:
         num_levels: Number of energy levels to consider.
@@ -79,6 +78,9 @@ class HamiltonianBuilder:
         self._crosstalk = dict()
         self._drive = dict()
         self._frame = dict()
+
+        self.compile_hint = True
+        self.use_rwa = False
 
         if qudits is None:
             return
@@ -161,9 +163,10 @@ class HamiltonianBuilder:
         anharmonicity: float,
         drive_amplitude: float,
         qudit_id: Optional[Hashable] = None,
-        position: Optional[int] = None
+        position: Optional[int] = None,
+        drive_weight: Optional[np.ndarray] = None
     ) -> None:
-        """Add a qudit to the system.
+        r"""Add a qudit to the system.
 
         Args:
             qubit_frequency: Qubit frequency.
@@ -171,9 +174,13 @@ class HamiltonianBuilder:
             drive_amplitude: Base drive amplitude in rad/s.
             qudit_id: Identifier for the qudit. If None, the position (order of addition) is used.
             position: If an integer, the qudit is inserted into the specified position.
+            drive_weight: The weights given to each level transition. Default is :math:`\sqrt{l}`
         """
+        if drive_weight is None:
+            drive_weight = np.sqrt(np.arange(self.num_levels, dtype=float)[1:])
+
         params = QuditParams(qubit_frequency=qubit_frequency, anharmonicity=anharmonicity,
-                             drive_amplitude=drive_amplitude)
+                             drive_amplitude=drive_amplitude, drive_weight=drive_weight)
 
         if qudit_id is None:
             if position is None:
@@ -685,16 +692,13 @@ class HamiltonianBuilder:
 
     def build(
         self,
-        rwa: bool = False,
-        compile_hint: bool = True,
         tlist: Optional[np.ndarray] = None,
         args: Optional[Dict[str, Any]] = None
     ) -> List:
         """Return the list of Hamiltonian terms passable to qutip.sesolve.
 
         Args:
-            rwa: If True, apply the rotating-wave approximation.
-            compile_hint: If True, interaction Hamiltonian terms are given as compilable strings.
+
             tlist: If not None, all callable Hamiltonian coefficients are called with `(tlist, args)` and the
                 resulting arrays are instead passed to sesolve.
             args: Arguments to the callable coefficients.
@@ -703,8 +707,8 @@ class HamiltonianBuilder:
             A list of Hamiltonian terms that can be passed to qutip.sesolve.
         """
         hstatic = self.build_hdiag()
-        hint = self.build_hint(compile_hint=compile_hint, tlist=tlist)
-        hdrive = self.build_hdrive(rwa=rwa, tlist=tlist, args=args)
+        hint = self.build_hint(tlist=tlist)
+        hdrive = self.build_hdrive(tlist=tlist, args=args)
 
         if hint and isinstance(hint[0], qtp.Qobj):
             hstatic += hint.pop(0)
@@ -754,14 +758,12 @@ class HamiltonianBuilder:
 
     def build_hint(
         self,
-        compile_hint: bool = True,
         tlist: Optional[np.ndarray] = None
     ) -> List:
         """Build the interaction Hamiltonian.
 
         Args:
-            compile_hint: If True, interaction Hamiltonian terms are given as compilable strings.
-            tlist: Array of time points. If provided and `compile_hint=False`, all dynamic coefficients
+            tlist: Array of time points. If provided and `self.compile_hint` is False, all dynamic coefficients
                 are taken as functions and called with `(tlist, None)`, and the resulting arrays are returned.
 
         Returns:
@@ -807,7 +809,7 @@ class HamiltonianBuilder:
                     h_x = coupling * (op + op.dag())
                     h_y = coupling * 1.j * (op - op.dag())
 
-                    if compile_hint:
+                    if self.compile_hint:
                         hint.append([h_x, f'cos({frequency}*t)'])
                         hint.append([h_y, f'sin({frequency}*t)'])
                     else:
@@ -827,14 +829,12 @@ class HamiltonianBuilder:
 
     def build_hdrive(
         self,
-        rwa: bool = False,
         tlist: Optional[np.ndarray] = None,
         args: Optional[Dict[str, Any]] = None
     ) -> List:
         """Build the drive Hamiltonian.
 
         Args:
-            rwa: If True, apply the rotating-wave approximation.
             tlist: Array of time points. Required when at least one drive amplitude is given as an array.
             args: Arguments to the callable coefficients.
 
@@ -884,7 +884,7 @@ class HamiltonianBuilder:
                         continue
 
                     # Hamiltonian term can be split in xy (static and/or real envelope) or creation/annihilation (otherwise)
-                    fn_x, fn_y = drive.generate_fn(frame_frequency, drive_base, rwa)
+                    fn_x, fn_y = drive.generate_fn(frame_frequency, drive_base, self.use_rwa)
 
                     h_x = creation_op + creation_op.dag()
                     h_y = 1.j * (creation_op - creation_op.dag())
@@ -925,7 +925,6 @@ class HamiltonianBuilder:
         num_cycles: Optional[int] = None,
         duration: Optional[float] = None,
         num_points: Optional[int] = None,
-        rwa: bool = False,
         frame: Optional[FrameSpec] = None
     ) -> np.ndarray:
         r"""Build a list of time points using the maximum frequency in the Hamiltonian.
@@ -939,7 +938,6 @@ class HamiltonianBuilder:
             num_cycles: Number of overall cycles.
             duration: Maximum value of the tlist.
             num_points: Total number of time points including 0.
-            rwa: Whether to use the rotating wave approximation to find the maximum frequency.
             frame: If specified, the frame in which to find the maximum frequency.
 
         Returns:
@@ -965,7 +963,7 @@ class HamiltonianBuilder:
                 continue
 
             drive_freqs = np.array(list(drive.frequency for drive in drives))
-            if rwa:
+            if self.use_rwa:
                 rel_sign = -1
             else:
                 rel_sign = 1
@@ -998,6 +996,9 @@ class HamiltonianBuilder:
         instance = HamiltonianBuilder(self._num_levels)
 
         instance.default_frame = self.default_frame
+
+        instance.compile_hint = self.compile_hint
+        instance.use_rwa = self.use_rwa
 
         # Not sure if copy.deepcopy keeps the dict ordering, so we insert by hand
         instance._qudit_params.update(self._qudit_params.items())

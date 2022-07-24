@@ -312,7 +312,7 @@ def _simulate_drive(
     else:
         tlist_arg = {'tlist': tlist, 'args': args}
 
-    hamiltonian = hgen.build(rwa=False, **tlist_arg)
+    hamiltonian = hgen.build(**tlist_arg)
 
     # sesolve generates O(1e-6) error in the global phase when the Hamiltonian is not traceless.
     # Since we run the simulation in the lab frame, the only traceful term is hdiag.
