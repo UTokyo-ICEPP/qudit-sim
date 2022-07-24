@@ -12,6 +12,7 @@ from rqutils.math import matrix_angle
 from ...hamiltonian import HamiltonianBuilder
 from ...pulse import Drag
 from ...pulse_sim import pulse_sim
+from ...basis import change_basis
 from .components import gate_components
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,13 @@ def pi_pulse(
     of the ``qudit_id`` to ``level+1``. The final state is allowed to have arbitrary phase shifts in the
     unaddressed subspace.
 
+    Targeting of a specific level is implemented using the ``'pauli<n>'`` basis, which cyclically shifts
+    the "core" subspace of the generalized Gell-Mann matrices. To find the :math:`\pi` pulse for level ``j``,
+    the Pauli components of the generator of the pulse gate is interpreted in the ``paulij`` basis, in
+    which the components target generator reads (*, :math:`\pi/2`, 0, 0, 0, 0, 0, 0, *, 0, ...) where *
+    indicates that the component is unconstrained because the corresponding basis matrix is diagonal and
+    commutes with the target "X".
+
     Args:
         hgen: Hamiltonian of the system.
         qudit_id: ID of the qudit to find the :math:`\pi` pulse for.
@@ -50,70 +58,40 @@ def pi_pulse(
 
     hgen = hgen.copy(clear_drive=True)
 
-    ## System parameters
+    components_shape = (hgen.num_levels ** 2,) * hgen.num_qudits
     qudit_index = hgen.qudit_index(qudit_id)
-    dim = (hgen.num_levels,) * hgen.num_qudits
-    matrix_dim = dim[0]
 
-    # We need to perform a change of basis among the diagonal Pauli components in order to identiy the
-    # "Z" operator for the relevant subspace while masking out the orthogonal operators.
-    basis = paulis.paulis(dim)
-    if level > 0:
-        num_paulis = matrix_dim ** 2
-        num_diagonal_paulis = matrix_dim
+    # The target - Pulse is optimized to minimize the distance of the gate generator components to this array
+    target = np.zeros(components_shape)
+    target_index = tuple(1 if i == qudit_index else 0 for i in range(hgen.num_qudits))
+    target[target_index] = np.pi / 2. * np.power(2. * hgen.num_levels, (hgen.num_qudits - 1) / 2.)
 
-        # Separate the single-qudit Pauli set to diagonal and offdiagonal elements
-        qudit_basis = paulis.paulis(matrix_dim)
-        symmetry = paulis.symmetry(matrix_dim)
-        diagonal_paulis = qudit_basis[np.nonzero(symmetry == 0)]
-        offdiagonal_paulis = qudit_basis[np.nonzero(symmetry)]
+    # Components mask - We unconstrain the commuting diagonals of the gate
+    components_mask = np.ones(components_shape)
+    diag_indices = [0] + list(np.square(np.arange(3, hgen.num_levels)) - 1)
+    target_indices = tuple(diag_indices if i == qudit_index else np.zeros_like(diag_indices)
+                           for i in range(hgen.num_qudits))
+    components_mask[target_indices] = 0
 
-        # Roll the diagonal -> diagonal_paulis[1] is now the Z of the desired subspace
-        diagonals = np.diagonal(diagonal_paulis, axis1=-2, axis2=-1)
-        diagonals = np.roll(diagonals, level, axis=-1)
-        # Trick for making an array of diagonal matrices: construct Nx(N+1) matrices with the first column filled
-        diagonal_paulis = np.concatenate((diagonals[..., None], np.zeros_like(diagonal_paulis)), axis=-1)
-        diagonal_paulis = diagonal_paulis.reshape(num_diagonal_paulis, -1)[:, :matrix_dim ** 2]
-        diagonal_paulis = diagonal_paulis.reshape(-1, matrix_dim, matrix_dim)
-
-        # Redefine qudit_basis and obtain the change-of-basis matrix (of Pauli components)
-        qudit_basis[np.nonzero(symmetry == 0)] = diagonal_paulis
-        change_of_basis = paulis.components(qudit_basis, dim=matrix_dim)
-
-        # tensordot(.., (1, qudit_index)) will place the change-of-basis axis at 0
-        # -> tensordot on the first axis and then move it to the correct position
-        basis = np.moveaxis(np.tensordot(change_of_basis, basis, (1, 0)), 0, qudit_index)
-
-    # The third component at qudit_index of the product-trace with basis is the Z component of the desired subspace
-
-    ## Define the target components array
-    components_mask = np.ones(np.square(dim))
-    is_diagonal = (paulis.symmetry(matrix_dim) == 0)
-    is_diagonal[3] = False
-    diagonals = np.nonzero(is_diagonal)
-    diagonals += (np.zeros_like(diagonals[0]),) * (hgen.num_qudits - 1)
-    components_mask[diagonals] = 0.
-    components_mask = np.moveaxis(components_mask, 0, qudit_index)
-
-    # The "X" Pauli is the third from the last in the list of Paulis for the given level
-    resonant_component = (level + 2) ** 2 - 3
-    target_component_value = np.pi / 2. * np.power(2. * hgen.num_levels, (hgen.num_qudits - 1) / 2.)
-    target_components = np.zeros(np.square(dim))
-    target_index = [0] * hgen.num_qudits
-    target_index[qudit_index] = resonant_component
-    target_components[tuple(target_index)] = target_component_value
-
-    ## Initialize the Hamiltonian
+    # Pulse frequency
     drive_frequency = hgen.dressed_frequencies(qudit_id)[level]
 
-    ## Get an initial estimate of the amplitude
+    # Initial amplitude estimate
     # Solve exp(-i pi/2 X) = exp(-i ∫H(t)dt)
     # Approximating H(t) as a pure X triangle ((A/half_duration)*X*t in the first half),
     # ∫H(t)dt = A * duration/2 * X
-    # For a resonant drive, A = drive_base * amplitude * sqrt(level+1) / 2
-    # Therefore amplitude = 2pi / (duration * drive_base * sqrt(level+1))
-    drive_amplitude = hgen.qudit_params(qudit_id).drive_amplitude
-    rough_amp_estimate = 2. * np.pi / duration / drive_amplitude / np.sqrt(level + 1)
+    # For a resonant drive, A = drive_base * amplitude * drive_weight / 2
+    # Therefore amplitude = 2pi / (duration * drive_base * drive_weight)
+    params = hgen.qudit_params(qudit_id)
+    amp_estimate = 2. * np.pi / duration / params.drive_amplitude / params.drive_weight[level]
+
+    # Initial beta estimate (ref. Gambetta et al. PRA 83 012308 eqn. 5.12 & text after 5.13)
+    beta_estimate = 0.
+    if level < hgen.num_levels - 1:
+        beta_estimate += (params.drive_weight[level + 1] / params.drive_weight[level]) ** 2 / params.anharmonicity
+    if level > 0:
+        beta_estimate -= (params.drive_weight[level - 1] / params.drive_weight[level]) ** 2 / params.anharmonicity
+    beta_estimate *= -1. / 4.
 
     icall = 0
 
@@ -124,8 +102,8 @@ def pi_pulse(
         icall += 1
 
         # params are O(1) -> normalize
-        amp = params[0] * rough_amp_estimate
-        beta = params[1] * sigma
+        amp = params[0] * amp_estimate
+        beta = params[1] * beta_estimate
         pulse = Drag(duration=duration, amp=amp, sigma=sigma, beta=beta)
 
         hgen.clear_drive()
@@ -135,21 +113,19 @@ def pi_pulse(
                                tlist={'points_per_cycle': 10, 'duration': pulse.duration},
                                final_only=True)
 
-        # Need to compute the components "by hand" because our basis definition may be nonstandard
-        generator = -matrix_angle(sim_result.states[-1])
-        components = np.trace(basis @ generator, axis1=-2, axis2=-1).real * (2 ** (hgen.num_qudits - 2))
+        components = change_basis(gate_components(sim_result), to_basis=f'pauli{level}')
         components *= components_mask
 
-        return np.sum(np.square(components - target_components))
+        return np.sum(np.square(components - target))
 
     logger.info('Starting pi pulse identification..')
 
-    optres = sciopt.minimize(fun, (1., 0.), method='COBYLA', options={'rhobeg': 0.1})
+    optres = sciopt.minimize(fun, (1., 1.), method='COBYLA', tol=1.e-4, options={'rhobeg': 0.5})
 
     logger.info('Done after %d function calls', icall)
 
-    amp = optres.x[0] * rough_amp_estimate
-    beta = optres.x[1] * sigma
+    amp = optres.x[0] * amp_estimate
+    beta = optres.x[1] * beta_estimate
 
     logger.setLevel(original_log_level)
 

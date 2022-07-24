@@ -105,8 +105,8 @@ def inspect_heff_fit(
     offset_components_orig = offset_components
 
     if basis is not None:
-        components = change_basis(components, basis)
-        offset_components = change_basis(offset_components, basis)
+        components = change_basis(components, to_basis=basis)
+        offset_components = change_basis(offset_components, to_basis=basis)
 
     for iax, index in enumerate(indices):
         ax = fig_generator.axes[iax]
@@ -245,7 +245,7 @@ def plot_amplitude_scan(
     num_paulis = comp_dim ** 2
 
     if basis is not None:
-        components = change_basis(components, basis, num_qudits=num_qudits)
+        components = change_basis(components, to_basis=basis, num_qudits=num_qudits)
         if symbol is None:
             symbol = matrix_labels(basis, comp_dim)
 

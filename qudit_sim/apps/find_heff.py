@@ -134,8 +134,6 @@ def find_heff(
     elif num_tasks > 0:
         ramp_cycles = [ramp_cycles] * num_tasks
 
-    hdiag = hgen.build_hdiag()
-
     if num_tasks == 0:
         hgen_drv, tlist, start_time, end_time = setup(hgen, qudit, frequency, amplitude, cycles,
                                                       ramp_cycles, logger_name=logger.name)
@@ -267,8 +265,7 @@ def heff_fit(
 
     Args:
         sim_result: Simulation result object or the name of the file that contains one.
-        hdiag: The diagonal part of the Hamiltonian. If None, the identity component of the returned
-            effective Hamiltonian is set to zero.
+        hgen: HamiltonianBuilder instance.
         comp_dim: Dimensionality of the computational space.
         start_time: Time at which the drive pulses hit the plateau.
         optimizer: The name of the optax function to use as the optimizer.

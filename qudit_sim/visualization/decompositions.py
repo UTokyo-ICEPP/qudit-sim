@@ -86,7 +86,7 @@ def print_components(
     if threshold > 0.:
         amp_cutoff = threshold / max_abs
     else:
-        amp_cutoff = -threshold / scale_omega
+        amp_cutoff = -threshold
 
     if symbol is not None:
         symbol = [symbol] * len(components.shape)
@@ -294,7 +294,7 @@ def plot_evolution(
     components = paulis.components(-1. * generator, dim=dim).real
 
     if basis is not None:
-        components = change_basis(components, basis, num_qudits=len(dim))
+        components = change_basis(components, to_basis=basis, num_qudits=len(dim))
         if symbol is None:
             symbol = matrix_labels(basis, dim[0])
 
