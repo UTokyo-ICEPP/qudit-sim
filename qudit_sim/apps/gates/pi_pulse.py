@@ -120,7 +120,7 @@ def pi_pulse(
 
     logger.info('Starting pi pulse identification..')
 
-    optres = sciopt.minimize(fun, (1., 1.), method='COBYLA', tol=1.e-4, options={'rhobeg': 0.5})
+    optres = sciopt.minimize(fun, (1., 1.), method='COBYLA', tol=5.e-5, options={'rhobeg': 0.5})
 
     logger.info('Done after %d function calls', icall)
 
