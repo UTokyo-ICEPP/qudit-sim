@@ -246,7 +246,8 @@ def plot_evolution(
     fig: Optional[mpl.figure.Figure] = None,
     title: str = '',
     basis: Optional[str] = None,
-    symbol: Optional[str] = None
+    symbol: Optional[str] = None,
+    smooth: bool = False
 ) -> Tuple[List[Tuple[int, ...]], mpl.figure.Figure]:
     r"""Plot the Pauli components of the generator of a time evolution as a function of time.
 
@@ -271,6 +272,8 @@ def plot_evolution(
         title: Title of the figure.
         basis: Represent the components in the given matrix basis.
         symbol: Symbol to use instead of the numeric indices for the matrices.
+        smooth: (Experimental) Perform a fit to every single time evolution unitary with the initial
+            value of the generator components taken from the previous step.
 
     Returns:
         The indices of the plotted components and the plot figure.
@@ -290,8 +293,12 @@ def plot_evolution(
         time_evolution = time_evolution[1:] @ time_evolution[:-1].transpose((0, 2, 1)).conjugate()
         tlist = tlist[1:]
 
-    generator, ev = matrix_angle(time_evolution, with_diagonals=True)
-    components = paulis.components(-1. * generator, dim=dim).real
+    if smooth:
+        components, ev = smooth_components(time_evolution, dim)
+        tlist = tlist
+    else:
+        generator, ev = matrix_angle(time_evolution, with_diagonals=True)
+        components = paulis.components(-1. * generator, dim=dim).real
 
     if basis is not None:
         components = change_basis(components, to_basis=basis, num_qudits=len(dim))
@@ -379,3 +386,72 @@ def plot_evolution(
     fig.tight_layout(rect=[0., 0., 1., 0.98])
 
     return select_components, fig
+
+
+
+import jax
+import jax.numpy as jnp
+import optax
+
+from ..config import config
+
+def smooth_components(
+    time_evolution: np.ndarray,
+    dim: Tuple[int, ...]
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Identify the generator components and eigenvalues of the time evolution unitaries through fits."""
+    jax_device = jax.devices()[config.jax_devices[0]]
+
+    def loss_fn(params, unitary):
+        with jax.default_device(jax_device):
+            hermitian = paulis.compose(params['components'], dim, npmod=jnp)
+            ansatz = jax.scipy.linalg.expm(1.j * hermitian)
+            return -jnp.square(jnp.abs(jnp.trace(unitary @ ansatz)))
+
+    value_and_grad = jax.value_and_grad(loss_fn)
+    grad_trans = optax.adam(0.005)
+
+    @jax.jit
+    def step(opt_params, opt_state, unitary):
+        # https://github.com/google/jax/issues/11478
+        # default_device is thread-local
+        with jax.default_device(jax_device):
+            loss, gradient = value_and_grad(opt_params, unitary)
+            updates, opt_state = grad_trans.update(gradient, opt_state)
+            new_params = optax.apply_updates(opt_params, updates)
+
+        return new_params, opt_state, loss, gradient
+
+    components = np.empty((time_evolution.shape[0],) + tuple(np.square(dim)))
+    eigenvalues = np.empty(time_evolution.shape[:2])
+
+    initial = paulis.components(-matrix_angle(time_evolution[0]), dim=dim).real
+
+    max_update = 10000
+    window = 20
+    losses = np.empty(window)
+
+    for itime in range(time_evolution.shape[0]):
+        opt_params = {'components': jax.device_put(initial, device=jax_device)}
+        with jax.default_device(jax_device):
+            opt_state = grad_trans.init(opt_params)
+
+        for iup in range(max_update):
+            new_params, opt_state, loss, gradient = step(opt_params, opt_state, time_evolution[itime])
+
+            losses[iup % window] = loss
+            if iup > window and np.amax(losses) - np.amin(losses) < 1.e-4:
+                break
+
+            opt_params = new_params
+
+        print(f'done in {iup} steps.')
+
+        initial = opt_params['components']
+
+        components[itime] = np.array(opt_params['components'])
+
+        hermitian = paulis.compose(components[itime], dim=dim)
+        eigenvalues[itime] = np.linalg.eigh(hermitian)[0]
+
+    return components, eigenvalues
