@@ -174,10 +174,10 @@ class HamiltonianBuilder:
             drive_amplitude: Base drive amplitude in rad/s.
             qudit_id: Identifier for the qudit. If None, the position (order of addition) is used.
             position: If an integer, the qudit is inserted into the specified position.
-            drive_weight: The weights given to each level transition. Default is :math:`\sqrt{l}`
+            drive_weight: The weights given to each level transition. Default is :math:`\sqrt{l + 1}`
         """
         if drive_weight is None:
-            drive_weight = np.sqrt(np.arange(self.num_levels, dtype=float)[1:])
+            drive_weight = np.sqrt(np.arange(1, self.num_levels, dtype=float))
 
         params = QuditParams(qubit_frequency=qubit_frequency, anharmonicity=anharmonicity,
                              drive_amplitude=drive_amplitude, drive_weight=drive_weight)
@@ -781,11 +781,11 @@ class HamiltonianBuilder:
             iq2 = self.qudit_index(q2)
 
             for l1, l2 in np.ndindex((self._num_levels - 1, self._num_levels - 1)):
-                # exp(i (xi_{p1,l1} - xi_{p2,l2}) t) sqrt(l1 + 1) sqrt(l2 + 1) |l1+1>|l2><l1|<l2+1| + h.c.
+                # exp(i (xi_{p1,l1} - xi_{p2,l2}) t) lambda_l1 lambda_l2 |l1+1>|l2><l1|<l2+1| + h.c.
 
                 # Annihilator terms for this level combination
-                ann1 = np.sqrt(l1 + 1) * qtp.basis(self._num_levels, l1) * qtp.basis(self._num_levels, l1 + 1).dag()
-                ann2 = np.sqrt(l2 + 1) * qtp.basis(self._num_levels, l2) * qtp.basis(self._num_levels, l2 + 1).dag()
+                ann1 = p1.drive_weight[l1] * qtp.basis(self._num_levels, l1) * qtp.basis(self._num_levels, l1 + 1).dag()
+                ann2 = p2.drive_weight[l2] * qtp.basis(self._num_levels, l2) * qtp.basis(self._num_levels, l2 + 1).dag()
 
                 ops = [qtp.qeye(self._num_levels)] * self.num_qudits
                 ops[iq1] = ann1.dag()
@@ -850,9 +850,10 @@ class HamiltonianBuilder:
 
         for iq, qudit_id in enumerate(self._frame):
             frame = self._frame[qudit_id]
+            params = self._qudit_params[qudit_id]
 
             for level in range(self._num_levels - 1):
-                cre = np.sqrt(level + 1) * qtp.basis(self._num_levels, level + 1) * qtp.basis(self._num_levels, level).dag()
+                cre = params.drive_weight[level] * qtp.basis(self._num_levels, level + 1) * qtp.basis(self._num_levels, level).dag()
 
                 ops = [qtp.qeye(self._num_levels)] * self.num_qudits
                 ops[iq] = cre
