@@ -14,6 +14,7 @@ from rqutils.math import matrix_exp
 
 from .hamiltonian import HamiltonianBuilder, Frame
 from .sim_result import PulseSimResult, save_sim_result
+from .unitary import closest_unitary
 from .parallel import parallel_map
 
 logger = logging.getLogger(__name__)
@@ -408,8 +409,7 @@ def _simulate_drive(
 
                 # Apply reunitarization
                 if reunitarize:
-                    v, _, wdag = np.linalg.svd(evolution)
-                    evolution = v @ wdag
+                    evolution = closest_unitary(evolution)
 
                 last_unitary = evolution[-1].copy()
 

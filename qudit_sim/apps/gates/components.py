@@ -1,4 +1,4 @@
-from typing import Union, List, Optional
+from typing import Union, List, Tuple, Optional
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -8,9 +8,10 @@ from rqutils.math import matrix_angle
 import rqutils.paulis as paulis
 
 from ...sim_result import PulseSimResult
+from ...unitary import truncate_matrix, closest_unitary
 from ...config import config
 
-def get_gate(
+def gate_and_fidelity(
     sim_result: Union[PulseSimResult, List[PulseSimResult]],
     comp_dim: Optional[int] = None
 ) -> Union[Tuple[np.ndarray, float], List[Tuple[np.ndarray, float]]]:
@@ -26,33 +27,15 @@ def get_gate(
         the fidelity of the truncated gate, or a list thereof if `sim_result` is a list.
     """
     if isinstance(sim_result, list):
-        return list(get_gate(res, comp_dim) for res in sim_result)
+        return list(gate_and_fidelity(res, comp_dim) for res in sim_result)
 
     gate = sim_result.states[-1]
 
     if comp_dim is not None and sim_result.dim[0] != comp_dim:
-        num_qudits = len(sim_result.dim)
-        comp_dim_tuple = (comp_dim,) * num_qudits
-        flattened_grid_indices = np.indices(comp_dim_tuple).reshape(num_qudits, -1)
-        trunc_indices = np.ravel_multi_index(flattened_grid_indices, sim_result.dim)
-        # example: (4, 4) -> (3, 3): trunc_indices = [0, 1, 2, 4, 5, 6, 8, 9, 10]
-        trunc_gate = gate[trunc_indices]
-
-        # Find the closest unitary to the truncation
-        v, _, wdag = np.linalg.svd(trunc_gate)
-
-        # Reconstruct (reunitarize) the gate
-        reco_gate = v @ wdag
-
-        fidelity = np.square(np.abs(np.trace(trunc_gate @ reco_gate.conjugate().T)))
-        fidelity /= np.square(np.prod(comp_dim_tuple))
-
-        gate = reco_gate
-
+        truncated = truncate_matrix(gate, len(sim_result.dim), sim_result.dim[0], comp_dim)
+        return closest_unitary(truncated, with_fidelity=True)
     else:
-        fidelity = 1.
-
-    return gate, fidelity
+        return gate, 1.
 
 
 def gate_components_from_log(
@@ -73,7 +56,7 @@ def gate_components_from_log(
     if isinstance(sim_result, list):
         return list(gate_components_from_log(res, comp_dim) for res in sim_result)
 
-    gate, _ = get_gate(sim_result, comp_dim)
+    gate, _ = gate_and_fidelity(sim_result, comp_dim)
 
     components = paulis.components(-matrix_angle(gate), sim_result.dim).real
 
@@ -83,29 +66,28 @@ def gate_components_from_log(
 def gate_components(
     sim_result: Union[PulseSimResult, List[PulseSimResult]],
     heff: np.ndarray,
-    approx_time: float,
-    max_update: int = 1000,
-    comp_dim: Optional[int] = None
+    approx_time: Optional[float] = None,
+    max_update: int = 1000
 ) -> Union[Tuple[np.ndarray, np.ndarray], List[Tuple[np.ndarray, np.ndarray]]]:
     if isinstance(sim_result, list):
-        return list(gate_components(res, heff, approx_time, max_update, comp_dim)
+        return list(gate_components(res, heff, approx_time, max_update)
                     for res in sim_result)
+
+    if approx_time is None:
+        approx_time = sim_result.times[-1] * 0.5
 
     jax_device = jax.devices()[config.jax_devices[0]]
 
-    gate, _ = get_gate(sim_result, comp_dim)
+    comp_dim = np.sqrt(heff.shape[0]).astype(int)
+    dim = (comp_dim,) * len(sim_result.dim)
+
+    gate, _ = gate_and_fidelity(sim_result, comp_dim)
 
     unitary = jax.device_put(gate, device=jax_device)
 
-    if comp_dim is not None and sim_result.dim[0] != comp_dim:
-        comp_dim_tuple = (comp_dim,) * len(sim_result.dim)
-        heff = paulis.truncate(heff, comp_dim_tuple)
-    else:
-        comp_dim_tuple = sim_result.dim
-
     def loss_fn(params):
         with jax.default_device(jax_device):
-            hermitian = paulis.compose(params['components'], comp_dim_tuple, npmod=jnp)
+            hermitian = paulis.compose(params['components'], dim, npmod=jnp)
             ansatz = jax.scipy.linalg.expm(1.j * hermitian)
             return -jnp.square(jnp.abs(jnp.trace(unitary @ ansatz)))
 

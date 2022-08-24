@@ -23,6 +23,7 @@ from ..hamiltonian import HamiltonianBuilder
 from ..pulse import GaussianSquare
 from ..pulse_sim import pulse_sim
 from ..sim_result import PulseSimResult, save_sim_result, load_sim_result
+from ..unitary import truncate_matrix, closest_unitary
 from .heff_tools import unitary_subtraction, trace_norm_squared, heff_fidelity
 from .gates.components import gate_components
 
@@ -39,7 +40,7 @@ def find_heff(
     qudit: QuditSpec,
     frequency: Union[FrequencySpec, List[FrequencySpec], np.ndarray],
     amplitude: Union[AmplitudeSpec, List[AmplitudeSpec], np.ndarray],
-    comp_dim: int = 2,
+    comp_dim: Optional[int] = None,
     cycles: Union[float, List[float]] = 1000.,
     ramp_cycles: Union[float, List[float]] = 100.,
     init: Optional[Union[np.ndarray, Dict[Tuple[int, ...], Union[float, Tuple[float, bool]]]]] = None,
@@ -71,7 +72,7 @@ def find_heff(
         qudit: The qudit(s) to apply the drive to.
         frequency: Drive frequency(ies).
         amplitude: Drive amplitude(s).
-        comp_dim: Dimensionality of the computational space.
+        comp_dim: Dimensionality of the computational space. If not set, number of levels in the Hamiltonian is used.
         cycles: Number of drive signal cycles in the plateau of the GaussianSquare pulse.
         ramp_cycles: Number of drive signal cycles to use for ramp-up.
         init: Initial values of the effective Hamiltonian components. An array specifies all initial values.
@@ -302,17 +303,26 @@ def heff_fit(
         if save_result_to:
             save_sim_result(f'{save_result_to}.h5', sim_result)
 
+    if comp_dim is None:
+        comp_dim = hgen.num_levels
+
+    dim = (comp_dim,) * hgen.num_qudits
+
     ## Time bins for the GaussianSquare plateau
     flat_start = np.searchsorted(sim_result.times, start_time, 'right') - 1
     flat_end = np.searchsorted(sim_result.times, end_time, 'right') - 1
 
+    ## Truncate the unitaries if comp_dim is less than the system dimension
+    time_evolution = truncate_matrix(sim_result.states, hgen.num_qudits, hgen.num_levels, comp_dim)
+
     ## Find the initial values for the fit
     logger.info('Determining the initial values for Heff and offset..')
 
-    heff_init, fixed, offset_init = _find_init(sim_result, hgen, init, zero_suppression,
+    heff_init, fixed, offset_init = _find_init(time_evolution, sim_result.times, dim,
+                                               hgen, init, zero_suppression,
                                                flat_start, flat_end, logger)
     # Fix the identity component because its gradient is identically zero
-    fixed[(0,) * len(sim_result.dim)] = True
+    fixed[(0,) * hgen.num_qudits] = True
 
     logger.debug('Heff initial values: %s', heff_init)
     logger.debug('Fixed components: %s', fixed)
@@ -331,11 +341,11 @@ def heff_fit(
     attempt = 1
 
     while True:
-        time_evolution = sim_result.states[fit_start:fit_end + 1]
+        time_evolution_in_range = time_evolution[fit_start:fit_end + 1]
         tlist = tlist_full[fit_start:fit_end + 1] - tlist_full[fit_start]
 
         logger.info('Maximizing mean fidelity..')
-        result = _maximize_fidelity(time_evolution, tlist, sim_result.dim,
+        result = _maximize_fidelity(time_evolution_in_range, tlist, dim,
                                     heff_init, fixed, offset_init,
                                     optimizer, optimizer_args, max_updates,
                                     convergence, convergence_window,
@@ -347,7 +357,7 @@ def heff_fit(
         logger.debug('Offset component values: %s', offset_compos)
 
         ## Test the optimized values - is the minimum fidelity above the threshold?
-        fidelity = heff_fidelity(sim_result.states[flat_start:flat_end + 1], heff_compos, offset_compos,
+        fidelity = heff_fidelity(time_evolution[flat_start:flat_end + 1], heff_compos, offset_compos,
                                  tlist_full[flat_start:flat_end + 1] - tlist_full[flat_start])
         minf = np.amin(fidelity)
 
@@ -371,25 +381,6 @@ def heff_fit(
     # Recover the normalization
     heff_compos /= time_norm
 
-    # Add the zeroth component
-    num_levels = sim_result.dim[0]
-    num_qudits = len(sim_result.dim)
-    # ν_0 = 1/2 tr[⊗λ0 H] = 1/2 √(2/L)^n tr[H]
-    zeroth_component = np.trace(hgen.build_hdiag().full()).real
-    zeroth_component *= np.power(2. / num_levels, num_qudits / 2.) / 2.
-
-    zeroth_index = (0,) * num_qudits
-    heff_compos[zeroth_index] = zeroth_component
-    offset_compos[zeroth_index] = zeroth_component * start_time
-
-    if sim_result.dim[0] != comp_dim:
-        reduced_dim = (comp_dim,) * len(sim_result.dim)
-        components_original = heff_compos
-        components = paulis.truncate(heff_compos, reduced_dim)
-    else:
-        components_original = None
-        components = heff_compos
-
     if save_result_to:
         with h5py.File(f'{save_result_to}.h5', 'a') as out:
             out.create_dataset('comp_dim', data=comp_dim)
@@ -397,10 +388,8 @@ def heff_fit(
 
             out.create_dataset('fixed', data=fixed)
 
-            out.create_dataset('components', data=components)
+            out.create_dataset('components', data=heff_compos)
             out.create_dataset('offset_components', data=offset_compos)
-            if components_original is not None:
-                out.create_dataset('components_original', data=components_original)
 
             if intermediate_results is not None:
                 intermediate_results['heff_compos'] /= time_norm
@@ -409,11 +398,13 @@ def heff_fit(
 
     logger.setLevel(original_log_level)
 
-    return components
+    return heff_compos
 
 
 def _find_init(
-    sim_result: PulseSimResult,
+    time_evolution: np.ndarray,
+    tlist: np.ndarray,
+    dim: Tuple[int, ...],
     hgen: HamiltonianBuilder,
     init: Union[np.ndarray, Dict[Tuple[int, ...], Union[float, Tuple[float, bool]]], None],
     zero_suppression: bool,
@@ -422,8 +413,9 @@ def _find_init(
     logger: logging.Logger
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Find the initial values of the effective Hamiltonian components."""
-    generator, eigenvalues = matrix_angle(sim_result.states, with_diagonals=True)
-    generator_compos = paulis.components(-generator, dim=sim_result.dim).real
+    unitaries = closest_unitary(time_evolution)
+    generator, eigenvalues = matrix_angle(unitaries, with_diagonals=True)
+    generator_compos = paulis.components(-generator, dim=dim).real
     offset_init = generator_compos[flat_start]
 
     fixed = np.zeros_like(offset_init, dtype=bool)
@@ -448,7 +440,7 @@ def _find_init(
 
             heff_init = np.sum(generator_compos[flat_start:last_valid_tidx + 1], axis=0) / (last_valid_tidx - flat_start + 1)
             heff_init -= generator_compos[flat_start]
-            heff_init *= 2. / (sim_result.times[last_valid_tidx] - sim_result.times[flat_start])
+            heff_init *= 2. / (tlist[last_valid_tidx] - tlist[flat_start])
 
         else:
             logger.warning('Failed to obtain an initial estimate of the slopes')
@@ -459,13 +451,15 @@ def _find_init(
         hgen_nodrv = hgen.copy(clear_drive=True)
         # Running pulse_sim (more specifically sesolve within) in multithread is not safe in general, but for this
         # specific case (no drive) it's OK because sesolve is actually not invoked
-        sim_result_nodrive = pulse_sim(hgen_nodrv, sim_result.times, log_level=logger.getEffectiveLevel())
+        sim_result_nodrv = pulse_sim(hgen_nodrv, tlist, log_level=logger.getEffectiveLevel())
 
-        generator_nodrv = matrix_angle(sim_result_nodrive.states)
-        nodrv_compos = paulis.components(-generator_nodrv, dim=sim_result.dim).real
+        time_evolution_nodrv = truncate_matrix(sim_result_nodrv.states, hgen.num_qudits, hgen.num_levels, dim[0])
+        unitaries_nodrv = closest_unitary(time_evolution_nodrv)
+        generator_nodrv = matrix_angle(unitaries_nodrv)
+        nodrv_compos = paulis.components(-generator_nodrv, dim=dim).real
         is_finite = np.logical_not(np.all(np.isclose(nodrv_compos, 0., atol=1.e-4), axis=0))
 
-        symmetry = paulis.symmetry(sim_result.dim)
+        symmetry = paulis.symmetry(dim)
         finite_offdiag = is_finite & np.asarray(symmetry, dtype=bool)
 
         logger.debug('Off-diagonals with finite values under no drive: %s', list(zip(*np.nonzero(finite_offdiag))))
@@ -554,7 +548,6 @@ def _maximize_fidelity(
         unitary = _vexpm(1.j * generator)
 
         target = jnp.matmul(time_evolution, unitary)
-
         fidelity = trace_norm_squared(target, npmod=jnp)
 
         return -jnp.mean(fidelity)

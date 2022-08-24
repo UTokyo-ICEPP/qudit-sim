@@ -59,11 +59,7 @@ def inspect_heff_fit(
         tlist = source['times'][()]
         comp_dim = int(source['comp_dim'][()])
         fit_start, fit_end = source['fit_range'][()]
-        if num_sim_levels != comp_dim:
-            components = source['components_original'][()]
-        else:
-            components = source['components'][()]
-
+        components = source['components'][()]
         offset_components = source['offset_components'][()]
 
         try:
@@ -74,6 +70,9 @@ def inspect_heff_fit(
             loss = None
             heff_grads = None
             offset_grads = None
+
+    if comp_dim != num_sim_levels:
+        raise NotImplementedError('Still figuring out what to do with truncation')
 
     tlist_fit = tlist[fit_start:fit_end + 1] - tlist[fit_start]
 
