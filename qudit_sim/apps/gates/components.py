@@ -10,6 +10,7 @@ import rqutils.paulis as paulis
 from ...sim_result import PulseSimResult
 from ...unitary import truncate_matrix, closest_unitary
 from ...config import config
+from ...parallel import parallel_map
 
 def gate_and_fidelity(
     sim_result: Union[PulseSimResult, List[PulseSimResult]],
@@ -70,8 +71,9 @@ def gate_components(
     max_update: int = 1000
 ) -> Union[Tuple[np.ndarray, np.ndarray], List[Tuple[np.ndarray, np.ndarray]]]:
     if isinstance(sim_result, list):
-        return list(gate_components(res, heff, approx_time, max_update)
-                    for res in sim_result)
+        args = sim_result
+        common_args = (heff, approx_time, max_update)
+        return parallel_map(gate_components, args=args, common_args=common_args, thread_based=True)
 
     if approx_time is None:
         approx_time = sim_result.times[-1] * 0.5

@@ -41,17 +41,6 @@ def truncate_matrix(
 
     return trunc_matrix
 
-#     flattened_grid_indices = np.indices(reduced_dim_tuple).reshape(num_qudits, -1)
-#     trunc_indices_single = np.ravel_multi_index(flattened_grid_indices, original_dim_tuple)
-#     # example: (4, 4) -> (3, 3): [0, 1, 2, 4, 5, 6, 8, 9, 10]
-
-#     trunc_indices = np.ix_(trunc_indices_single, trunc_indices_single)
-
-#     # matrix may have extra dimensions in front
-#     matrix = np.moveaxis(matrix, (-2, -1), (0, 1))
-#     trunc_matrix = matrix[trunc_indices]
-#     return np.moveaxis(matrix, (0, 1), (-2, -1))
-
 
 def closest_unitary(
     matrix: np.ndarray,
@@ -82,9 +71,9 @@ def closest_unitary(
     unitary = v @ wdag
 
     if with_fidelity:
-        fidelity = np.square(np.abs(np.trace(matrix @ unitary.conjugate().T))
-                         / unitary.shape[-1])
-
+        conjugate_unitary = np.moveaxis(unitary.conjugate(), -1, -2)
+        norm_tr = np.trace(matrix @ conjugate_unitary, axis1=-2, axis2=-1) / unitary.shape[-1]
+        fidelity = np.square(norm_tr.real) + np.square(norm_tr.imag)
         return unitary, fidelity
     else:
         return unitary

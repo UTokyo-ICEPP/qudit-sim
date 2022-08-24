@@ -23,6 +23,7 @@ from rqutils.math import matrix_angle
 from ..apps.heff_tools import unitary_subtraction, heff_fidelity
 from ..scale import FrequencyScale
 from ..basis import change_basis, diagonals, matrix_labels
+from ..unitary import truncate_matrix, closest_unitary
 from .decompositions import print_components, plot_evolution
 
 def inspect_heff_fit(
@@ -31,7 +32,6 @@ def inspect_heff_fit(
     tscale: FrequencyScale = FrequencyScale.auto,
     align_ylim: bool = True,
     select_components: Optional[List[Tuple]] = None,
-    metrics: bool = True,
     basis: Optional[Union[str, np.ndarray]] = None,
     symbol: Optional[str] = None
 ) -> List[mpl.figure.Figure]:
@@ -44,7 +44,6 @@ def inspect_heff_fit(
         tscale: Scale for the time axis.
         align_ylim: Whether to align the y axis limits for all plots.
         select_components: List of Pauli components to plot.
-        metrics: If True, a figure for fit information is included.
         basis: Represent the components in the given matrix basis.
         symbol: Symbol to use instead of the numeric indices for the matrices.
 
@@ -52,9 +51,7 @@ def inspect_heff_fit(
         A list of two (three if metrics=True) figures.
     """
     with h5py.File(filename, 'r') as source:
-        dim = tuple(source['dim'][()])
-        num_qudits = len(dim)
-        num_sim_levels = dim[0]
+        dim_tuple = source['dim'][()]
         time_evolution = source['states'][()]
         tlist = source['times'][()]
         comp_dim = int(source['comp_dim'][()])
@@ -71,13 +68,21 @@ def inspect_heff_fit(
             heff_grads = None
             offset_grads = None
 
-    if comp_dim != num_sim_levels:
-        raise NotImplementedError('Still figuring out what to do with truncation')
+    num_qudits = len(dim_tuple)
+    num_sim_levels = dim_tuple[0]
+    dim = (comp_dim,) * num_qudits
 
     tlist_fit = tlist[fit_start:fit_end + 1] - tlist[fit_start]
 
     if tscale is FrequencyScale.auto:
         tscale = FrequencyScale.find_time_scale(tlist[-1])
+
+    time_evolution_trunc = truncate_matrix(time_evolution, num_qudits, num_sim_levels, comp_dim)
+
+    if comp_dim != num_sim_levels:
+        time_evolution, trunc_fidelity = closest_unitary(time_evolution_trunc, with_fidelity=True)
+    else:
+        trunc_fidelity = np.ones(time_evolution.shape[0])
 
     figures = []
 
@@ -119,8 +124,6 @@ def inspect_heff_fit(
             ax.axvline(x0, linestyle='dotted', color='black', linewidth=0.5)
             ax.axvline(x1, linestyle='dotted', color='black', linewidth=0.5)
 
-    _highlight_comp_dim_components(fig_generator, indices, comp_dim, basis)
-
     colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
     handles = [
         mpl.lines.Line2D([0.], [0.], color=colors[0]),
@@ -135,70 +138,62 @@ def inspect_heff_fit(
     ## Second figure: subtracted unitaries
     target = unitary_subtraction(time_evolution[fit_start:fit_end + 1], components_orig, offset_components_orig, tlist_fit)
 
-    indices, fig_target = plot_evolution(time_evolution=target,
-                                         tlist=(tlist_fit + tlist[fit_start]),
-                                         dim=dim,
-                                         threshold=threshold,
-                                         select_components=select_components,
-                                         align_ylim=align_ylim,
-                                         tscale=tscale,
-                                         title='Unitary-subtracted time evolution',
-                                         basis=basis,
-                                         symbol=symbol)
+    _, fig_target = plot_evolution(time_evolution=target,
+                                   tlist=(tlist_fit + tlist[fit_start]),
+                                   dim=dim,
+                                   threshold=threshold,
+                                   select_components=select_components,
+                                   align_ylim=align_ylim,
+                                   tscale=tscale,
+                                   title='Unitary-subtracted time evolution',
+                                   basis=basis,
+                                   symbol=symbol)
     figures.append(fig_target)
 
-    _highlight_comp_dim_components(fig_target, indices, comp_dim, basis)
+    ## Third figure: fit metrics plots
+    fig_metrics, axes = plt.subplots(1, 4, figsize=(16, 4))
+    figures.append(fig_metrics)
+    fig_metrics.suptitle('Fit metrics', fontsize=16)
 
-    if metrics:
-        ## Third figure: fit metrics plots
-        fig_metrics, axes = plt.subplots(1, 3, figsize=(16, 4))
-        figures.append(fig_metrics)
-        fig_metrics.suptitle('Fit metrics', fontsize=16)
+    # truncation fidelity
+    ax = axes[0]
+    ax.set_title('Truncation fidelity')
+    ax.set_xlabel(f't ({tscale.time_unit})')
+    ax.set_ylabel('fidelity')
+    ax.plot(tlist * tscale.frequency_value, trunc_fidelity)
+    ax.axhline(1., color='black', linewidth=0.5)
 
-        # fidelity
-        final_fidelity = heff_fidelity(time_evolution[fit_start:fit_end + 1], components_orig, offset_components_orig, tlist_fit)
-        ax = axes[0]
-        ax.set_title('Final fidelity')
-        ax.set_xlabel(f't ({tscale.time_unit})')
-        ax.set_ylabel('fidelity')
-        ax.plot((tlist_fit + tlist[fit_start]) * tscale.frequency_value, final_fidelity)
-        ax.axhline(1., color='black', linewidth=0.5)
+    # fidelity
+    full_fidelity = heff_fidelity(time_evolution_trunc[fit_start:fit_end + 1], components_orig, offset_components_orig,
+                                  tlist_fit)
+    ax = axes[1]
+    ax.set_title('Full fidelity')
+    ax.set_xlabel(f't ({tscale.time_unit})')
+    ax.set_ylabel('fidelity')
+    ax.plot((tlist_fit + tlist[fit_start]) * tscale.frequency_value, full_fidelity)
+    ax.axhline(1., color='black', linewidth=0.5)
 
-        ## Intermediate data is not available if minuit is used
-        if loss is not None:
-            ax = axes[1]
-            ax.set_title('Loss evolution')
-            ax.set_xlabel('steps')
-            ax.set_ylabel('loss')
-            ax.plot(loss)
-            ax.axhline(0., color='black', linewidth=0.5)
+    ## Intermediate data is not available if minuit is used
+    if loss is not None:
+        ax = axes[2]
+        ax.set_title('Loss evolution')
+        ax.set_xlabel('steps')
+        ax.set_ylabel('loss')
+        ax.plot(loss)
+        ax.axhline(0., color='black', linewidth=0.5)
 
-            ax = axes[2]
-            ax.set_title('Gradient evolution')
-            ax.set_xlabel('steps')
-            ax.set_ylabel('max(abs(grad))')
-            ax.plot(np.amax(np.abs(heff_grads.reshape(heff_grads.shape[0], -1)), axis=1), label='$H_{eff}$')
-            ax.plot(np.amax(np.abs(offset_grads.reshape(offset_grads.shape[0], -1)), axis=1), label='Offset')
-            ax.axhline(0., color='black', linewidth=0.5)
-            ax.legend()
+        ax = axes[3]
+        ax.set_title('Gradient evolution')
+        ax.set_xlabel('steps')
+        ax.set_ylabel('max(abs(grad))')
+        ax.plot(np.amax(np.abs(heff_grads.reshape(heff_grads.shape[0], -1)), axis=1), label='$H_{eff}$')
+        ax.plot(np.amax(np.abs(offset_grads.reshape(offset_grads.shape[0], -1)), axis=1), label='Offset')
+        ax.axhline(0., color='black', linewidth=0.5)
+        ax.legend()
 
-        fig_metrics.tight_layout()
+    fig_metrics.tight_layout()
 
     return figures
-
-
-def _highlight_comp_dim_components(fig, indices, comp_dim, basis):
-    for iax, index in enumerate(indices):
-        ax = fig.axes[iax]
-
-        if basis is None or basis == 'gell-mann':
-            if np.all(np.array(index) < comp_dim ** 2):
-                for spine in ax.spines.values():
-                    spine.set(linewidth=2.)
-
-        else:
-            # Not implemented yet
-            pass
 
 
 def plot_amplitude_scan(
