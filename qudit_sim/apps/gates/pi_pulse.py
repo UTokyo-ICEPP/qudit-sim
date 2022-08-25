@@ -93,6 +93,9 @@ def pi_pulse(
         beta_estimate -= (params.drive_weight[level - 1] / params.drive_weight[level]) ** 2 / params.anharmonicity
     beta_estimate *= -1. / 4.
 
+    # Target for gate_components (must be in pauli0 basis)
+    target_pauli0 = change_basis(target, to_basis='pauli0', from_basis=f'pauli{level}')
+
     icall = 0
 
     def fun(params):
@@ -113,7 +116,7 @@ def pi_pulse(
                                tlist={'points_per_cycle': 10, 'duration': pulse.duration},
                                final_only=True)
 
-        components = change_basis(gate_components(sim_result), to_basis=f'pauli{level}')
+        components = change_basis(gate_components(sim_result, target_pauli0), to_basis=f'pauli{level}')
         components *= components_mask
 
         return np.sum(np.square(components - target))

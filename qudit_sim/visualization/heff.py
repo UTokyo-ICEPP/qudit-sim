@@ -151,38 +151,34 @@ def inspect_heff_fit(
     figures.append(fig_target)
 
     ## Third figure: fit metrics plots
-    fig_metrics, axes = plt.subplots(1, 4, figsize=(16, 4))
+    fig_metrics, axes = plt.subplots(1, 3, figsize=(16, 4))
     figures.append(fig_metrics)
     fig_metrics.suptitle('Fit metrics', fontsize=16)
-
-    # truncation fidelity
-    ax = axes[0]
-    ax.set_title('Truncation fidelity')
-    ax.set_xlabel(f't ({tscale.time_unit})')
-    ax.set_ylabel('fidelity')
-    ax.plot(tlist * tscale.frequency_value, trunc_fidelity)
-    ax.axhline(1., color='black', linewidth=0.5)
 
     # fidelity
     full_fidelity = heff_fidelity(time_evolution_trunc[fit_start:fit_end + 1], components_orig, offset_components_orig,
                                   tlist_fit)
-    ax = axes[1]
-    ax.set_title('Full fidelity')
+    xval = (tlist_fit + tlist[fit_start]) * tscale.frequency_value
+
+    ax = axes[0]
+    ax.set_title('Fidelity')
     ax.set_xlabel(f't ({tscale.time_unit})')
     ax.set_ylabel('fidelity')
-    ax.plot((tlist_fit + tlist[fit_start]) * tscale.frequency_value, full_fidelity)
+    ax.plot(xval, trunc_fidelity[fit_start:fit_end + 1], label='Upper bound')
+    ax.plot(xval, full_fidelity, label='Fidelity')
     ax.axhline(1., color='black', linewidth=0.5)
+    ax.legend()
 
     ## Intermediate data is not available if minuit is used
     if loss is not None:
-        ax = axes[2]
+        ax = axes[1]
         ax.set_title('Loss evolution')
         ax.set_xlabel('steps')
         ax.set_ylabel('loss')
         ax.plot(loss)
         ax.axhline(0., color='black', linewidth=0.5)
 
-        ax = axes[3]
+        ax = axes[2]
         ax.set_title('Gradient evolution')
         ax.set_xlabel('steps')
         ax.set_ylabel('max(abs(grad))')
