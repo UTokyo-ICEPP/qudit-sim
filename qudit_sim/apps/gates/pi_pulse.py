@@ -7,7 +7,7 @@ import scipy.optimize as sciopt
 import qutip as qtp
 
 import rqutils.paulis as paulis
-from rqutils.math import matrix_angle
+from rqutils.math import matrix_exp, matrix_angle
 
 from ...hamiltonian import HamiltonianBuilder
 from ...pulse import Drag
@@ -58,20 +58,19 @@ def pi_pulse(
 
     hgen = hgen.copy(clear_drive=True)
 
-    components_shape = (hgen.num_levels ** 2,) * hgen.num_qudits
     qudit_index = hgen.qudit_index(qudit_id)
 
-    # The target - Pulse is optimized to minimize the distance of the gate generator components to this array
-    target = np.zeros(components_shape)
-    target_index = tuple(1 if i == qudit_index else 0 for i in range(hgen.num_qudits))
-    target[target_index] = np.pi / 2. * np.power(2. * hgen.num_levels, (hgen.num_qudits - 1) / 2.)
+    target_single = np.eye(hgen.num_levels, dtype=complex)
+    target_single[[level, level + 1], [level, level + 1]] = 0.
+    target_single[[level, level + 1], [level + 1, level]] = 1.
+    target = 1.
+    for iq in range(hgen.num_qudits):
+        if iq == qudit_index:
+            target = np.kron(target, target_single)
+        else:
+            target = np.kron(target, np.eye(hgen.num_levels))
 
-    # Components mask - We unconstrain the commuting diagonals of the gate
-    components_mask = np.ones(components_shape)
-    diag_indices = [0] + list(np.square(np.arange(3, hgen.num_levels)) - 1)
-    target_indices = tuple(diag_indices if i == qudit_index else np.zeros_like(diag_indices)
-                           for i in range(hgen.num_qudits))
-    components_mask[target_indices] = 0
+    free_diags = list(iq for iq in range(hgen.num_levels) if iq != level and iq != level + 1)
 
     # Pulse frequency
     drive_frequency = hgen.dressed_frequencies(qudit_id)[level]
@@ -93,9 +92,6 @@ def pi_pulse(
         beta_estimate -= (params.drive_weight[level - 1] / params.drive_weight[level]) ** 2 / params.anharmonicity
     beta_estimate *= -1. / 4.
 
-    # Target for gate_components (must be in pauli0 basis)
-    target_pauli0 = change_basis(target, to_basis='pauli0', from_basis=f'pauli{level}')
-
     icall = 0
 
     def fun(params):
@@ -116,16 +112,22 @@ def pi_pulse(
                                tlist={'points_per_cycle': 10, 'duration': pulse.duration},
                                final_only=True)
 
-        components = change_basis(gate_components(sim_result, target_pauli0), to_basis=f'pauli{level}')
-        components *= components_mask
+        # Take the prod with the target and extract the diagonals
+        diag_prod = np.diag(sim_result.states[-1] @ target).reshape((hgen.num_levels,) * hgen.num_qudits)
+        # Integrate out the non-participating qudits
+        axes = tuple(iq for iq in range(hgen.num_qudits) if iq != qudit_index)
+        norm_ptr = np.sum(diag_prod, axis=axes) / (hgen.num_levels ** (hgen.num_qudits - 1))
+        # Compute the fidelity (sum of abs-squared of commuting diagonals + abs-square of the trace of target levels)
+        fidelity = np.sum(np.square(np.abs(norm_ptr[free_diags]))) / (hgen.num_levels - 2)
+        fidelity += np.square(np.abs(np.sum(norm_ptr[level:level + 2]) / 2.))
 
-        return np.sum(np.square(components - target))
+        return -fidelity
 
     logger.info('Starting pi pulse identification..')
 
     optres = sciopt.minimize(fun, (1., 1.), method='COBYLA', tol=5.e-5, options={'rhobeg': 0.5})
 
-    logger.info('Done after %d function calls', icall)
+    logger.info('Done after %d function calls. Final fidelity %f.', icall, -optres.fun)
 
     amp = optres.x[0] * amp_estimate
     beta = optres.x[1] * beta_estimate
