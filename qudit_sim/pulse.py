@@ -73,8 +73,6 @@ class PulseSequence(list):
         if len(self) == 0:
             return 0., 0.
 
-        assert isinstance(self[0], SetFrequency), 'First instruction of a PulseSequence must be SetFrequency'
-
         funclist_x = []
         funclist_y = []
         timelist = []
@@ -85,12 +83,18 @@ class PulseSequence(list):
 
         for inst in self:
             if isinstance(inst, ShiftFrequency):
+                if frequency is None:
+                    raise RuntimeError('ShiftFrequency called before SetFrequency')
+
                 frequency += inst.value
             elif isinstance(inst, ShiftPhase):
                 phase_offset += inst.value
             elif isinstance(inst, SetFrequency):
                 frequency = inst.value
             elif isinstance(inst, SetPhase):
+                if frequency is None:
+                    raise RuntimeError('SetPhase called before SetFrequency')
+
                 phase_offset = inst.value - frequency * time
             elif isinstance(inst, Delay):
                 funclist_x.append(0.)
@@ -98,6 +102,9 @@ class PulseSequence(list):
                 timelist.append(time)
                 time += inst.value
             elif isinstance(inst, Pulse):
+                if frequency is None:
+                    raise RuntimeError('Pulse called before SetFrequency')
+
                 funclist_x.append(inst.modulate(drive_base, frequency, phase_offset,
                                                 frame_frequency, time, 'x', rwa))
                 funclist_y.append(inst.modulate(drive_base, frequency, phase_offset,
@@ -339,7 +346,7 @@ class GaussianSquare(Pulse):
             self.gauss_rise = Gaussian(duration=gauss_duration, amp=amp, sigma=sigma,
                                        center=None, zero_ends=zero_ends)
 
-            self._condlist.append(lambda t: t < self.t_plateau)
+            self._condlist.append(self._left_time_range)
             self._funclist.append(self.gauss_rise)
         else:
             self.t_plateau = 0.
@@ -349,7 +356,7 @@ class GaussianSquare(Pulse):
             self.gauss_fall = Gaussian(duration=gauss_duration, amp=amp, sigma=sigma,
                                        center=None, zero_ends=zero_ends)
 
-            self._condlist.append(lambda t: t >= self.t_plateau + self.width)
+            self._condlist.append(self._right_time_range)
             self._funclist.append(self._fall_tail)
         else:
             self.gauss_fall = None
@@ -363,6 +370,12 @@ class GaussianSquare(Pulse):
     def _fall_tail(self, t, args):
         gauss_t0 = self.t_plateau + self.width - self.gauss_fall.duration / 2.
         return self.gauss_fall(t - gauss_t0, args)
+
+    def _left_time_range(self, t):
+        return t < self.t_plateau
+
+    def _right_time_range(self, t):
+        return t >= self.t_plateau + self.width
 
     def _make_condlist(self, t):
         return list(cond(t) for cond in self._condlist)

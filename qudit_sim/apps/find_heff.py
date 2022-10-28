@@ -483,6 +483,9 @@ def _find_init(
 
         if isinstance(init, dict):
             for key, value in init.items():
+                if not isinstance(key, tuple) or len(key) != hgen.num_qudits:
+                    raise ValueError(f'Invalid init key {key}')
+
                 if isinstance(value, tuple):
                     if value[0] is not None:
                         heff_init[key] = value[0]
