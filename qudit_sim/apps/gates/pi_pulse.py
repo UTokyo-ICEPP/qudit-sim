@@ -61,6 +61,7 @@ def pi_pulse(
     hgen = hgen.copy(clear_drive=True)
 
     qudit_index = hgen.qudit_index(qudit_id)
+    spectator_indices = tuple(iq for iq in range(hgen.num_qudits) if iq != qudit_index)
 
     target_single = np.eye(hgen.num_levels, dtype=complex)
     pauli_x = paulis.paulis(2)[1]
@@ -117,11 +118,12 @@ def pi_pulse(
         # Take the prod with the target and extract the diagonals
         diag_prod = np.diag(sim_result.states[-1] @ target).reshape((hgen.num_levels,) * hgen.num_qudits)
         # Integrate out the non-participating qudits
-        axes = tuple(iq for iq in range(hgen.num_qudits) if iq != qudit_index)
-        norm_ptr = np.sum(diag_prod, axis=axes) / (hgen.num_levels ** (hgen.num_qudits - 1))
+        norm_ptr = np.sum(diag_prod, axis=spectator_indices) / (hgen.num_levels ** (hgen.num_qudits - 1))
         # Compute the fidelity (sum of abs-squared of commuting diagonals + abs-square of the trace of target levels)
-        fidelity = np.sum(np.square(np.abs(norm_ptr[free_diags]))) / (hgen.num_levels - 2)
-        fidelity += np.square(np.abs(np.sum(norm_ptr[level:level + 2]) / 2.))
+        fidelity = np.sum(np.square(np.abs(norm_ptr[free_diags])))
+        fidelity += np.square(np.abs(np.sum(norm_ptr[level:level + 2]))) / 2.
+
+        logger.debug('COBYLA diag_prod %s fidelity %f', diag_prod, fidelity)
 
         return -fidelity
 
