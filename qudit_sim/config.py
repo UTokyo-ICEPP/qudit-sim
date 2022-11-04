@@ -1,5 +1,6 @@
 """Global configuration parameters."""
 import threading
+import jax
 
 class Config:
     """Global configuration parameters.
@@ -10,17 +11,12 @@ class Config:
         self.num_cpus = 0
 
         self._local = threading.local()
-        self._local.jax_devices = None
+        self._local.jax_devices = list(range(jax.local_device_count()))
 
     @property
     def jax_devices(self):
         if self._local.jax_devices is None:
-            try:
-                import jax
-            except ImportError:
-                self._local.jax_devices = []
-            else:
-                self._local.jax_devices = list(range(jax.local_device_count()))
+            raise RuntimeError('jax_devices is nullified. Are you perhaps trying to use jax in a multiprocessing call?')
 
         return self._local.jax_devices
 

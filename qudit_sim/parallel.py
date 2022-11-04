@@ -194,7 +194,7 @@ def parallel_map(
         else:
             conn_recv, conn_send = multiprocessing.Pipe()
             # JAX (or CUDA in general?) does not seem to work with multiprocessing
-            proc_config = {'jax_devices': []}
+            proc_config = {'jax_devices': None}
             proc_args = (target, a, k, conn_send, proc_name, proc_config)
             process = multiprocessing.Process(target=_process_wrapper, args=proc_args, name=proc_name)
 

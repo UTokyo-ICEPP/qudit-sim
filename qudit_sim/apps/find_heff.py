@@ -523,11 +523,8 @@ def _maximize_fidelity(
     heff_static = np.tensordot(heff_init[fixed], basis[fixed], (0, 0))
 
     ## Working arrays
-    if not config.jax_devices:
-        jax_device = None
-    else:
-        # parallel.parallel_map sets jax_devices[0] to the ID of the GPU to be used in this thread
-        jax_device = jax.devices()[config.jax_devices[0]]
+    # parallel.parallel_map sets jax_devices[0] to the ID of the GPU to be used in this thread
+    jax_device = jax.devices()[config.jax_devices[0]]
 
     time_evolution = jax.device_put(time_evolution, device=jax_device)
     tlist = jax.device_put(tlist, device=jax_device)
