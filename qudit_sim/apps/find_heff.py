@@ -231,7 +231,7 @@ def setup(
                 continue
 
             pulse = GaussianSquare(duration, amp, sigma, width)
-            hgen.add_drive(qid, frequency=freq, amplitude=pulse)
+            hgen.add_drive(qid, frequency=freq, amplitude=pulse.envelope_fn())
 
     if not any(len(drive) != 0 for drive in hgen.drive().values()):
         tlist = {'points_per_cycle': 8, 'num_cycles': int(cycles)}

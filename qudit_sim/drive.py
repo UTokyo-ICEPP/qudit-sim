@@ -11,6 +11,9 @@ See :ref:`drive-hamiltonian` for theoretical background.
 from typing import Callable, Optional, Union, Tuple
 from dataclasses import dataclass
 import numpy as np
+import jax.numpy as jnp
+
+from .config import config
 
 # Type for the callable time-dependent Hamiltonian coefficient
 CallableCoefficient = Callable[[Union[float, np.ndarray], dict], Union[complex, np.ndarray]]
@@ -18,17 +21,28 @@ HamiltonianCoefficient = Union[str, np.ndarray, CallableCoefficient]
 
 def cos_freq(freq, phase=0.):
     """`cos(freq * t + phase)`"""
-    return lambda t, args: np.cos(freq * t + phase)
+    if config.pulse_sim_solver == 'jax':
+        return lambda t, args: jnp.cos(freq * t + phase)
+    else:
+        return lambda t, args: np.cos(freq * t + phase)
 
 def sin_freq(freq, phase=0.):
     """`sin(freq * t + phase)`"""
-    return lambda t, args: np.sin(freq * t + phase)
+    if config.pulse_sim_solver == 'jax':
+        return lambda t, args: jnp.sin(freq * t + phase)
+    else:
+        return lambda t, args: np.sin(freq * t + phase)
 
 def exp_freq(freq, phase=0.):
     """`cos(freq * t + phase) + 1.j * sin(freq * t + phase)`"""
-    def fun(t, args):
-        exponent = t * freq + phase
-        return np.cos(exponent) + 1.j * np.sin(exponent)
+    if config.pulse_sim_solver == 'jax':
+        def fun(t, args):
+            exponent = t * freq + phase
+            return jnp.cos(exponent) + 1.j * jnp.sin(exponent)
+    else:
+        def fun(t, args):
+            exponent = t * freq + phase
+            return np.cos(exponent) + 1.j * np.sin(exponent)
 
     return fun
 
@@ -62,7 +76,10 @@ def imag_function(fun):
 
 def abs_function(fun):
     """`abs(fun(t, args))`"""
-    return lambda t, args: np.abs(fun(t, args))
+    if config.pulse_sim_solver == 'jax':
+        return lambda t, args: jnp.abs(fun(t, args))
+    else:
+        return lambda t, args: np.abs(fun(t, args))
 
 
 @dataclass(frozen=True)
@@ -189,15 +206,19 @@ class DriveTerm:
             # static envelope
             double_envelope = 2. * amplitude * drive_base
 
-            prefactor_terms = []
-            if double_envelope.real != 0.:
-                prefactor_terms.append(f'({double_envelope.real} * cos({self.frequency} * t))')
-            if double_envelope.imag != 0.:
-                prefactor_terms.append(f'({double_envelope.imag} * sin({self.frequency} * t))')
+            if config.pulse_sim_solver == 'jax':
+                prefactor = sum_function(scaled_function(double_envelope.real, cos_freq(self.frequency)),
+                                         scaled_function(double_envelope.imag, sin_freq(self.frequency)))
+            else:
+                prefactor_terms = []
+                if double_envelope.real != 0.:
+                    prefactor_terms.append(f'({double_envelope.real} * cos({self.frequency} * t))')
+                if double_envelope.imag != 0.:
+                    prefactor_terms.append(f'({double_envelope.imag} * sin({self.frequency} * t))')
 
-            prefactor = ' + '.join(prefactor_terms)
-            if len(prefactor_terms) > 1:
-                prefactor = f'({prefactor})'
+                prefactor = ' + '.join(prefactor_terms)
+                if len(prefactor_terms) > 1:
+                    prefactor = f'({prefactor})'
 
         elif isinstance(amplitude, str):
             double_envelope = f'{2. * drive_base} * ({amplitude})'

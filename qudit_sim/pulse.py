@@ -10,12 +10,18 @@ Classes in this module represent pulse envelopes. Subclasses of Pulse can be pas
 class (``sequence`` parameter).
 """
 
-from typing import List, Union, Optional, Any
+from typing import List, Union, Optional, Any, Sequence, Callable
+from numbers import Number
 import copy
 from dataclasses import dataclass
 import numpy as np
+import jax.numpy as jnp
+
+ArrayType = Union[np.ndarray, jnp.ndarray]
+array_like = Union[Number, Sequence[Number], ArrayType]
 
 from .drive import CallableCoefficient
+from .config import config
 
 class PulseSequence(list):
     """Pulse sequence.
@@ -149,26 +155,33 @@ class PulseSequence(list):
 
         timelist.append(time)
 
-        # piecewise determines the output dtype from tlist
-        tlist = np.asarray(t, dtype=np.complex128)
-        condlist = [((t >= start) & (t < end)) for start, end in zip(timelist[:-1], timelist[1:])]
-        return np.piecewise(tlist, condlist, funclist, args)
+        result = 0.
+        for time, func in zip(timelist[:-1], funclist):
+            result = np.where(t > time, func(t, args), result)
+        result = np.where(t > timelist[-1], 0., result)
+
+        return result
 
 
 def _make_sequence_fn(timelist, funclist):
+    if config.pulse_sim_solver == 'jax':
+        npmod = jnp
+    else:
+        npmod = np
+
     def fn(t, args):
-        # piecewise determines the output dtype from tlist
-        tlist = np.asarray(t, dtype=np.float)
-        condlist = [((t >= start) & (t < end)) for start, end in zip(timelist[:-1], timelist[1:])]
-        return np.piecewise(tlist, condlist, funclist, args)
+        result = 0.
+        for time, func in zip(timelist[:-1], funclist):
+            result = npmod.where(t > time, func(t, args), result)
+        result = npmod.where(t > timelist[-1], 0., result)
+        return result
 
     return fn
 
 def _make_shifted_fn(pulse, start_time):
-    def fn(t, args):
-        return pulse(t - start_time, args)
+    envelope_fn = pulse.envelope_fn()
+    return lambda t, args: envelope_fn(t - start_time, args)
 
-    return fn
 
 class Pulse:
     """Base class for all pulse shapes.
@@ -181,9 +194,6 @@ class Pulse:
         assert duration > 0., 'Pulse duration must be positive'
         self.duration = duration
 
-    def __call__(self, t, args=None):
-        raise NotImplementedError('Pulse is an ABC')
-
     def __mul__(self, c):
         if not isinstance(c, (float, complex)):
             raise TypeError(f'Multiplication between Pulse and {type(c).__name__} is invalid')
@@ -194,6 +204,9 @@ class Pulse:
 
     def __str__(self):
         return f'Pulse(duration={self.duration})'
+
+    def envelope_fn(self) -> Callable[[array_like, Any], array_like]:
+        raise NotImplementedError('Pulse is an ABC')
 
     def modulate(
         self,
@@ -219,27 +232,34 @@ class Pulse:
         Returns:
             A function of time that returns the modulated signal.
         """
+        if config.pulse_sim_solver == 'jax':
+            npmod = jnp
+        else:
+            npmod = np
+
+        envelope_fn = self.envelope_fn()
+
         if rwa:
             if symmetry == 'x':
-                value = lambda envelope, phase: envelope.real * np.cos(phase) + envelope.imag * np.sin(phase)
+                value = lambda envelope, phase: envelope.real * npmod.cos(phase) + envelope.imag * npmod.sin(phase)
             else:
-                value = lambda envelope, phase: envelope.imag * np.cos(phase) - envelope.real * np.sin(phase)
+                value = lambda envelope, phase: envelope.imag * npmod.cos(phase) - envelope.real * npmod.sin(phase)
 
             def fun(t, args=None):
-                envelope = drive_base * self.__call__(t - start_time, args)
+                envelope = drive_base * envelope_fn(t - start_time, args)
                 phase = (frequency - frame_frequency) * t + phase_offset
                 return value(envelope, phase)
 
         else:
             if symmetry == 'x':
-                frame_fn = np.cos
+                frame_fn = npmod.cos
             else:
-                frame_fn = np.sin
+                frame_fn = npmod.sin
 
             def fun(t, args=None):
-                double_envelope = 2. * drive_base * self.__call__(t - start_time, args)
+                double_envelope = 2. * drive_base * envelope_fn(t - start_time, args)
                 phase = frequency * t + phase_offset
-                prefactor = double_envelope.real * np.cos(phase) + double_envelope.imag * np.sin(phase)
+                prefactor = double_envelope.real * npmod.cos(phase) + double_envelope.imag * npmod.sin(phase)
                 return prefactor * frame_fn(frame_frequency * t)
 
         return fun
@@ -289,10 +309,18 @@ class Gaussian(Pulse):
     def amp(self) -> complex:
         return complex(self._gaus_amp * (1. - self._pedestal))
 
-    def __call__(self, t, args=None):
-        x = (t - self.center) / self.sigma
-        return np.asarray(self._gaus_amp * (np.exp(-np.square(x) * 0.5) - self._pedestal),
-                          dtype=np.complex128)
+    def envelope_fn(self) -> Callable[[array_like, Any], array_like]:
+        if config.pulse_sim_solver == 'jax':
+            npmod = jnp
+        else:
+            npmod = np
+
+        def envelope(t, args=None):
+            x = (t - self.center) / self.sigma
+            return npmod.asarray(self._gaus_amp * (npmod.exp(-npmod.square(x) * 0.5) - self._pedestal),
+                                 dtype='complex128')
+
+        return envelope
 
     def __str__(self):
         return (f'Gaussian(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, center={self.center},'
@@ -329,6 +357,7 @@ class GaussianSquare(Pulse):
 
         assert width < duration, 'GaussianSquare width must be less than duration'
 
+        self.amp = amp
         self.sigma = sigma
         self.width = width
 
@@ -347,7 +376,6 @@ class GaussianSquare(Pulse):
                                        center=None, zero_ends=zero_ends)
 
             self._condlist.append(self._left_time_range)
-            self._funclist.append(self.gauss_rise)
         else:
             self.t_plateau = 0.
             self.gauss_rise = None
@@ -357,15 +385,8 @@ class GaussianSquare(Pulse):
                                        center=None, zero_ends=zero_ends)
 
             self._condlist.append(self._right_time_range)
-            self._funclist.append(self._fall_tail)
         else:
             self.gauss_fall = None
-
-        self._funclist.append(complex(amp))
-
-    @property
-    def amp(self) -> complex:
-        return self._funclist[-1]
 
     def _fall_tail(self, t, args):
         gauss_t0 = self.t_plateau + self.width - self.gauss_fall.duration / 2.
@@ -380,10 +401,37 @@ class GaussianSquare(Pulse):
     def _make_condlist(self, t):
         return list(cond(t) for cond in self._condlist)
 
-    def __call__(self, t, args=None):
-        # np.piecewise determines the output dtype from the first argument
-        tlist = np.asarray(t, dtype=np.complex128)
-        return np.piecewise(tlist, self._make_condlist(t), self._funclist, args)
+    def envelope_fn(self) -> Callable[[array_like, Any], array_like]:
+        if config.pulse_sim_solver == 'jax':
+            npmod = jnp
+        else:
+            npmod = np
+
+        dummy_fn = lambda t, args: 0.
+
+        if self.gauss_rise is None:
+            rise_edge = dummy_fn
+        else:
+            rise_edge = self.gauss_rise.envelope_fn()
+
+        if self.gauss_fall is None:
+            fall_tail = dummy_fn
+        else:
+            gauss_fall_fn = self.gauss_fall.envelope_fn()
+            fall_tail = lambda t, args: gauss_fall_fn(t + self.gauss_fall.duration / 2.)
+
+        def envelope(t, args=None):
+            return npmod.where(
+                t <= self.t_plateau,
+                rise_edge(t, args),
+                npmod.where(
+                    t <= self.t_plateau + self.width,
+                    self.amp,
+                    fall_tail(t - self.t_plateau - self.width, args)
+                )
+            )
+
+        return envelope
 
     def __str__(self):
         rise = self.gauss_rise is not None
@@ -437,11 +485,21 @@ class Drag(Gaussian):
 
         self.beta = beta
 
-    def __call__(self, t, args=None):
-        gauss = super().__call__(t, args)
-        dgauss = -(t - self.center) / np.square(self.sigma) * gauss
+    def envelope_fn(self) -> Callable[[array_like, Any], array_like]:
+        if config.pulse_sim_solver == 'jax':
+            npmod = jnp
+        else:
+            npmod = np
 
-        return gauss + 1.j * self.beta * dgauss
+        gauss_envelope = super().envelope_fn()
+
+        def envelope(t, args=None):
+            gauss = gauss_envelope(t, args)
+            dgauss = -(t - self.center) / npmod.square(self.sigma) * gauss
+
+            return gauss + 1.j * self.beta * dgauss
+
+        return envelope
 
     def __str__(self):
         return (f'Drag(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, beta={self.beta}, '
@@ -464,8 +522,16 @@ class Square(Pulse):
 
         self.amp = complex(amp)
 
-    def __call__(self, t, args=None):
-        return np.full_like(t, self.amp)
+    def envelope_fn(self) -> Callable[[array_like, Any], array_like]:
+        if config.pulse_sim_solver == 'jax':
+            npmod = jnp
+        else:
+            npmod = np
+
+        def envelope(t, args=None):
+            return npmod.full_like(t, self.amp)
+
+        return envelope
 
     def __str__(self):
         return f'Square(duration={self.duration}, amp={self.amp})'

@@ -9,6 +9,9 @@ import copy
 
 import numpy as np
 import qutip as qtp
+import jax
+import jax.numpy as jnp
+from jax.experimental.ode import odeint
 
 from rqutils.math import matrix_exp
 
@@ -16,6 +19,7 @@ from .hamiltonian import HamiltonianBuilder, Frame
 from .sim_result import PulseSimResult, save_sim_result
 from .unitary import closest_unitary
 from .parallel import parallel_map
+from .config import config
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +32,7 @@ def pulse_sim(
     psi0: Optional[Union[qtp.Qobj, List[qtp.Qobj]]] = None,
     args: Optional[Any] = None,
     e_ops: Optional[Union[EOps, List[EOps]]] = None,
-    keep_callable: Union[bool, List[bool]] = False,
+    keep_callable: Optional[Union[bool, List[bool]]] = None,
     final_only: bool = False,
     reunitarize: bool = True,
     interval_len: int = 1000,
@@ -90,6 +94,7 @@ def pulse_sim(
         e_ops: List of observables passed to the QuTiP solver.
         keep_callable: Keep callable time-dependent Hamiltonian coefficients. Otherwise all callable coefficients
             are converted to arrays before simulation execution for efficiency (no loss of accuracy observed so far).
+            Defaults to False for qutip solver and True for jax solver.
         final_only: Throw away intermediate states and expectation values to save memory. Due to implementation details,
             implies ``unitarize_evolution=True``.
         reunitarize: Whether to reunitarize the time evolution matrices.
@@ -162,8 +167,10 @@ def pulse_sim(
         for itask in range(num_tasks):
             kwarg_values.append((f'{__name__}.{itask}', save_result_path(itask)))
 
+        thread_based = config.pulse_sim_solver == 'jax'
+
         result = parallel_map(_run_single, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
-                              common_kwargs=common_kwargs, log_level=log_level)
+                              common_kwargs=common_kwargs, log_level=log_level, thread_based=thread_based)
 
     logger.setLevel(original_log_level)
 
@@ -176,7 +183,7 @@ def _run_single(
     psi0: Union[qtp.Qobj, None],
     args: Any,
     e_ops: Union[EOps, None],
-    keep_callable: bool,
+    keep_callable: Union[bool, None],
     final_only: bool,
     reunitarize: bool,
     interval_len: int,
@@ -291,7 +298,7 @@ def _simulate_drive(
     tlist: np.ndarray,
     calculator: StatesAndExpectations,
     args: Any,
-    keep_callable: bool,
+    keep_callable: Union[bool, None],
     final_only: bool,
     reunitarize: bool,
     interval_len: int,
@@ -299,29 +306,47 @@ def _simulate_drive(
     logger: logging.Logger
 ):
     """Simulate the time evolution under a dynamic drive using qutip.sesolve."""
+    ## Build the Hamiltonian
+
+    if keep_callable is None:
+        if config.pulse_sim_solver == 'jax':
+            keep_callable = True
+        else:
+            keep_callable = False
+
+    if keep_callable:
+        hamiltonian = hgen.build()
+    else:
+        hamiltonian = hgen.build(tlist=tlist, args=args)
+
+    identity = hgen.identity_op()
+
+    logger.info('Hamiltonian with %d terms built. Starting simulation..', len(hamiltonian))
+
+    if config.pulse_sim_solver == 'jax':
+        return _simulate_drive_odeint(hamiltonian, identity, tlist, calculator, final_only, reunitarize, logger)
+    else:
+        return _simulate_drive_sesolve(hamiltonian, identity, tlist, calculator, args, final_only, reunitarize,
+                                       interval_len, options, logger)
+
+def _simulate_drive_sesolve(
+    hamiltonian: List[Union[qtp.Qobj, List]],
+    identity: qtp.Qobj,
+    tlist: np.ndarray,
+    calculator: StatesAndExpectations,
+    args: Any,
+    final_only: bool,
+    reunitarize: bool,
+    interval_len: int,
+    options: Union[None, qtp.solver.Options],
+    logger: logging.Logger
+):
     ## Options that are actually used in sesolve
 
     if options is None:
         solve_options = qtp.solver.Options()
     else:
         solve_options = copy.deepcopy(options)
-
-    ## Build the Hamiltonian
-
-    if keep_callable:
-        tlist_arg = dict()
-    else:
-        tlist_arg = {'tlist': tlist, 'args': args}
-
-    hamiltonian = hgen.build(**tlist_arg)
-
-    # sesolve generates O(1e-6) error in the global phase when the Hamiltonian is not traceless.
-    # Since we run the simulation in the lab frame, the only traceful term is hdiag.
-    # We therefore subtract the diagonals to make hdiag traceless, and later apply a global phase
-    # according to the shift.
-    hdiag = hamiltonian[0]
-    global_phase = np.trace(hdiag.full()).real / hdiag.shape[0]
-    hamiltonian[0] -= global_phase
 
     ## Reunitarization and interval running setting
 
@@ -334,6 +359,14 @@ def _simulate_drive(
 
     if not reunitarize:
         interval_len = tlist.shape[0]
+
+    # sesolve generates O(1e-6) error in the global phase when the Hamiltonian is not traceless.
+    # Since we run the simulation in the lab frame, the only traceful term is hdiag.
+    # We therefore subtract the diagonals to make hdiag traceless, and later apply a global phase
+    # according to the shift.
+    hdiag = hamiltonian[0]
+    global_phase = np.trace(hdiag.full()).real / hdiag.shape[0]
+    hamiltonian[0] -= global_phase
 
     array_terms = list()
 
@@ -351,7 +384,7 @@ def _simulate_drive(
     else:
         local_hamiltonian = hamiltonian
 
-    ## Arrays to store the states and expectation values
+    ## Arrays to store the unitaries and expectation values
 
     if not calculator.e_ops or solve_options.store_states:
         state_shape = calculator.psi0_arr.shape
@@ -373,8 +406,6 @@ def _simulate_drive(
 
     ## Run sesolve in a temporary directory
 
-    logger.info('Hamiltonian with %d terms built. Starting simulation..', len(hamiltonian))
-
     # We'll always need the states
     solve_options.store_states = True
 
@@ -387,7 +418,7 @@ def _simulate_drive(
 
             start = 0
             # Compute the time evolution in the lab frame -> initial unitary is identity
-            local_psi0 = hgen.identity_op()
+            local_psi0 = identity
             while True:
                 for iterm in array_terms:
                     local_hamiltonian[iterm][1] = hamiltonian[iterm][1][start:start + interval_len]
@@ -455,6 +486,43 @@ def _simulate_drive(
 
     return states, expect
 
+def _simulate_drive_odeint(
+    hamiltonian: List[Union[qtp.Qobj, List]],
+    identity: qtp.Qobj,
+    tlist: np.ndarray,
+    calculator: StatesAndExpectations,
+    final_only: bool,
+    reunitarize: bool,
+    logger: logging.Logger
+):
+    @jax.jit
+    def du_dt(u_t, t):
+        h_t = hamiltonian[0].full()
+        for qobj, fn in hamiltonian[1:]:
+            h_t += qobj.full() * fn(t, None)
+
+        return -1.j * jnp.matmul(h_t, u_t)
+
+    if final_only:
+        tlist = jnp.array([tlist[0], tlist[-1]], dtype='float64')
+
+    sim_start = time.time()
+
+    evolution = odeint(du_dt, identity.full(), tlist, rtol=1.e-8, atol=1.e-8)
+
+    # Apply reunitarization
+    if reunitarize:
+        evolution = closest_unitary(evolution)
+
+    ## Restore the actual global phase
+    #evolution *= np.exp(-1.j * global_phase * local_tlist[:, None, None])
+
+    # Compute the states and expectation values in the original frame
+    states, expect = calculator.calculate(evolution, tlist)
+
+    logger.info('Done in %f seconds.', time.time() - sim_start)
+
+    return states, expect
 
 def _exponentiate(
     hgen: HamiltonianBuilder,

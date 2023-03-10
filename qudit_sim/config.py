@@ -9,6 +9,7 @@ class Config:
     """
     def __init__(self):
         self.num_cpus = 0
+        self.pulse_sim_solver = 'qutip'
 
         self._local = threading.local()
         self._local.jax_devices = list(range(jax.local_device_count()))
