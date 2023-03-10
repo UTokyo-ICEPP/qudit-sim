@@ -1025,13 +1025,14 @@ class HamiltonianBuilder:
 
         The argument ``scan_type`` determines which attribute to make variations over. Implemented scan types are
         - ``'amplitude'``: Drive amplitudes. Elements of ``values`` are passed to the ``amplitude`` parameter of ``add_drive``.
+        - ``'sequence'``: Pulse sequences. Elements of ``values`` are passed to the ``sequence`` parameter of ``add_drive``.
         - ``'frequency'``: Drive frequencies. Elements of ``values`` are passed to the ``frequency`` parameter of ``add_drive``.
         - ``'coupling'``: Qudit-qudit couplings. Elements of ``values`` are passed to the ``value`` parameter of ``add_coupling``.
 
         In all cases, the remaining arguments to the respective functions must be given in the ``kwargs`` of this method.
 
         Args:
-            scan_type: ``'amplitude'``, ``'frequency'``, or ``'coupling'``.
+            scan_type: ``'amplitude'``, ``'sequence'``, ``'frequency'``, or ``'coupling'``.
             values: A list of values. One copy of self is created for each value.
             kwargs: Remaining arguments to the function to be called on each copy.
 
@@ -1046,6 +1047,12 @@ class HamiltonianBuilder:
                                    frequency=kwargs.get('frequency'),
                                    amplitude=value,
                                    constant_phase=kwargs.get('constant_phase'))
+
+        elif scan_type == 'sequence':
+            for value, instance in zip(values, copies):
+                instance.add_drive(qudit_id=kwargs['qudit_id'],
+                                   frequency=kwargs.get('frequency'),
+                                   sequence=value)
 
         elif scan_type == 'frequency':
             for value, instance in zip(values, copies):
