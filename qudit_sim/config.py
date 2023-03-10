@@ -1,6 +1,8 @@
 """Global configuration parameters."""
 import threading
+import numpy as np
 import jax
+import jax.numpy as jnp
 
 class Config:
     """Global configuration parameters.
@@ -24,5 +26,14 @@ class Config:
     @jax_devices.setter
     def jax_devices(self, value):
         self._local.jax_devices = value
+
+    @property
+    def npmod(self):
+        if self.pulse_sim_solver = 'qutip':
+            return np
+        elif self.pulse_sim_solver = 'jax':
+            return jnp
+        else:
+            raise ValueError(f'Invalid value for config.pulse_sim_solver: {self.pulse_sim_solver}')
 
 config = Config()
