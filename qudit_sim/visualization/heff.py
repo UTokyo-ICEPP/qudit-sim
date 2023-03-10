@@ -199,6 +199,7 @@ def plot_amplitude_scan(
     amp_scale: FrequencyScale = FrequencyScale.auto,
     compo_scale: FrequencyScale = FrequencyScale.auto,
     max_poly_order: int = 4,
+    use_all_powers: bool = False,
     select_components: Optional[List[Tuple]] = None,
     basis: Optional[Union[str, np.ndarray]] = None,
     symbol: Optional[str] = None
@@ -220,6 +221,8 @@ def plot_amplitude_scan(
         amp_scale: Scale of the drive amplitude.
         compo_scale: Scale of the components.
         max_poly_order: Maximum polynomial order for fitting the amplitude dependencies of the components.
+        use_all_powers: If True, do not restrict polynomial fit to odd / even powers
+            depending on the diagonality of the Hamiltonian component.
         select_components: List of Pauli components to plot.
         basis: Represent the components in the given matrix basis.
         symbol: Symbol to use instead of the numeric indices for the matrices.
@@ -313,7 +316,10 @@ def plot_amplitude_scan(
         pathcol = ax.scatter(amplitudes, compos * plot_scale, marker=filled_markers[icompo % num_markers], label=plot_label)
 
         # Perform a polynomial fit
-        if is_diagonal:
+        if use_all_powers:
+            curve = _poly_all
+            p0 = np.zeros(max_poly_order + 1)
+        elif is_diagonal:
             curve = _poly_even
             p0 = np.zeros(max_poly_order // 2 + 1)
         else:
@@ -328,7 +334,9 @@ def plot_amplitude_scan(
         except OptimizeWarning:
             logging.warning(f'Covariance of the fit parameters for {label} could not be determined.')
 
-        if is_diagonal:
+        if use_all_powers:
+            coefficients[icompo] = popt
+        elif is_diagonal:
             coefficients[icompo][::2] = popt
         else:
             coefficients[icompo][1::2] = popt
@@ -348,17 +356,17 @@ def plot_amplitude_scan(
 
 
 def _poly_even(x, *args):
-    value = args[0]
-    for iarg, arg in enumerate(args[1:]):
-        value += arg * np.power(x, 2 * (iarg + 1))
-    return value
+    coeffs = np.zeros(2 * len(args) - 1)
+    coeffs[0::2] = args
+    return np.polynomial.polynomial.polyval(x, coeffs)
 
 def _poly_odd(x, *args):
-    value = 0.
-    for iarg, arg in enumerate(args):
-        value += arg * np.power(x, 2 * iarg + 1)
-    return value
+    coeffs = np.zeros(2 * len(args))
+    coeffs[1::2] = args
+    return np.polynomial.polynomial.polyval(x, coeffs)
 
+def _poly_all(x, *args):
+    return np.polynomial.polynomial.polyval(x, args)
 
 if has_ipython:
     print_type = Latex
