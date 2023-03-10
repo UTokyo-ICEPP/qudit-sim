@@ -52,7 +52,12 @@ def gate_components_from_log(
     """
     gate, _ = gate_and_fidelity(sim_result, comp_dim)
 
-    components = paulis.components(-matrix_angle(gate), sim_result.dim).real
+    if comp_dim is None:
+        components_dim = sim_result.dim
+    else:
+        components_dim = (comp_dim,) * len(sim_result.dim)
+
+    components = paulis.components(-matrix_angle(gate), components_dim).real
 
     return components
 
