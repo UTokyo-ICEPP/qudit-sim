@@ -18,10 +18,8 @@ from .config import config
 ArrayType = Union[np.ndarray, jnp.ndarray]
 # Type for the callable time-dependent Hamiltonian coefficient
 TimeType = Union[float, ArrayType]
-ArgsType = Union[Dict[str, Any], Tuple[Union[float, ArrayType], ...]]
+ArgsType = Union[Dict[str, Any], Tuple[Any, ...]]
 ReturnType = Union[complex, ArrayType]
-CallableCoefficient = Callable[[TimeType, ArgsType], ReturnType]
-HamiltonianCoefficient = Union[str, ArrayType, CallableCoefficient]
 
 @dataclass(frozen=True)
 class Parameter:
@@ -29,11 +27,28 @@ class Parameter:
 
 @dataclass
 class ParameterFn:
-    fn: Callable[[ArgsType], ReturnType]
-    parameters: Optional[Tuple[str, ...]] = None
+    fn: Callable[[Tuple[Any, ...]], ReturnType]
+    parameters: Tuple[str, ...]
 
     def __call__(self, args: ArgsType) -> ReturnType:
+        if isinstance(args, dict):
+            args = tuple(args[key] for key in self.parameters)
+
         return self.fn(args)
+
+@dataclass
+class CallableCoefficient:
+    fn: Callable[[TimeType, Tuple[Any, ...]], ReturnType]
+    parameters: Tuple[str, ...] = ()
+
+    def __call__(self, t: TimeType, args: ArgsType) -> ReturnType:
+        if isinstance(args, dict):
+            args = tuple(args[key] for key in self.parameters)
+
+        return self.fn(t, args)
+
+HamiltonianCoefficient = Union[str, ArrayType, CallableCoefficient]
+
 
 def cos_freq(
     freq: Union[float, Parameter, ParameterFn],
@@ -58,95 +73,38 @@ def exp_freq(
     return _mod_freq(freq, phase, lambda x: npmod.cos(x) + 1.j * npmod.sin(x))
 
 def _mod_freq(_freq, _phase, _op):
-    if config.pulse_sim_solver == 'jax':
-        if isinstance(_freq, Parameter):
-            if isinstance(_phase, Parameter):
-                def fn(t, args):
-                    return _op(args[0] * t + args[1])
-
-                fn.parameters = (_freq.name, _phase.name)
-            elif isinstance(_phase, ParameterFn):
-                nparam_phase = len(_phase.parameters)
-                def fn(t, args):
-                    return _op(args[0] * t + _phase(args[1:nparam_phase + 1]))
-
-                fn.parameters = (_freq.name,) + _phase.parameters
-            else:
-                def fn(t, args):
-                    return _op(args[0] * t + _phase)
-
-                fn.parameters = (_freq.name,)
-
-        elif isinstance(_freq, ParameterFn):
-            nparam = len(_freq.parameters)
-
-            if isinstance(_phase, Parameter):
-                def fn(t, args):
-                    return _op(_freq(args[0:nparam]) * t + args[nparam])
-
-                fn.parameters = _freq.parameters + (_phase.name,)
-            elif isinstance(_phase, ParameterFn):
-                nparam_phase = len(_phase.parameters)
-                def fn(t, args):
-                    return _op(_freq(args[0:nparam]) * t + _phase(args[nparam:nparam + nparam_phase]))
-
-                fn.parameters = _freq.parameters + _phase.parameters
-            else:
-                def fn(t, args):
-                    return _op(_freq(args[0:nparam]) * t + _phase)
-
-                fn.parameters = _freq.parameters
-
+    if isinstance(_freq, Parameter):
+        if isinstance(_phase, Parameter):
+            fn = CallableCoefficient(lambda t, args: _op(args[0] * t + args[1]),
+                                     (_freq.name, _phase.name))
+        elif isinstance(_phase, ParameterFn):
+            fn = CallableCoefficient(lambda t, args: _op(args[0] * t + _phase(args[1:])),
+                                     (_freq.name,) + _phase.parameters)
         else:
-            if isinstance(_phase, Parameter):
-                def fn(t, args):
-                    return _op(_freq * t + args[0])
+            fn = CallableCoefficient(lambda t, args: _op(args[0] * t + _phase),
+                                     (_freq.name,))
+    elif isinstance(_freq, ParameterFn):
+        nparam = len(_freq.parameters)
 
-                fn.parameters = (_phase.name,)
-            elif isinstance(_phase, ParameterFn):
-                nparam_phase = len(_phase,parameters)
-                def fn(t, args):
-                    return _op(_freq * t + _phase(args[0:nparam_phase]))
-
-                fn.parameters = _phase.parameters
-            else:
-                def fn(t, args):
-                    return _op(_freq * t + _phase)
-
-                fn.parameters = ()
+        if isinstance(_phase, Parameter):
+            fn = CallableCoefficient(lambda t, args: _op(_freq(args[0:nparam]) * t + args[nparam])
+                                     _freq.parameters + (_phase.name,))
+        elif isinstance(_phase, ParameterFn):
+            fn = CallableCoefficient(lambda t, args: _op(_freq(args[0:nparam]) * t
+                                                              + _phase(args[nparam:]))
+                                     _freq.parameters + _phase.parameters)
+        else:
+            fn = CallableCoefficient(lambda t, args: _op(_freq(args) * t + _phase),
+                                     _freq.parameters)
     else:
-        if isinstance(_freq, Parameter):
-            if isinstance(_phase, Parameter):
-                def fn(t, args):
-                    return _op(args[_freq.name] * t + args[_phase.name])
-            elif isinstance(_phase, ParameterFn):
-                def fn(t, args):
-                    return _op(args[_freq.name] * t + _phase(args))
-            else:
-                def fn(t, args):
-                    return _op(args[_freq.name] * t + _phase)
-
-        elif isinstance(_freq, ParameterFn):
-            if isinstance(_phase, Parameter):
-                def fn(t, args):
-                    return _op(_freq(args) * t + args[_phase.name])
-            elif isinstance(_phase, ParameterFn):
-                def fn(t, args):
-                    return _op(_freq(args) * t + _phase(args))
-            else:
-                def fn(t, args):
-                    return _op(_freq(args) * t + _phase)
-
+        if isinstance(_phase, Parameter):
+            fn = CallableCoefficient(lambda t, args: _op(_freq * t + args[0]),
+                                     (_phase.name,))
+        elif isinstance(_phase, ParameterFn):
+            fn = CallableCoefficient(lambda t, args: _op(_freq * t + _phase(args)),
+                                     _phase.parameters)
         else:
-            if isinstance(_phase, Parameter):
-                def fn(t, args):
-                    return _op(_freq * t + args[_phase.name])
-            elif isinstance(_phase, Parameter):
-                def fn(t, args):
-                    return _op(_freq * t + _phase(args))
-            else:
-                def fn(t, args):
-                    return _op(_freq * t + _phase)
+            fn = CallableCoefficient(lambda t, args: _op(_freq * t + _phase))
 
     return fn
 
@@ -155,32 +113,16 @@ def constant_function(
 ) -> CallableCoefficient:
     """`value`"""
     if isinstance(value, Parameter):
-        if config.pulse_sim_solver == 'jax':
-            def fn(t, args):
-                return args[0]
-
-            fn.parameters = (value.name,)
-        else:
-            def fn(t, args):
-                return args[value.name]
-
-        return fn
+        fn = CallableCoefficient(lambda t, args: args[0], (value.name,))
 
     elif isinstance(value, ParameterFn):
-        if config.pulse_sim_solver == 'jax':
-            nparams = len(value.parameters)
+        nparams = len(value.parameters)
+        fn = CallableCoefficient(lambda t, args: value(args), value.parameters)
 
-            def fn(t, args):
-                return value(args[0:nparams])
-
-            fn.parameters = value.parameters
-        else:
-            def fn(t, args):
-                return value(args)
-
-        return fn
     else:
-        return lambda t, args: value
+        fn = CallableCoefficient(lambda t, args: value)
+
+    return fn
 
 def scaled_function(
     scale: Union[float, complex, Parameter],
@@ -188,19 +130,12 @@ def scaled_function(
 ) -> CallableCoefficient:
     """`scale * fn(t, args)`"""
     if isinstance(scale, Parameter):
-        if config.pulse_sim_solver == 'jax':
-            def scaled_fn(t, args):
-                return args[0] * fn(t, args[1:])
-
-            scaled_fn.parameters = (scale.name,) + fn.parameters
-        else:
-            def scaled_fn(t, args):
-                return args[scale.name] * fn(t, args)
-
-        return scaled_fn
-
+        scaled_fn = CallableCoefficient(lambda t, args: args[0] * fn(t, args[1:]),
+                                        (scale.name,) + fn.parameters)
     else:
-        return lambda t, args: scale * fn(t, args)
+        scaled_fn = CallableCoefficient(lambda t, args: scale * fn(t, args), fn.parameters)
+
+    return scaled_fn
 
 def prod_function(
     fn1: CallableCoefficient,
@@ -224,16 +159,9 @@ def diff_function(
     return _binary_function(fn1, fn2, config.npmod.subtract)
 
 def _binary_function(_fn1, _fn2, _op):
-    if config.pulse_sim_solver == 'jax':
-        def fn(t, args):
-            return _op(_fn1(t, args), _fn2(t, args))
-
-        fn.parameters = _fn1.parameters + _fn2.parameters
-
-        return fn
-
-    else:
-        return lambda t, args: _op(_fn1(t, args), _fn2(t, args))
+    nparam1 = len(_fn1.parameters)
+    return CallableCoefficient(lambda t, args: _op(_fn1(t, args[:nparam1]), _fn2(t, args[nparam1:])),
+                               _fn1.parameters + _fn2.parameters)
 
 def conj_function(
     fn: CallableCoefficient
@@ -255,16 +183,7 @@ def abs_function(fn):
 
 def _unary_function(_fn, _op):
     """`fn(t, args).conjugate()`"""
-    if config.pulse_sim_solver == 'jax':
-        def fn(t, args):
-            return _op(_fn(t, args))
-
-        fn.parameters = _fn.parameters
-
-        return fn
-
-    else:
-        return lambda t, args: _op(_fn(t, args))
+    return CallableCoefficient(lambda t, args: _op(_fn(t, args)), _fn.parameters)
 
 
 @dataclass(frozen=True)
@@ -315,15 +234,8 @@ class DriveTerm:
 
     def _generate_fn_rwa(self, amplitude, frame_frequency, drive_base):
         if isinstance(self.frequency, Parameter):
-            if config.pulse_sim_solver == 'jax':
-                detuning = ParameterFn(lambda args: args[0] - frame_frequency,
-                                       parameters=(self.frequency.name,))
-
-                negative_detuning = ParameterFn(lambda args: frame_frequency - args[0],
-                                                    parameters=(self.frequency.name,))
-            else:
-                detuning = ParameterFn(lambda args: args[self.frequency.name] - frame_frequency)
-                negative_detuning = ParameterFn(lambda args: frame_frequency - args[self.frequency.name])
+            detuning = ParameterFn(lambda args: args[0] - frame_frequency, (self.frequency.name,))
+            negative_detuning = ParameterFn(lambda args: frame_frequency - args[0], (self.frequency.name,))
 
             is_resonant = False
         else:
@@ -422,11 +334,7 @@ class DriveTerm:
             else:
                 drive_base_phase = np.angle(drive_base)
                 if isinstance(self.constant_phase, Parameter):
-                    if config.pulse_sim_solver == 'jax':
-                        phase = ParameterFn(lambda args: drive_base_phase + args[0],
-                                            parameters=(self.constant_phase.name,))
-                    else:
-                        phase = ParameterFn(lambda args: drive_base_phase + args[self.constant_phase.name])
+                    phase = ParameterFn(lambda args: drive_base_phase + args[0], (self.constant_phase.name,))
                 else:
                     phase = drive_base_phase + self.constant_phase
 
@@ -441,10 +349,7 @@ class DriveTerm:
         lab_frame = (frame_frequency == 0.)
 
         if isinstance(self.frequency, Parameter):
-            if config.pulse_sim_solver == 'jax':
-                negative_frequency = ParameterFn(lambda args: -args[0], parameters=(self.frequency.name,))
-            else:
-                negative_frequency = ParameterFn(lambda args: -args[self.frequency.name])
+            negative_frequency = ParameterFn(lambda args: -args[0], (self.frequency.name,))
         else:
             negative_frequency = -self.frequency
 
@@ -498,11 +403,7 @@ class DriveTerm:
             else:
                 drive_base_phase = np.angle(drive_phase)
                 if isinstance(self.constant_phase, Parameter):
-                    if config.pulse_sim_solver == 'jax':
-                        phase = ParameterFn(lambda args: drive_base_phase + args[0],
-                                            parameters=(self.constant_phase.name,))
-                    else:
-                        phase = ParameterFn(lambda args: drive_base_phase + args[self.constant_phase.name])
+                    phase = ParameterFn(lambda args: drive_base_phase + args[0], (self.constant_phase.name,))
                 else:
                     phase = drive_base_phase + self.constant_phase
 
