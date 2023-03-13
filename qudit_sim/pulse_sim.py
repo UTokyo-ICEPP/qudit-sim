@@ -27,12 +27,11 @@ TList = Union[np.ndarray, Tuple[int, int], Dict[str, Union[int, float]]]
 EOps = Sequence[qtp.Qobj]
 
 def pulse_sim(
-    hgen: Union[HamiltonianBuilder, List[HamiltonianBuilder]],
+    hgen: HamiltonianBuilder,
     tlist: Union[TList, List[TList]] = (10, 100),
     psi0: Optional[Union[qtp.Qobj, List[qtp.Qobj]]] = None,
-    args: Optional[Any] = None,
+    args: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
     e_ops: Optional[Union[EOps, List[EOps]]] = None,
-    keep_callable: Optional[Union[bool, List[bool]]] = None,
     final_only: bool = False,
     reunitarize: bool = True,
     interval_len: int = 1000,
@@ -92,9 +91,6 @@ def pulse_sim(
         psi0: Initial state Qobj. Defaults to the identity operator appropriate for the given Hamiltonian.
         args: Second parameter passed to drive amplitude functions (if callable).
         e_ops: List of observables passed to the QuTiP solver.
-        keep_callable: Keep callable time-dependent Hamiltonian coefficients. Otherwise all callable coefficients
-            are converted to arrays before simulation execution for efficiency (no loss of accuracy observed so far).
-            Defaults to False for qutip solver and True for jax solver.
         final_only: Throw away intermediate states and expectation values to save memory. Due to implementation details,
             implies ``unitarize_evolution=True``.
         reunitarize: Whether to reunitarize the time evolution matrices.
@@ -114,12 +110,10 @@ def pulse_sim(
     zip_list = []
 
     parallel_params = [
-        (hgen, HamiltonianBuilder),
         (tlist, (np.ndarray, tuple, dict)),
         (psi0, qtp.Qobj),
-        (args, None),
+        (args, dict),
         (e_ops, Sequence),
-        (keep_callable, bool),
         (final_only, bool),
         (reunitarize, bool),
         (interval_len, int)
@@ -149,7 +143,8 @@ def pulse_sim(
                 zip_list[iparam] = [param] * num_tasks
 
         args = list(zip(*zip_list))
-
+        arg_position = list(range(1, len(zip_list) + 1))
+        common_args = (hgen,)
         common_kwargs = {'options': options}
 
         if save_result_to:
@@ -170,7 +165,8 @@ def pulse_sim(
         thread_based = config.pulse_sim_solver == 'jax'
 
         result = parallel_map(_run_single, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
-                              common_kwargs=common_kwargs, log_level=log_level, thread_based=thread_based)
+                              common_args=common_args, common_kwargs=common_kwargs,
+                              arg_position=arg_position, log_level=log_level, thread_based=thread_based)
 
     logger.setLevel(original_log_level)
 
@@ -181,9 +177,8 @@ def _run_single(
     hgen: HamiltonianBuilder,
     tlist: TList,
     psi0: Union[qtp.Qobj, None],
-    args: Any,
+    args: Dict[str, Any],
     e_ops: Union[EOps, None],
-    keep_callable: Union[bool, None],
     final_only: bool,
     reunitarize: bool,
     interval_len: int,
@@ -221,7 +216,7 @@ def _run_single(
     ## Run the simulation or exponentiate the static Hamiltonian
 
     if any(len(d) > 0 for d in hgen.drive().values()):
-        states, expect = _simulate_drive(lab_hgen, tlist, calculator, args, keep_callable,
+        states, expect = _simulate_drive(lab_hgen, tlist, calculator, args,
                                          final_only, reunitarize, interval_len, options, logger)
 
     else:
@@ -297,8 +292,7 @@ def _simulate_drive(
     hgen: HamiltonianBuilder,
     tlist: np.ndarray,
     calculator: StatesAndExpectations,
-    args: Any,
-    keep_callable: Union[bool, None],
+    args: Dict[str, Any],
     final_only: bool,
     reunitarize: bool,
     interval_len: int,
@@ -307,17 +301,7 @@ def _simulate_drive(
 ):
     """Simulate the time evolution under a dynamic drive using qutip.sesolve."""
     ## Build the Hamiltonian
-
-    if keep_callable is None:
-        if config.pulse_sim_solver == 'jax':
-            keep_callable = True
-        else:
-            keep_callable = False
-
-    if keep_callable:
-        hamiltonian = hgen.build()
-    else:
-        hamiltonian = hgen.build(tlist=tlist, args=args)
+    hamiltonian = hgen.build(tlist=tlist, args=args)
 
     identity = hgen.identity_op()
 
