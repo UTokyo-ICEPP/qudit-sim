@@ -8,12 +8,12 @@ Drive Hamiltonian (:mod:`qudit_sim.drive`)
 See :ref:`drive-hamiltonian` for theoretical background.
 """
 
-from typing import Callable, Optional, Union, Tuple
+from typing import Callable, Optional, Union, Tuple, List, Any
 from dataclasses import dataclass
 import warnings
 import numpy as np
 
-from .time_function import ParameterExpression, Parameter, TimeFunction
+from .expression import ParameterExpression, Parameter, TimeFunction, ArrayType
 from .config import config
 
 HamiltonianCoefficient = Union[str, ArrayType, TimeFunction]
@@ -27,7 +27,8 @@ class DriveTerm:
         amplitude: Function :math:`r(t)`.
         constant_phase: The phase value of `amplitude` when it is a str or a callable and is known to have
             a constant phase. None otherwise.
-        sequence: Drive sequence. If this argument is present and not None, all other arguments are ignored.
+        sequence: Drive sequence. If this argument is present and not None, all other arguments are ignored,
+            except when the sequence does not start with SetFrequency and frequency is not None.
     """
     def __init__(
         self,
@@ -37,10 +38,15 @@ class DriveTerm:
         sequence: Optional[List[Any]] = None
     ):
         if sequence is None:
+            if frequency is None or amplitude is None:
+                raise RuntimeError('Frequency and amplitude must be set if not using a PulseSequence.')
+
             self._sequence = [SetFrequency(frequency), amplitude]
             self.constant_phase = constant_phase
         else:
-            self._sequence = sequence
+            self._sequence = list(sequence)
+            if frequency is not None and not isinstance(self._sequence[0], SetFrequency):
+                self._sequence.insert(0, SetFrequency(frequency))
 
     def generate_fn(
         self,

@@ -11,7 +11,7 @@ opted for an original lightweight implementation because the represented functio
 be pure to be compatible with JAX odeint.
 """
 
-from typing import Callable, Optional, Union, Tuple
+from typing import Callable, Optional, Union, Tuple, Dict, Any
 from numbers import Number
 from abc import ABC
 
@@ -29,22 +29,22 @@ ArgsType = Union[Dict[str, Any], Tuple[Any, ...]]
 ReturnType = Union[complex, ArrayType]
 
 class Expression(ABC):
-    def __add__(self, other: Union[Expression, array_like]):
+    def __add__(self, other: Union['Expression', array_like]):
         return type(self)._binary_op(self, other, config.npmod.add)
 
-    def __sub__(self, other: Union[Expression, array_like]):
+    def __sub__(self, other: Union['Expression', array_like]):
         return type(self)._binary_op(self, other, config.npmod.subtract)
 
-    def __mul__(self, other: Union[Expression, array_like]):
+    def __mul__(self, other: Union['Expression', array_like]):
         return self._binary_op(self, other, config.npmod.multiply)
 
-    def __radd__(self, other: Union[Expression, array_like]):
+    def __radd__(self, other: Union['Expression', array_like]):
         return self.__add__(other)
 
-    def __rsub__(self, other: Union[Expression, array_like]):
+    def __rsub__(self, other: Union['Expression', array_like]):
         return (-self).__add__(other)
 
-    def __rmul__(self, other: Union[Expression, array_like]):
+    def __rmul__(self, other: Union['Expression', array_like]):
         return self.__mul__(other)
 
     def __abs__(self):
@@ -67,18 +67,18 @@ class Expression(ABC):
     @classmethod
     def _binary_op(
         cls,
-        lexpr: Expression,
-        rexpr: Union[Expression, array_like],
+        lexpr: 'Expression',
+        rexpr: Union['Expression', array_like],
         op: Callable
-    ) -> Expression:
+    ) -> 'Expression':
         raise NotImplementedError('To be implemented in subclasses.')
 
     @classmethod
     def _unary_op(
         cls,
-        expr: Expression,
+        expr: 'Expression',
         op: Callable
-    ) -> Expression:
+    ) -> 'Expression':
         raise NotImplementedError('To be implemented in subclasses.')
 
 
@@ -89,10 +89,10 @@ class ParameterExpression(Expression):
     @classmethod
     def _binary_op(
         cls,
-        lexpr: ParameterExpression,
-        rexpr: Union[ParameterExpression, array_like],
+        lexpr: 'ParameterExpression',
+        rexpr: Union['ParameterExpression', array_like],
         op: Callable
-    ) -> ParameterExpression:
+    ) -> 'ParameterExpression':
         if isinstance(rexpr, ParameterExpression):
             def fn(args):
                 l_num_params = len(lexpr.parameters)
@@ -115,9 +115,9 @@ class ParameterExpression(Expression):
     @classmethod
     def _unary_op(
         cls,
-        expr: ParameterExpression,
+        expr: 'ParameterExpression',
         op: Callable
-    ) -> ParameterExpression:
+    ) -> 'ParameterExpression':
         def fn(args):
             return op(lexpr.evaluate(args))
 
@@ -173,14 +173,14 @@ class ParameterFunction(ParameterExpression):
     def __str__(self):
         return f'ParameterFunction({", ".join(self.parameters)})'
 
-    def evaluate(self, args: Optional[ArgsType] = None)
+    def evaluate(self, args: Optional[ArgsType] = None):
         return self.fn(args)
 
 
 class TimeFunction(Expression):
     def __init__(
         self,
-        fn: Callable[[TimeType, Tuple[Any, ...]], ReturnType]
+        fn: Callable[[TimeType, Tuple[Any, ...]], ReturnType],
         parameters: Optional[Tuple[str, ...]] = None,
         tzero: float = 0.
     ):
@@ -204,10 +204,10 @@ class TimeFunction(Expression):
     @classmethod
     def _binary_op(
         cls,
-        lexpr: TimeFunction,
-        rexpr: Union[TimeFunction, array_like],
+        lexpr: 'TimeFunction',
+        rexpr: Union['TimeFunction', array_like],
         op: Callable
-    ) -> TimeFunction:
+    ) -> 'TimeFunction':
         if isinstance(rexpr, TimeFunction):
             if lexpr.tzero != rexpr.tzero:
                 raise ValueError('Binary operation on TimeFunctions with inconsistent tzeros')
@@ -249,9 +249,9 @@ class TimeFunction(Expression):
     @classmethod
     def _unary_op(
         cls,
-        expr: TimeFunction,
+        expr: 'TimeFunction',
         op: Callable
-    ) -> TimeFunction:
+    ) -> 'TimeFunction':
         def fn(t, args=()):
             return op(lexpr.__call__(t, args))
 

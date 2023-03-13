@@ -14,8 +14,8 @@ import copy
 import numpy as np
 import qutip as qtp
 
-from .pulse import PulseSequence, SetFrequency
-from .drive import DriveTerm, cos_freq, sin_freq
+from .pulse import PulseSequence
+from .drive import DriveTerm, CosFunction, SinFunction, SetFrequency
 
 @dataclass(frozen=True)
 class Frame:
@@ -659,7 +659,7 @@ class HamiltonianBuilder:
         frequency: Optional[float] = None,
         amplitude: Union[float, complex, str, np.ndarray, Callable, None] = 1.+0.j,
         constant_phase: Optional[float] = None,
-        sequence: Optional[PulseSequence] = None
+        sequence: Optional[List[Any]] = None
     ) -> None:
         r"""Add a drive term.
 
@@ -672,18 +672,10 @@ class HamiltonianBuilder:
                 constant phase. None otherwise. Ignored if ``sequence`` is set.
             sequence: Pulse sequence of the drive.
         """
-        if sequence is not None:
-            drive = PulseSequence(sequence)
-            if frequency is not None:
-                drive.insert(0, SetFrequency(frequency))
-
-        else:
-            if frequency is None or amplitude is None:
-                raise RuntimeError('Frequency and amplitude must be set if not using a PulseSequence.')
-
-            drive = DriveTerm(frequency=frequency, amplitude=amplitude, constant_phase=constant_phase)
-
-        self._drive[qudit_id].append(drive)
+        self._drive[qudit_id].append(
+            DriveTerm(frequency=frequency, amplitude=amplitude, constant_phase=constant_phase,
+                      sequence=sequence)
+        )
 
     def clear_drive(self) -> None:
         """Remove all drives."""
@@ -698,7 +690,6 @@ class HamiltonianBuilder:
         """Return the list of Hamiltonian terms passable to qutip.sesolve.
 
         Args:
-
             tlist: If not None, all callable Hamiltonian coefficients are called with `(tlist, args)` and the
                 resulting arrays are instead passed to sesolve.
             args: Arguments to the callable coefficients.

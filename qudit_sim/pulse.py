@@ -10,14 +10,15 @@ Classes in this module represent pulse envelopes. Subclasses of Pulse can be pas
 class (``sequence`` parameter).
 """
 
-from typing import List, Union, Optional, Any, Sequence, Callable
+from typing import List, Union, Optional, Any, Sequence, Callable, Tuple
 from numbers import Number
 import copy
 from dataclasses import dataclass
 import numpy as np
 import jax.numpy as jnp
 
-from .expression import ParameterExpression, Constant, Parameter, TimeFunction, ArrayType, array_like
+from .expression import (ParameterExpression, Constant, Parameter, TimeFunction,
+                         ArrayType, array_like, ReturnType)
 from .config import config
 
 class PulseSequence(list):

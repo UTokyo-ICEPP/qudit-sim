@@ -1,6 +1,9 @@
 """Global configuration parameters."""
 import threading
+import warnings
 import numpy as np
+from jax.config import config as jax_config
+jax_config.update('jax_enable_x64', True)
 import jax
 import jax.numpy as jnp
 
@@ -16,6 +19,12 @@ class Config:
         self._local = threading.local()
         self._local.jax_devices = list(range(jax.local_device_count()))
 
+        # Check 64-bit float support
+        if jnp.array([0.], dtype=jnp.float64).dtype is not jnp.dtype('float64'):
+            warnings.warn('The current device backend does not support 64-bit arithmetic, '
+                          'or JAX was already configured in 32 bits. It is advised not to '
+                          'set config.pulse_sim_solver to "jax".')
+
     @property
     def jax_devices(self):
         if self._local.jax_devices is None:
@@ -29,9 +38,9 @@ class Config:
 
     @property
     def npmod(self):
-        if self.pulse_sim_solver = 'qutip':
+        if self.pulse_sim_solver == 'qutip':
             return np
-        elif self.pulse_sim_solver = 'jax':
+        elif self.pulse_sim_solver == 'jax':
             return jnp
         else:
             raise ValueError(f'Invalid value for config.pulse_sim_solver: {self.pulse_sim_solver}')
