@@ -9,11 +9,14 @@ See :ref:`drive-hamiltonian` for theoretical background.
 """
 
 from typing import Callable, Optional, Union, Tuple, List, Any
+from numbers import Number
+import copy
 from dataclasses import dataclass
 import warnings
 import numpy as np
 
 from .expression import ParameterExpression, Parameter, TimeFunction, ArrayType
+from .pulse import Pulse
 from .config import config
 
 HamiltonianCoefficient = Union[str, ArrayType, TimeFunction]
@@ -48,12 +51,31 @@ class DriveTerm:
             if frequency is not None and not isinstance(self._sequence[0], SetFrequency):
                 self._sequence.insert(0, SetFrequency(frequency))
 
+            self.constant_phase = None
+
+    @property
+    def frequency(self) -> Union[float, Parameter, None]:
+        frequencies = set(inst.value for inst in self._sequence if isinstance(inst, SetFrequency))
+        if len(frequencies) == 1:
+            return frequencies.pop()
+        else:
+            # Unique frequency cannot be defined
+            return None
+
+    @property
+    def amplitude(self) -> Union[float, complex, str, np.ndarray, Parameter, Callable, None]:
+        if len(self._sequence) == 2:
+            return self._sequence[1]
+        else:
+            # Unique amplitude cannot be defined
+            return None
+
     def generate_fn(
         self,
         frame_frequency: float,
         drive_base: complex,
         rwa: bool
-    ) -> Tuple[HamiltonianCoefficient, Union[HamiltonianCoefficient, None]]:
+    ) -> Tuple[HamiltonianCoefficient, HamiltonianCoefficient]:
         r"""Generate the coefficients for X and Y drives.
 
         Args:
@@ -104,8 +126,9 @@ class DriveTerm:
                     except:
                         pass
 
-                fn_x, fn_y = generate_single(inst, frequency, frame_frequency, drive_base * np.exp(-1.j * phase_offset),
-                                             time, self.constant_phase)
+                fn_x, fn_y = generate_single(inst, frequency, frame_frequency,
+                                             drive_base * np.exp(-1.j * phase_offset), time,
+                                             self.constant_phase)
                 funclist.append((time, fn_x, fn_y))
 
                 if isinstance(inst, Pulse):
@@ -115,7 +138,7 @@ class DriveTerm:
                     time = np.inf
                     break
 
-        timelist.append((time, None, None))
+        funclist.append((time, None, None))
 
         if len(funclist) == 1:
             raise ValueError('No drive amplitude specified')
@@ -125,24 +148,20 @@ class DriveTerm:
             fn_y = funclist[0][2]
 
         elif all(isinstance(func, TimeFunction) for _, func, _ in funclist[:-1]):
-            timelist = list(t for t, _, _ in funclist)
-            xlist = list(x for _, x, _ in funclist[:-1])
-            ylist = list(y for _, _, y in funclist[:-1])
-
             npmod = config.npmod
 
             def fn_x(t, args):
                 result = 0.
                 for time, func, _ in funclist[:-1]:
                     result = npmod.where(t > time, func(t, args), result)
-                result = npmod.where(t > timelist[-1], 0., result)
+                result = npmod.where(t > funclist[-1][0], 0., result)
                 return result
 
             def fn_y(t, args):
                 result = 0.
                 for time, _, func in funclist[:-1]:
                     result = npmod.where(t > time, func(t, args), result)
-                result = npmod.where(t > timelist[-1], 0., result)
+                result = npmod.where(t > funclist[-1][0], 0., result)
                 return result
 
         elif all(isinstance(func, np.ndarray) for _, func, _ in funclist[:-1]):
@@ -150,13 +169,14 @@ class DriveTerm:
             fn_y = np.concatenate(list(y for _, _, y in funclist[:-1]))
 
         else:
+            print(str(funclist[0][1]), str(funclist[1][1]))
             raise ValueError('Cannot generate a Hamiltonian coefficient from amplitude types'
                              f' {list(type(func) for _, func, _ in funclist[:-1])}')
 
         return fn_x, fn_y
 
 
-def _generate_single_rwa(self, amplitude, frequency, frame_frequency, drive_base, tzero, constant_phase=None):
+def _generate_single_rwa(amplitude, frequency, frame_frequency, drive_base, tzero, constant_phase=None):
     detuning = frequency - frame_frequency
 
     if isinstance(frequency, Parameter):
@@ -244,7 +264,7 @@ def _generate_single_rwa(self, amplitude, frequency, frame_frequency, drive_base
         raise TypeError(f'Unsupported amplitude type f{type(amplitude)}')
 
 
-def _generate_single_full(self, amplitude, frequency, frame_frequency, drive_base, tzero, constant_phase=None):
+def _generate_single_full(amplitude, frequency, frame_frequency, drive_base, tzero, constant_phase=None):
     if isinstance(amplitude, (float, complex, Parameter)):
         # static envelope
         double_envelope = amplitude * 2. * drive_base
@@ -309,7 +329,7 @@ def _generate_single_full(self, amplitude, frequency, frame_frequency, drive_bas
 
     if isinstance(labframe_fn, str):
         if frame_frequency == 0.:
-            return labframe_fn, ConstantFunction(0.)
+            return labframe_fn, ''
         else:
             return (f'{labframe_fn} * cos({frame_frequency} * t)',
                     f'{labframe_fn} * sin({frame_frequency} * t)')
@@ -324,12 +344,20 @@ def _generate_single_full(self, amplitude, frequency, frame_frequency, drive_bas
 class ConstantFunction(TimeFunction):
     def __init__(
         self,
-        value: ParameterExpression
+        value: Union[Number, ParameterExpression]
     ):
-        def fn(t, args):
-            return value.evaluate(args)
+        if isinstance(value, Number):
+            def fn(t, args):
+                return value
 
-        super().__init__(fn, value.parameters)
+            parameters = ()
+        else:
+            def fn(t, args):
+                return value.evaluate(args)
+
+            parameters = value.parameters
+
+        super().__init__(fn, parameters)
 
 
 class OscillationFunction(TimeFunction):
@@ -364,7 +392,7 @@ class OscillationFunction(TimeFunction):
 
                 super().__init__(fn, ())
 
-def CosFunction(OscillationFunction):
+class CosFunction(OscillationFunction):
     def __init__(
         self,
         frequency: Union[float, ParameterExpression],
@@ -372,15 +400,15 @@ def CosFunction(OscillationFunction):
     ):
         super().__init__(config.npmod.cos, frequency, phase)
 
-def SinFunction(OscillationFunction):
+class SinFunction(OscillationFunction):
     def __init__(
         self,
         frequency: Union[float, ParameterExpression],
         phase: Union[float, ParameterExpression] = 0.
     ):
-        super().__init__(config.npmod.cos, frequency, phase)
+        super().__init__(config.npmod.sin, frequency, phase)
 
-def ExpFunction(OscillationFunction):
+class ExpFunction(OscillationFunction):
     @staticmethod
     def _op(x):
         return config.npmod.cos(x) + 1.j * config.npmod.sin(x)
@@ -395,7 +423,7 @@ def ExpFunction(OscillationFunction):
 @dataclass(frozen=True)
 class ShiftFrequency:
     """Frequency shift in rad/s."""
-    value: float
+    value: Union[float, Parameter]
 
 @dataclass(frozen=True)
 class ShiftPhase:
@@ -405,7 +433,7 @@ class ShiftPhase:
 @dataclass(frozen=True)
 class SetFrequency:
     """Frequency setting in rad/s."""
-    value: float
+    value: Union[float, Parameter]
 
 @dataclass(frozen=True)
 class SetPhase:

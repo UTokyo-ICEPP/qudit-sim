@@ -35,20 +35,6 @@ class PulseSequence(list):
         d += sum(inst.duration for inst in self if isinstance(inst, Pulse))
         return d
 
-    @property
-    def frequency(self):
-        frequency = 0.
-        max_frequency = 0.
-        for inst in self:
-            if isinstance(inst, ShiftFrequency):
-                frequency += inst.value
-                max_frequency = max(max_frequency, frequency)
-            elif isinstance(inst, SetFrequency):
-                frequency = inst.value
-                max_frequency = max(max_frequency, frequency)
-
-        return max_frequency
-
     def __str__(self):
         return f'PulseSequence([{", ".join(str(inst) for inst in self)}])'
 
@@ -135,7 +121,7 @@ class Gaussian(Pulse):
         tzero: float = 0.
     ):
         if isinstance(amp, Number):
-            self.amp = ConstantExpression(complex(amp))
+            self.amp = Constant(complex(amp))
         else:
             self.amp = amp
 
@@ -147,10 +133,10 @@ class Gaussian(Pulse):
             self.center = center
 
         if zero_ends:
-            assert np.isclose(self.center, self.duration * 0.5), \
+            assert np.isclose(self.center, duration * 0.5), \
                 'Zero-ended Gaussian must be centered'
 
-            x = self.duration * 0.5 / self.sigma
+            x = duration * 0.5 / self.sigma
             self._pedestal = np.exp(-np.square(x) * 0.5)
         else:
             self._pedestal = 0.
@@ -233,14 +219,20 @@ class GaussianSquare(Pulse):
             self.gauss_fall = None
             fall_tail = dummy_fn
 
+        npmod = config.npmod
+
         def fn(t, args):
             return npmod.where(
-                t <= self.t_plateau,
-                rise_edge(t, args),
+                np.asarray(t <= 0.) | np.asarray(t > duration),
+                0.,
                 npmod.where(
-                    t <= self.t_plateau + self.width,
-                    self.amp.evaluate(args),
-                    fall_tail(t, args)
+                    t <= self.t_plateau,
+                    rise_edge(t, args),
+                    npmod.where(
+                        t <= self.t_plateau + self.width,
+                        self.amp.evaluate(args),
+                        fall_tail(t, args),
+                    )
                 )
             )
 

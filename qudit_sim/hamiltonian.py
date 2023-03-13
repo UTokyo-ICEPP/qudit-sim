@@ -9,12 +9,12 @@ See :doc:`/hamiltonian` for theoretical background.
 """
 
 from typing import Any, Dict, Sequence, List, Tuple, Callable, Optional, Union, Hashable
+from numbers import Number
 from dataclasses import dataclass
 import copy
 import numpy as np
 import qutip as qtp
 
-from .pulse import PulseSequence
 from .drive import DriveTerm, CosFunction, SinFunction, SetFrequency
 
 @dataclass(frozen=True)
@@ -861,7 +861,7 @@ class HamiltonianBuilder:
             ch_params = self._qudit_params[channel]
 
             for drive in drives:
-                if not isinstance(drive, PulseSequence) and isinstance(drive.amplitude, np.ndarray) and tlist is None:
+                if isinstance(drive.amplitude, np.ndarray) and tlist is None:
                     raise RuntimeError('Time points array is needed to build a Hamiltonian with array-based drive.')
 
                 # Loop over the driven operators
@@ -875,13 +875,13 @@ class HamiltonianBuilder:
                         # This qudit gets no drive
                         continue
 
-                    # Hamiltonian term can be split in xy (static and/or real envelope) or creation/annihilation (otherwise)
+                    # Generate the potentially time-dependent Hamiltonian coefficients
                     fn_x, fn_y = drive.generate_fn(frame_frequency, drive_base, self.use_rwa)
 
                     h_x = creation_op + creation_op.dag()
                     h_y = 1.j * (creation_op - creation_op.dag())
 
-                    if isinstance(fn_x, (float, complex)):
+                    if isinstance(fn_x, Number):
                         hstatic += fn_x * h_x
                         hstatic += fn_y * h_y
 
@@ -897,14 +897,13 @@ class HamiltonianBuilder:
                             hdrive.append([h_y, fn_y])
 
                     else:
+                        # Callable coefficient
                         if tlist is None:
                             hdrive.append([h_x, fn_x])
-                            if fn_y is not None:
-                                hdrive.append([h_y, fn_y])
+                            hdrive.append([h_y, fn_y])
                         else:
                             hdrive.append([h_x, fn_x(tlist, args)])
-                            if fn_y is not None:
-                                hdrive.append([h_y, fn_y(tlist, args)])
+                            hdrive.append([h_y, fn_y(tlist, args)])
 
         if np.any(hstatic.data.data):
             hdrive.insert(0, hstatic)
@@ -1005,55 +1004,3 @@ class HamiltonianBuilder:
         instance._frame.update(self._frame.items())
 
         return instance
-
-    def make_scan(
-        self,
-        scan_type: str,
-        values: Sequence,
-        **kwargs
-    ) -> List['HamiltonianBuilder']:
-        """Build a list of copies of self varied over a single attribute.
-
-        The argument ``scan_type`` determines which attribute to make variations over. Implemented scan types are
-        - ``'amplitude'``: Drive amplitudes. Elements of ``values`` are passed to the ``amplitude`` parameter of ``add_drive``.
-        - ``'sequence'``: Pulse sequences. Elements of ``values`` are passed to the ``sequence`` parameter of ``add_drive``.
-        - ``'frequency'``: Drive frequencies. Elements of ``values`` are passed to the ``frequency`` parameter of ``add_drive``.
-        - ``'coupling'``: Qudit-qudit couplings. Elements of ``values`` are passed to the ``value`` parameter of ``add_coupling``.
-
-        In all cases, the remaining arguments to the respective functions must be given in the ``kwargs`` of this method.
-
-        Args:
-            scan_type: ``'amplitude'``, ``'sequence'``, ``'frequency'``, or ``'coupling'``.
-            values: A list of values. One copy of self is created for each value.
-            kwargs: Remaining arguments to the function to be called on each copy.
-
-        Returns:
-            A list of copies of self varied over the specified attribute.
-        """
-        copies = list(self.copy() for _ in range(len(values)))
-
-        if scan_type == 'amplitude':
-            for value, instance in zip(values, copies):
-                instance.add_drive(qudit_id=kwargs['qudit_id'],
-                                   frequency=kwargs.get('frequency'),
-                                   amplitude=value,
-                                   constant_phase=kwargs.get('constant_phase'))
-
-        elif scan_type == 'sequence':
-            for value, instance in zip(values, copies):
-                instance.add_drive(qudit_id=kwargs['qudit_id'],
-                                   frequency=kwargs.get('frequency'),
-                                   sequence=value)
-
-        elif scan_type == 'frequency':
-            for value, instance in zip(values, copies):
-                instance.add_drive(qudit_id=kwargs['qudit_id'],
-                                   frequency=value,
-                                   amplitude=kwargs.get('amplitude', 1.+0.j),
-                                   constant_phase=kwargs.get('constant_phase'))
-
-        elif scan_type == 'coupling':
-            for value, instance in zip(values, copies):
-                instance.add_coupling(q1=kwargs['q1'], q2=kwargs['q2'], value=value)
-
-        return copies

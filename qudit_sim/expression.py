@@ -36,7 +36,7 @@ class Expression(ABC):
         return type(self)._binary_op(self, other, config.npmod.subtract)
 
     def __mul__(self, other: Union['Expression', array_like]):
-        return self._binary_op(self, other, config.npmod.multiply)
+        return type(self)._binary_op(self, other, config.npmod.multiply)
 
     def __radd__(self, other: Union['Expression', array_like]):
         return self.__add__(other)
@@ -48,21 +48,21 @@ class Expression(ABC):
         return self.__mul__(other)
 
     def __abs__(self):
-        return self._unary_op(config.npmod.abs)
+        return type(self)._unary_op(self, config.npmod.abs)
 
     def __neg__(self):
-        return self._unary_op(config.npmod.negative)
+        return type(self)._unary_op(self, config.npmod.negative)
 
     def conjugate(self):
-        return self._unary_op(config.npmod.conjugate)
+        return type(self)._unary_op(self, config.npmod.conjugate)
 
     @property
     def real(self):
-        return self._unary_op(config.npmod.real)
+        return type(self)._unary_op(self, config.npmod.real)
 
     @property
     def imag(self):
-        return self._unary_op(config.npmod.imag)
+        return type(self)._unary_op(self, config.npmod.imag)
 
     @classmethod
     def _binary_op(
@@ -83,7 +83,10 @@ class Expression(ABC):
 
 
 class ParameterExpression(Expression):
-    def evaluate(self, args):
+    def subs(self, args: Dict[str, Any]):
+        raise NotImplementedError('To be implemented in subclasses.')
+
+    def evaluate(self, args: Tuple[Any, ...]):
         raise NotImplementedError('To be implemented in subclasses.')
 
     @classmethod
@@ -103,7 +106,7 @@ class ParameterExpression(Expression):
 
             return ParameterFunction(fn, lexpr.parameters + rexpr.parameters)
 
-        elif isinstance(rexpr, array_like):
+        elif isinstance(rexpr, (np.ndarray, jnp.ndarray, Number)):
             def fn(args):
                 return op(lexpr.evaluate(args), rexpr)
 
@@ -119,7 +122,7 @@ class ParameterExpression(Expression):
         op: Callable
     ) -> 'ParameterExpression':
         def fn(args):
-            return op(lexpr.evaluate(args))
+            return op(expr.evaluate(args))
 
         return ParameterFunction(fn, expr.parameters)
 
@@ -128,7 +131,13 @@ class Constant(ParameterExpression):
     def __init__(self, value):
         self.value = value
 
-    def evaluate(self, args: ArgsType = ()):
+    def __str__(self):
+        return f'Constant({self.value})'
+
+    def subs(self, args: Dict[str, Any] = {}):
+        return self.value
+
+    def evaluate(self, args: Tuple[Any, ...] = ()):
         return self.value
 
     @property
@@ -140,25 +149,18 @@ class Parameter(ParameterExpression):
     def __init__(self, name: str):
         self.name = name
 
-        if config.pulse_sim_solver == 'qutip':
-            self.evaluate = Parameter._evaluate_dict
-        else:
-            self.evaluate = Parameter._evaluate_tuple
-
     def __str__(self):
         return f'Parameter({self.name})'
+
+    def subs(self, args: Dict[str, Any]):
+        return args[self.parameters[0]]
+
+    def evaluate(self, args: Tuple[Any, ...]):
+        return args[0]
 
     @property
     def parameters(self):
         return (self.name,)
-
-    @staticmethod
-    def _evaluate_tuple(args: Tuple[Any, ...]):
-        return args[0]
-
-    @staticmethod
-    def _evalute_dict(args: Dict[str, Any]):
-        return args[self.parameters[0]]
 
 
 class ParameterFunction(ParameterExpression):
@@ -173,7 +175,11 @@ class ParameterFunction(ParameterExpression):
     def __str__(self):
         return f'ParameterFunction({", ".join(self.parameters)})'
 
-    def evaluate(self, args: Optional[ArgsType] = None):
+    def subs(self, args: Optional[Dict[str, Any]] = None):
+        args = tuple(args[key] for key in self.parameters)
+        return self.fn(args)
+
+    def evaluate(self, args: Optional[Tuple[Any, ...]] = None):
         return self.fn(args)
 
 
@@ -193,13 +199,18 @@ class TimeFunction(Expression):
             self.parameters = parameters
 
     def __str__(self):
-        return f'{self.fn.__name__}(t - {self.tzero}, ({", ".join(self.parameters)}))'
+        if self.tzero == 0.:
+            targ = 't'
+        else:
+            targ = f't - {self.tzero}'
+
+        return f'{self.fn.__name__}({targ}, ({", ".join(self.parameters)}))'
 
     def __call__(self, t: TimeType, args: ArgsType = ()) -> ReturnType:
         if isinstance(args, dict):
             args = tuple(args[key] for key in self.parameters)
 
-        self.fn(t - self.tzero, args)
+        return self.fn(t - self.tzero, args)
 
     @classmethod
     def _binary_op(
@@ -209,39 +220,33 @@ class TimeFunction(Expression):
         op: Callable
     ) -> 'TimeFunction':
         if isinstance(rexpr, TimeFunction):
-            if lexpr.tzero != rexpr.tzero:
-                raise ValueError('Binary operation on TimeFunctions with inconsistent tzeros')
-
             def fn(t, args=()):
-                if isinstance(args, dict):
-                    args = tuple(args[key] for key in lexpr.parameters + rexpr.parameters)
-
                 l_num_params = len(lexpr.parameters)
                 return op(
-                    lexpr.fn(t, args[:l_num_params]),
-                    rexpr.fn(t, args[l_num_params:])
+                    lexpr.fn(t - lexpr.tzero, args[:l_num_params]),
+                    rexpr.fn(t - rexpr.tzero, args[l_num_params:])
                 )
 
-            return TimeFunction(fn, lexpr.parameters + rexpr.parameters, lexpr.tzero)
+            return TimeFunction(fn, lexpr.parameters + rexpr.parameters)
 
         elif isinstance(rexpr, ParameterExpression):
             def fn(t, args=()):
-                if isinstance(args, dict):
-                    args = tuple(args[key] for key in lexpr.parameters + rexpr.parameters)
-
                 l_num_params = len(lexpr.parameters)
                 return op(
-                    lexpr.fn(t, args[:l_num_params]),
+                    lexpr.fn(t - lexpr.tzero, args[:l_num_params]),
                     rexpr.evaluate(args[l_num_params:])
                 )
 
-            return TimeFunction(fn, lexpr.parameters + rexpr.parameters, lexpr.tzero)
+            return TimeFunction(fn, lexpr.parameters + rexpr.parameters)
 
-        elif isinstance(rexpr, array_like):
+        elif isinstance(rexpr, (Number, np.ndarray, jnp.ndarray)):
             def fn(t, args=()):
-                return op(lexpr.__call__(args), rexpr)
+                return op(
+                    lexpr.fn(t - lexpr.tzero, args),
+                    rexpr
+                )
 
-            return TimeFunction(fn, lexpr.parameters, lexpr.tzero)
+            return TimeFunction(fn, lexpr.parameters)
 
         else:
             raise TypeError(f'Cannot apply {op} to {type(lexpr)} and {type(rexpr)}')
@@ -253,6 +258,6 @@ class TimeFunction(Expression):
         op: Callable
     ) -> 'TimeFunction':
         def fn(t, args=()):
-            return op(lexpr.__call__(t, args))
+            return op(expr.fn(t - expr.tzero, args))
 
-        return TimeFunction(fn, expr.parameters, expr.tzero)
+        return TimeFunction(fn, expr.parameters)
