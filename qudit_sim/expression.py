@@ -181,9 +181,11 @@ class TimeFunction(Expression):
     def __init__(
         self,
         fn: Callable[[TimeType, Tuple[Any, ...]], ReturnType]
-        parameters: Optional[Tuple[str, ...]] = None
+        parameters: Optional[Tuple[str, ...]] = None,
+        tzero: float = 0.
     ):
         self.fn = fn
+        self.tzero = tzero
 
         if parameters is None:
             self.parameters = ()
@@ -191,13 +193,13 @@ class TimeFunction(Expression):
             self.parameters = parameters
 
     def __str__(self):
-        return f'TimeFunction(t, ({", ".join(self.parameters)}))'
+        return f'{self.fn.__name__}(t - {self.tzero}, ({", ".join(self.parameters)}))'
 
     def __call__(self, t: TimeType, args: ArgsType = ()) -> ReturnType:
         if isinstance(args, dict):
             args = tuple(args[key] for key in self.parameters)
 
-        self.fn(t, args)
+        self.fn(t - self.tzero, args)
 
     @classmethod
     def _binary_op(
@@ -207,6 +209,9 @@ class TimeFunction(Expression):
         op: Callable
     ) -> TimeFunction:
         if isinstance(rexpr, TimeFunction):
+            if lexpr.tzero != rexpr.tzero:
+                raise ValueError('Binary operation on TimeFunctions with inconsistent tzeros')
+
             def fn(t, args=()):
                 if isinstance(args, dict):
                     args = tuple(args[key] for key in lexpr.parameters + rexpr.parameters)
@@ -217,7 +222,7 @@ class TimeFunction(Expression):
                     rexpr.fn(t, args[l_num_params:])
                 )
 
-            return TimeFunction(fn, lexpr.parameters + rexpr.parameters)
+            return TimeFunction(fn, lexpr.parameters + rexpr.parameters, lexpr.tzero)
 
         elif isinstance(rexpr, ParameterExpression):
             def fn(t, args=()):
@@ -230,13 +235,13 @@ class TimeFunction(Expression):
                     rexpr.evaluate(args[l_num_params:])
                 )
 
-            return TimeFunction(fn, lexpr.parameters + rexpr.parameters)
+            return TimeFunction(fn, lexpr.parameters + rexpr.parameters, lexpr.tzero)
 
         elif isinstance(rexpr, array_like):
             def fn(t, args=()):
                 return op(lexpr.__call__(args), rexpr)
 
-            return TimeFunction(fn, lexpr.parameters)
+            return TimeFunction(fn, lexpr.parameters, lexpr.tzero)
 
         else:
             raise TypeError(f'Cannot apply {op} to {type(lexpr)} and {type(rexpr)}')
@@ -250,4 +255,4 @@ class TimeFunction(Expression):
         def fn(t, args=()):
             return op(lexpr.__call__(t, args))
 
-        return TimeFunction(fn, expr.parameters)
+        return TimeFunction(fn, expr.parameters, expr.tzero)

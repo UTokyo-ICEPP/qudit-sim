@@ -51,77 +51,6 @@ class PulseSequence(list):
     def __str__(self):
         return f'PulseSequence([{", ".join(str(inst) for inst in self)}])'
 
-    def generate_fn(
-        self,
-        frame_frequency: float,
-        drive_base: complex,
-        rwa: bool = False
-    ) -> tuple:
-        r"""Generate the X and Y drive coefficients and the maximum frequency appearing in the sequence.
-
-        The return values are equivalent to what is returned by `drive.DriveTerm.generate_fn` (in fact
-        this function is called within `DriveTerm.generate_fn` when the drive amplitude is given as a
-        PulseSequence).
-
-        Args:
-            frame_frequency: Frame frequency :math:`\xi_k^{l}`.
-            drive_base: Factor :math:`\alpha_{jk} e^{i \rho_{jk}} \frac{\Omega_j}{2}`.
-            rwa: If True, returns the RWA coefficients.
-            initial_frequency: Initial carrier frequency. Can be None if the first instruction
-                is SetFrequency.
-
-        Returns:
-            X and Y coefficient functions.
-        """
-        if len(self) == 0:
-            return 0., 0.
-
-        funclist_x = []
-        funclist_y = []
-        timelist = []
-
-        frequency = None
-        phase_offset = 0.
-        time = 0.
-
-        for inst in self:
-            if isinstance(inst, ShiftFrequency):
-                if frequency is None:
-                    raise RuntimeError('ShiftFrequency called before SetFrequency')
-
-                frequency += inst.value
-            elif isinstance(inst, ShiftPhase):
-                phase_offset += inst.value
-            elif isinstance(inst, SetFrequency):
-                frequency = inst.value
-            elif isinstance(inst, SetPhase):
-                if frequency is None:
-                    raise RuntimeError('SetPhase called before SetFrequency')
-
-                phase_offset = inst.value - frequency * time
-            elif isinstance(inst, Delay):
-                funclist_x.append(0.)
-                funclist_y.append(0.)
-                timelist.append(time)
-                time += inst.value
-            elif isinstance(inst, Pulse):
-                if frequency is None:
-                    raise RuntimeError('Pulse called before SetFrequency')
-
-                funclist_x.append(inst.modulate(drive_base, frequency, phase_offset,
-                                                frame_frequency, time, 'x', rwa))
-                funclist_y.append(inst.modulate(drive_base, frequency, phase_offset,
-                                                frame_frequency, time, 'y', rwa))
-                timelist.append(time)
-                time += inst.duration
-
-        timelist.append(time)
-
-        fn_x = _make_sequence_fn(timelist, funclist_x)
-        fn_y = _make_sequence_fn(timelist, funclist_y)
-
-        return fn_x, fn_y
-
     def envelope(self, t: Union[float, np.ndarray], args: Any = None) -> np.ndarray:
         """Return the envelope of the sequence as a function of time.
 
@@ -135,49 +64,31 @@ class PulseSequence(list):
         Returns:
             Pulse sequence envelope (complex) as a function of time.
         """
-        funclist = []
-        timelist = []
-
+        funclist = list()
         time = 0.
 
         for inst in self:
             if isinstance(inst, Delay):
-                funclist.append(0.)
-                timelist.append(time)
+                funclist.append((time, 0.))
                 time += inst.value
             elif isinstance(inst, Pulse):
-                funclist.append(_make_shifted_fn(inst, time))
-                timelist.append(time)
+                pulse = copy.copy(inst)
+                pulse.tzero = time
+                funclist.append((time, pulse))
                 time += inst.duration
 
-        timelist.append(time)
+        funclist.append((time, None))
 
         result = 0.
-        for time, func in zip(timelist[:-1], funclist):
-            result = np.where(t > time, func(t, args), result)
+        for time, func in funclist[:-1]:
+            if isinstance(func, TimeFunction):
+                result = np.where(t > time, func(t, args), result)
+            else:
+                result = np.where(t > time, func, result)
+
         result = np.where(t > timelist[-1], 0., result)
 
         return result
-
-
-def _make_sequence_fn(timelist, funclist):
-    if config.pulse_sim_solver == 'jax':
-        npmod = jnp
-    else:
-        npmod = np
-
-    def fn(t, args):
-        result = 0.
-        for time, func in zip(timelist[:-1], funclist):
-            result = npmod.where(t > time, func(t, args), result)
-        result = npmod.where(t > timelist[-1], 0., result)
-        return result
-
-    return fn
-
-def _make_shifted_fn(pulse, start_time):
-    envelope_fn = pulse.envelope_fn()
-    return lambda t, args: envelope_fn(t - start_time, args)
 
 
 class Pulse(TimeFunction):
@@ -191,84 +102,15 @@ class Pulse(TimeFunction):
         self,
         duration: float,
         fn: Callable[[Tuple[Any, ...]], ReturnType],
-        parameters: Tuple[str, ...]
+        parameters: Optional[Tuple[str, ...]] = None,
+        tzero: float = 0.
     ):
         assert duration > 0., 'Pulse duration must be positive'
         self.duration = duration
-        super().__init__(fn, parameters)
+        super().__init__(fn, parameters, tzero)
 
     def __str__(self):
-        return f'Pulse(duration={self.duration})'
-
-    def shift(self, offset: float):
-        """Return a new Pulse object with a shifted time argument."""
-        if self.fn.__defaults__:
-            def fn(t, args=self.fn.__defaults__[0]):
-                return self.fn(t - offset, args)
-        else:
-            def fn(t, args):
-                return self.fn(t - offset, args)
-
-        shifted = copy.deepcopy(self)
-        shifted.fn = fn
-
-        return shifted
-
-    def modulate(
-        self,
-        drive_base: complex,
-        frequency: float,
-        phase_offset: float,
-        frame_frequency: float,
-        start_time: float,
-        symmetry: str,
-        rwa: bool
-    ) -> CallableCoefficient:
-        r"""Modulate the tone at the given amplitude and frequency with this pulse.
-
-        Args:
-            drive_base: Factor :math:`\alpha_{jk} e^{i \rho_{jk}} \frac{\Omega_j}{2}`.
-            frequency: Tone frequency.
-            phase_offset: Tone phase offset.
-            frame_frequency: Frequency of the observing frame.
-            start_time: Start time of the pulse.
-            symmetry: 'x' or 'y'.
-            rwa: Whether to apply the rotating-wave approximation.
-
-        Returns:
-            A function of time that returns the modulated signal.
-        """
-        if config.pulse_sim_solver == 'jax':
-            npmod = jnp
-        else:
-            npmod = np
-
-        envelope_fn = self.envelope_fn()
-
-        if rwa:
-            if symmetry == 'x':
-                value = lambda envelope, phase: envelope.real * npmod.cos(phase) + envelope.imag * npmod.sin(phase)
-            else:
-                value = lambda envelope, phase: envelope.imag * npmod.cos(phase) - envelope.real * npmod.sin(phase)
-
-            def fun(t, args=None):
-                envelope = drive_base * envelope_fn(t - start_time, args)
-                phase = (frequency - frame_frequency) * t + phase_offset
-                return value(envelope, phase)
-
-        else:
-            if symmetry == 'x':
-                frame_fn = npmod.cos
-            else:
-                frame_fn = npmod.sin
-
-            def fun(t, args=None):
-                double_envelope = 2. * drive_base * envelope_fn(t - start_time, args)
-                phase = frequency * t + phase_offset
-                prefactor = double_envelope.real * npmod.cos(phase) + double_envelope.imag * npmod.sin(phase)
-                return prefactor * frame_fn(frame_frequency * t)
-
-        return fun
+        return f'Pulse(duration={self.duration}, tzero={self.tzero})'
 
 
 class Gaussian(Pulse):
@@ -288,7 +130,8 @@ class Gaussian(Pulse):
         amp: Union[float, complex, ParameterExpression],
         sigma: float,
         center: Optional[float] = None,
-        zero_ends: bool = True
+        zero_ends: bool = True,
+        tzero: float = 0.
     ):
         if isinstance(amp, Number):
             self.amp = ConstantExpression(complex(amp))
@@ -320,11 +163,11 @@ class Gaussian(Pulse):
             return npmod.asarray(amp / (1. - self._pedestal) * (v - self._pedestal),
                                  dtype='complex128')
 
-        super().__init__(duration, fn, self.amp.parameters)
+        super().__init__(duration, fn, self.amp.parameters, tzero)
 
     def __str__(self):
         return (f'Gaussian(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, center={self.center},'
-                f' zero_ends={self._pedestal != 0.})')
+                f' zero_ends={self._pedestal != 0.}, tzero={self.tzero})')
 
 
 class GaussianSquare(Pulse):
@@ -345,7 +188,8 @@ class GaussianSquare(Pulse):
         width: float,
         zero_ends: bool = True,
         rise: bool = True,
-        fall: bool = True
+        fall: bool = True,
+        tzero: float = 0.
     ):
         if not (rise or fall):
             raise ValueError("That's just a square pulse, dude")
@@ -380,14 +224,13 @@ class GaussianSquare(Pulse):
             rise_edge = dummy_fn
 
         if fall:
+            fall_tzero = self.t_plateau + self.width - gauss_duration / 2.
             self.gauss_fall = Gaussian(duration=gauss_duration, amp=self.amp, sigma=sigma,
-                                       center=None, zero_ends=zero_ends)
+                                       center=None, zero_ends=zero_ends, tzero=fall_tzero)
             fall_tail = self.gauss_fall
         else:
             self.gauss_fall = None
             fall_tail = dummy_fn
-
-        fall_tzero = self.t_plateau + self.width - gauss_duration / 2.
 
         def fn(t, args):
             return npmod.where(
@@ -396,11 +239,11 @@ class GaussianSquare(Pulse):
                 npmod.where(
                     t <= self.t_plateau + self.width,
                     self.amp.evaluate(args),
-                    fall_tail(t + fall_tzero, args)
+                    fall_tail(t, args)
                 )
             )
 
-        super().__init__(duration, fn, self.amp.parameters)
+        super().__init__(duration, fn, self.amp.parameters, tzero=tzero)
 
     def __str__(self):
         rise = self.gauss_rise is not None
@@ -434,14 +277,16 @@ class Drag(Gaussian):
         sigma: float,
         beta: float,
         center: Optional[float] = None,
-        zero_ends: bool = True
+        zero_ends: bool = True,
+        tzero: float = 0.
     ):
         super().__init__(
             duration,
             amp=amp,
             sigma=sigma,
             center=center,
-            zero_ends=zero_ends
+            zero_ends=zero_ends,
+            tzero=tzero
         )
 
         self.beta = beta
@@ -472,7 +317,8 @@ class Square(Pulse):
     def __init__(
         self,
         duration: float,
-        amp: Union[float, complex, ParameterExpression]
+        amp: Union[float, complex, ParameterExpression],
+        tzero: float = 0.
     ):
         if isinstance(amp, Number):
             self.amp = Constant(complex(amp))
@@ -484,33 +330,7 @@ class Square(Pulse):
         def fn(t, args):
             return npmod.full_like(t, self.amp.evaluate(args))
 
-        super().__init__(duration, fn, self.amp.parameters)
+        super().__init__(duration, fn, self.amp.parameters, tzero=tzero)
 
     def __str__(self):
         return f'Square(duration={self.duration}, amp={self.amp})'
-
-
-@dataclass(frozen=True)
-class ShiftFrequency:
-    """Frequency shift in rad/s."""
-    value: float
-
-@dataclass(frozen=True)
-class ShiftPhase:
-    """Phase shift (virtual Z)."""
-    value: float
-
-@dataclass(frozen=True)
-class SetFrequency:
-    """Frequency setting in rad/s."""
-    value: float
-
-@dataclass(frozen=True)
-class SetPhase:
-    """Phase setting."""
-    value: float
-
-@dataclass(frozen=True)
-class Delay:
-    """Delay in seconds."""
-    value: float
