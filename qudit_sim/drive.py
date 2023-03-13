@@ -12,7 +12,7 @@ from typing import Callable, Optional, Union, Tuple
 from dataclasses import dataclass
 import numpy as np
 
-from .time_function import Parameter, ParameterFn, TimeFunction
+from .time_function import ParameterExpression, Parameter, TimeFunction
 from .config import config
 
 HamiltonianCoefficient = Union[str, ArrayType, TimeFunction]
@@ -64,11 +64,11 @@ class DriveTerm:
         return fn_x, fn_y
 
     def _generate_fn_rwa(self, amplitude, frame_frequency, drive_base):
+        detuning = self.frequency - frame_frequency
+
         if isinstance(self.frequency, Parameter):
-            detuning = ParameterFn(lambda args: args[0] - frame_frequency, (self.frequency.name,))
             is_resonant = False
         else:
-            detuning = self.frequency - frame_frequency
             is_resonant = np.isclose(detuning, 0.)
 
         if isinstance(amplitude, (float, complex, Parameter)):
@@ -76,14 +76,14 @@ class DriveTerm:
             envelope = amplitude * drive_base
 
             if is_resonant:
-                if isinstance(amplitude, Parameter):
-                    envelope = envelope.to_timefn()
+                if isinstance(envelope, Parameter):
+                    envelope = ConstantFunction(envelope)
 
                 return envelope.real, envelope.imag
 
-            elif (isinstance(detuning, ParameterFn) or isinstance(amplitude, Parameter)
+            elif (isinstance(amplitude, Parameter) or isinstance(self.frequency, Parameter)
                   or config.pulse_sim_solver == 'jax'):
-                fun = envelope * exp_freq(-detuning)
+                fun = ExpFunction(-detuning) * envelope
                 return fun.real, fun.imag
 
             else:
@@ -120,31 +120,26 @@ class DriveTerm:
                 return envelope.real, envelope.imag
 
             else:
-                fun = envelope * exp_freq(-detuning)
+                fun = ExpFunction(-detuning) * envelope
                 return fun.real, fun.imag
 
         elif callable(amplitude):
             if not isinstance(amplitude, TimeFunction):
                 amplitude = TimeFunction(amplitude)
 
-            envelope = drive_base * amplitude
+            envelope = amplitude * drive_base
 
             if is_resonant:
                 return envelope.real, envelope.imag
 
             elif self.constant_phase is None:
-                fun = envelope * exp_freq(-detuning)
+                fun = envelope * ExpFunction(-detuning)
                 return fun.real, fun.imag
 
             else:
-                drive_base_phase = np.angle(drive_base)
-                if isinstance(self.constant_phase, Parameter):
-                    phase = ParameterFn(lambda args: drive_base_phase + args[0], (self.constant_phase.name,))
-                else:
-                    phase = drive_base_phase + self.constant_phase
-
+                phase = self.constant_phase + np.angle(drive_base)
                 absf = abs(envelope)
-                return absf * cos_freq(-detuning, phase), absf * sin_freq(-detuning, phase)
+                return absf * CosFunction(-detuning, phase), absf * SinFunction(-detuning, phase)
 
         else:
             raise TypeError(f'Unsupported amplitude type f{type(amplitude)}')
@@ -154,12 +149,12 @@ class DriveTerm:
 
         if isinstance(amplitude, (float, complex, Parameter)):
             # static envelope
-            double_envelope = 2.* drive_base * amplitude
+            double_envelope = amplitude * 2.* drive_base
 
             if (isinstance(amplitude, Parameter) or isinstance(self.frequency, Parameter)
                 or config.pulse_sim_solver == 'jax'):
-                prefactor = (double_envelope.real * cos_freq(self.frequency)
-                             + double_envelope.imag * sin_freq(self.frequency))
+                prefactor = (double_envelope.real * CosFunction(self.frequency)
+                             + double_envelope.imag * SinFunction(self.frequency))
             else:
                 prefactor_terms = []
                 if double_envelope.real != 0.:
@@ -172,38 +167,36 @@ class DriveTerm:
                     prefactor = f'({prefactor})'
 
         elif isinstance(amplitude, str):
-            double_envelope = f'{2. * drive_base} * ({amplitude})'
+            double_envelope = amplitude * 2. * drive_base
 
             if self.constant_phase is None:
-                prefactor = f'({double_envelope} * (cos({self.frequency} * t) - 1.j * sin({self.frequency} * t))).real'
+                prefactor = f'(({double_envelope}) * (cos({self.frequency} * t) - 1.j * sin({self.frequency} * t))).real'
 
             else:
-                phase = np.angle(drive_base) + self.constant_phase
-                prefactor = f'abs({double_envelope}) * cos({phase} - ({self.frequency} * t))'
+                phase = self.constant_phase + np.angle(drive_base)
+                if isinstance(self.constant_phase, Parameter):
+                    prefactor = CosFunction(-self.frequency, phase) * abs(double_envelope)
+                else:
+                    prefactor = f'abs({double_envelope}) * cos({phase} - ({self.frequency} * t))'
 
         elif isinstance(amplitude, np.ndarray):
             double_envelope = 2. * drive_base * amplitude
 
-            prefactor = (double_envelope * exp_freq(-self.frequency)).real
+            prefactor = (double_envelope * ExpFunction(-self.frequency)).real
 
         elif callable(amplitude):
             if not isinstance(amplitude, TimeFunction):
                 amplitude = TimeFunction(amplitude)
 
-            double_envelope = 2. * drive_base * amplitude
+            double_envelope = amplitude * 2. * drive_base
 
             if self.constant_phase is None:
-                prefactor = (double_envelope * exp_freq(-self.frequency)).real
+                prefactor = (double_envelope * ExpFunction(-self.frequency)).real
 
             else:
-                drive_base_phase = np.angle(drive_phase)
-                if isinstance(self.constant_phase, Parameter):
-                    phase = ParameterFn(lambda args: drive_base_phase + args[0], (self.constant_phase.name,))
-                else:
-                    phase = drive_base_phase + self.constant_phase
-
+                phase = self.constant_phase + np.angle(drive_phase)
                 absf = abs(double_envelope)
-                prefactor = absf * cos_freq(negative_frequency, phase)
+                prefactor = absf * CosFunction(-self.frequency, phase)
 
         else:
             raise TypeError(f'Unsupported amplitude type f{type(amplitude)}')
@@ -219,63 +212,76 @@ class DriveTerm:
             if lab_frame:
                 return prefactor, None
             else:
-                return prefactor * cos_freq(frame_frequency), prefactor * sin_freq(frame_frequency)
+                return prefactor * CosFunction(frame_frequency), prefactor * SinFunction(frame_frequency)
 
 
-def cos_freq(
-    freq: Union[float, Parameter, ParameterFn],
-    phase: Union[float, Parameter, ParameterFn] = 0.
-) -> TimeFunction:
-    """`cos(freq * t + phase)`"""
-    return _mod_freq(freq, phase, config.npmod.cos)
+class ConstantFunction(TimeFunction):
+    def __init__(
+        self,
+        value: ParameterExpression
+    ):
+        def fn(t, args):
+            return value.evaluate(args)
 
-def sin_freq(
-    freq: Union[float, Parameter, ParameterFn],
-    phase: Union[float, Parameter, ParameterFn] = 0.
-) -> TimeFunction:
-    """`sin(freq * t + phase)`"""
-    return _mod_freq(freq, phase, config.npmod.sin)
+        super().__init__(fn, value.parameters)
 
-def exp_freq(
-    freq: Union[float, Parameter, ParameterFn],
-    phase: Union[float, Parameter, ParameterFn] = 0.
-) -> TimeFunction:
-    """`cos(freq * t + phase) + 1.j * sin(freq * t + phase)`"""
-    npmod = config.npmod
-    return _mod_freq(freq, phase, lambda x: npmod.cos(x) + 1.j * npmod.sin(x))
 
-def _mod_freq(_freq, _phase, _op):
-    if isinstance(_freq, Parameter):
-        if isinstance(_phase, Parameter):
-            fn = TimeFunction(lambda t, args: _op(args[0] * t + args[1]),
-                                     (_freq.name, _phase.name))
-        elif isinstance(_phase, ParameterFn):
-            fn = TimeFunction(lambda t, args: _op(args[0] * t + _phase(args[1:])),
-                                     (_freq.name,) + _phase.parameters)
+class OscillationFunction(TimeFunction):
+    def __init__(
+        self,
+        op: Callable,
+        frequency: Union[float, ParameterExpression],
+        phase: Union[float, ParameterExpression] = 0.
+    ):
+        if isinstance(frequency, ParameterExpression):
+            if isinstance(phase, ParameterExpression):
+                freq_n_params = len(frequency.parameters)
+                def fn(t, args):
+                    return op(frequency.evaluate(args[:freq_n_params]) * t
+                              + phase.evaluate(args[freq_n_params:]))
+
+                super().__init__(fn, frequency.parameters + phase.parameters)
+            else:
+                def fn(t, args):
+                    return op(frequency.evaluate(args) * t + phase)
+
+                super().__init__(fn, frequency.parameters)
         else:
-            fn = TimeFunction(lambda t, args: _op(args[0] * t + _phase),
-                                     (_freq.name,))
-    elif isinstance(_freq, ParameterFn):
-        nparam = len(_freq.parameters)
+            if isinstance(phase, ParameterExpression):
+                def fn(t, args):
+                    return op(frequency * t + phase.evaluate(args))
 
-        if isinstance(_phase, Parameter):
-            fn = TimeFunction(lambda t, args: _op(_freq(args[0:nparam]) * t + args[nparam])
-                                     _freq.parameters + (_phase.name,))
-        elif isinstance(_phase, ParameterFn):
-            fn = TimeFunction(lambda t, args: _op(_freq(args[0:nparam]) * t
-                                                              + _phase(args[nparam:]))
-                                     _freq.parameters + _phase.parameters)
-        else:
-            fn = TimeFunction(lambda t, args: _op(_freq(args) * t + _phase),
-                                     _freq.parameters)
-    else:
-        if isinstance(_phase, Parameter):
-            fn = TimeFunction(lambda t, args: _op(_freq * t + args[0]),
-                                     (_phase.name,))
-        elif isinstance(_phase, ParameterFn):
-            fn = TimeFunction(lambda t, args: _op(_freq * t + _phase(args)),
-                                     _phase.parameters)
-        else:
-            fn = TimeFunction(lambda t, args: _op(_freq * t + _phase))
+                super().__init__(fn, phase.parameters)
+            else:
+                def fn(t, args=()):
+                    return op(frequency * t + phase)
 
-    return fn
+                super().__init__(fn, ())
+
+def CosFunction(OscillationFunction):
+    def __init__(
+        self,
+        frequency: Union[float, ParameterExpression],
+        phase: Union[float, ParameterExpression] = 0.
+    ):
+        super().__init__(config.npmod.cos, frequency, phase)
+
+def SinFunction(OscillationFunction):
+    def __init__(
+        self,
+        frequency: Union[float, ParameterExpression],
+        phase: Union[float, ParameterExpression] = 0.
+    ):
+        super().__init__(config.npmod.cos, frequency, phase)
+
+def ExpFunction(OscillationFunction):
+    @staticmethod
+    def _op(x):
+        return config.npmod.cos(x) + 1.j * config.npmod.sin(x)
+
+    def __init__(
+        self,
+        frequency: Union[float, ParameterExpression],
+        phase: Union[float, ParameterExpression] = 0.
+    ):
+        super().__init__(self._op, frequency, phase)

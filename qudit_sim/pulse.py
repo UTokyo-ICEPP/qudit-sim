@@ -17,10 +17,7 @@ from dataclasses import dataclass
 import numpy as np
 import jax.numpy as jnp
 
-ArrayType = Union[np.ndarray, jnp.ndarray]
-array_like = Union[Number, Sequence[Number], ArrayType]
-
-from .drive import CallableCoefficient
+from .expression import ParameterExpression, Constant, Parameter, TimeFunction, ArrayType, array_like
 from .config import config
 
 class PulseSequence(list):
@@ -183,30 +180,39 @@ def _make_shifted_fn(pulse, start_time):
     return lambda t, args: envelope_fn(t - start_time, args)
 
 
-class Pulse:
+class Pulse(TimeFunction):
     """Base class for all pulse shapes.
 
     Args:
         duration: Pulse duration.
     """
 
-    def __init__(self, duration: float):
+    def __init__(
+        self,
+        duration: float,
+        fn: Callable[[Tuple[Any, ...]], ReturnType],
+        parameters: Tuple[str, ...]
+    ):
         assert duration > 0., 'Pulse duration must be positive'
         self.duration = duration
-
-    def __mul__(self, c):
-        if not isinstance(c, (float, complex)):
-            raise TypeError(f'Multiplication between Pulse and {type(c).__name__} is invalid')
-
-        instance = copy.deepcopy(self)
-        instance._scale(c)
-        return instance
+        super().__init__(fn, parameters)
 
     def __str__(self):
         return f'Pulse(duration={self.duration})'
 
-    def envelope_fn(self) -> Callable[[array_like, Any], array_like]:
-        raise NotImplementedError('Pulse is an ABC')
+    def shift(self, offset: float):
+        """Return a new Pulse object with a shifted time argument."""
+        if self.fn.__defaults__:
+            def fn(t, args=self.fn.__defaults__[0]):
+                return self.fn(t - offset, args)
+        else:
+            def fn(t, args):
+                return self.fn(t - offset, args)
+
+        shifted = copy.deepcopy(self)
+        shifted.fn = fn
+
+        return shifted
 
     def modulate(
         self,
@@ -279,17 +285,20 @@ class Gaussian(Pulse):
     def __init__(
         self,
         duration: float,
-        amp: Union[float, complex],
+        amp: Union[float, complex, ParameterExpression],
         sigma: float,
         center: Optional[float] = None,
         zero_ends: bool = True
     ):
-        super().__init__(duration)
+        if isinstance(amp, Number):
+            self.amp = ConstantExpression(complex(amp))
+        else:
+            self.amp = amp
 
         self.sigma = sigma
 
         if center is None:
-            self.center = self.duration * 0.5
+            self.center = duration * 0.5
         else:
             self.center = center
 
@@ -299,35 +308,23 @@ class Gaussian(Pulse):
 
             x = self.duration * 0.5 / self.sigma
             self._pedestal = np.exp(-np.square(x) * 0.5)
-            self._gaus_amp = np.asarray(amp / (1. - self._pedestal), dtype=np.complex128)
-
         else:
             self._pedestal = 0.
-            self._gaus_amp = np.asarray(amp, dtype=np.complex128)
 
-    @property
-    def amp(self) -> complex:
-        return complex(self._gaus_amp * (1. - self._pedestal))
+        npmod = config.npmod
 
-    def envelope_fn(self) -> Callable[[array_like, Any], array_like]:
-        if config.pulse_sim_solver == 'jax':
-            npmod = jnp
-        else:
-            npmod = np
-
-        def envelope(t, args=None):
+        def fn(t, args):
             x = (t - self.center) / self.sigma
-            return npmod.asarray(self._gaus_amp * (npmod.exp(-npmod.square(x) * 0.5) - self._pedestal),
+            v = npmod.exp(-npmod.square(x) * 0.5)
+            amp = self.amp.evaluate(args)
+            return npmod.asarray(amp / (1. - self._pedestal) * (v - self._pedestal),
                                  dtype='complex128')
 
-        return envelope
+        super().__init__(duration, fn, self.amp.parameters)
 
     def __str__(self):
         return (f'Gaussian(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, center={self.center},'
                 f' zero_ends={self._pedestal != 0.})')
-
-    def _scale(self, c):
-        self._gaus_amp *= c
 
 
 class GaussianSquare(Pulse):
@@ -343,7 +340,7 @@ class GaussianSquare(Pulse):
     def __init__(
         self,
         duration: float,
-        amp: Union[float, complex],
+        amp: Union[float, complex, ParameterExpression],
         sigma: float,
         width: float,
         zero_ends: bool = True,
@@ -353,16 +350,15 @@ class GaussianSquare(Pulse):
         if not (rise or fall):
             raise ValueError("That's just a square pulse, dude")
 
-        super().__init__(duration)
-
         assert width < duration, 'GaussianSquare width must be less than duration'
 
-        self.amp = amp
+        if isinstance(amp, Number):
+            self.amp = Constant(complex(amp))
+        else:
+            self.amp = amp
+
         self.sigma = sigma
         self.width = width
-
-        self._condlist = list()
-        self._funclist = list()
 
         ramp_duration = duration - width
         if rise and fall:
@@ -370,68 +366,41 @@ class GaussianSquare(Pulse):
         else:
             gauss_duration = ramp_duration * 2.
 
+        def dummy_fn(t, args):
+            return 0.
+
         if rise:
             self.t_plateau = gauss_duration / 2.
-            self.gauss_rise = Gaussian(duration=gauss_duration, amp=amp, sigma=sigma,
+            self.gauss_rise = Gaussian(duration=gauss_duration, amp=self.amp, sigma=sigma,
                                        center=None, zero_ends=zero_ends)
-
-            self._condlist.append(self._left_time_range)
+            rise_edge = self.gauss_rise
         else:
             self.t_plateau = 0.
             self.gauss_rise = None
+            rise_edge = dummy_fn
 
         if fall:
-            self.gauss_fall = Gaussian(duration=gauss_duration, amp=amp, sigma=sigma,
+            self.gauss_fall = Gaussian(duration=gauss_duration, amp=self.amp, sigma=sigma,
                                        center=None, zero_ends=zero_ends)
-
-            self._condlist.append(self._right_time_range)
+            fall_tail = self.gauss_fall
         else:
             self.gauss_fall = None
-
-    def _fall_tail(self, t, args):
-        gauss_t0 = self.t_plateau + self.width - self.gauss_fall.duration / 2.
-        return self.gauss_fall(t - gauss_t0, args)
-
-    def _left_time_range(self, t):
-        return t < self.t_plateau
-
-    def _right_time_range(self, t):
-        return t >= self.t_plateau + self.width
-
-    def _make_condlist(self, t):
-        return list(cond(t) for cond in self._condlist)
-
-    def envelope_fn(self) -> Callable[[array_like, Any], array_like]:
-        if config.pulse_sim_solver == 'jax':
-            npmod = jnp
-        else:
-            npmod = np
-
-        dummy_fn = lambda t, args: 0.
-
-        if self.gauss_rise is None:
-            rise_edge = dummy_fn
-        else:
-            rise_edge = self.gauss_rise.envelope_fn()
-
-        if self.gauss_fall is None:
             fall_tail = dummy_fn
-        else:
-            gauss_fall_fn = self.gauss_fall.envelope_fn()
-            fall_tail = lambda t, args: gauss_fall_fn(t + self.gauss_fall.duration / 2.)
 
-        def envelope(t, args=None):
+        fall_tzero = self.t_plateau + self.width - gauss_duration / 2.
+
+        def fn(t, args):
             return npmod.where(
                 t <= self.t_plateau,
                 rise_edge(t, args),
                 npmod.where(
                     t <= self.t_plateau + self.width,
-                    self.amp,
-                    fall_tail(t - self.t_plateau - self.width, args)
+                    self.amp.evaluate(args),
+                    fall_tail(t + fall_tzero, args)
                 )
             )
 
-        return envelope
+        super().__init__(duration, fn, self.amp.parameters)
 
     def __str__(self):
         rise = self.gauss_rise is not None
@@ -444,14 +413,6 @@ class GaussianSquare(Pulse):
 
         return (f'GaussianSquare(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, width={self.width}, '
                 f' zero_ends={zero_ends}, rise={rise}, fall={fall})')
-
-    def _scale(self, c):
-        self._funclist[-1] *= c
-
-        if self.gauss_rise:
-            self.gauss_rise._scale(c)
-        if self.gauss_fall:
-            self.gauss_fall._scale(c)
 
 
 class Drag(Gaussian):
@@ -469,7 +430,7 @@ class Drag(Gaussian):
     def __init__(
         self,
         duration: float,
-        amp: Union[float, complex],
+        amp: Union[float, complex, ParameterExpression],
         sigma: float,
         beta: float,
         center: Optional[float] = None,
@@ -485,21 +446,16 @@ class Drag(Gaussian):
 
         self.beta = beta
 
-    def envelope_fn(self) -> Callable[[array_like, Any], array_like]:
-        if config.pulse_sim_solver == 'jax':
-            npmod = jnp
-        else:
-            npmod = np
+        gauss_fn = self.fn
+        npmod = config.npmod
 
-        gauss_envelope = super().envelope_fn()
-
-        def envelope(t, args=None):
-            gauss = gauss_envelope(t, args)
+        def fn(t, args):
+            gauss = gauss_fn(t, args)
             dgauss = -(t - self.center) / npmod.square(self.sigma) * gauss
 
             return gauss + 1.j * self.beta * dgauss
 
-        return envelope
+        self.fn = fn
 
     def __str__(self):
         return (f'Drag(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, beta={self.beta}, '
@@ -516,28 +472,22 @@ class Square(Pulse):
     def __init__(
         self,
         duration: float,
-        amp: Union[float, complex]
+        amp: Union[float, complex, ParameterExpression]
     ):
-        super().__init__(duration)
-
-        self.amp = complex(amp)
-
-    def envelope_fn(self) -> Callable[[array_like, Any], array_like]:
-        if config.pulse_sim_solver == 'jax':
-            npmod = jnp
+        if isinstance(amp, Number):
+            self.amp = Constant(complex(amp))
         else:
-            npmod = np
+            self.amp = amp
 
-        def envelope(t, args=None):
-            return npmod.full_like(t, self.amp)
+        npmod = config.npmod
 
-        return envelope
+        def fn(t, args):
+            return npmod.full_like(t, self.amp.evaluate(args))
+
+        super().__init__(duration, fn, self.amp.parameters)
 
     def __str__(self):
         return f'Square(duration={self.duration}, amp={self.amp})'
-
-    def _scale(self, c):
-        self.amp *= c
 
 
 @dataclass(frozen=True)
