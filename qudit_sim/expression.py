@@ -11,7 +11,7 @@ opted for an original lightweight implementation because the represented functio
 be pure to be compatible with JAX odeint.
 """
 
-from typing import Callable, Optional, Union, Tuple, Dict, Any
+from typing import Callable, Optional, Union, Tuple, Dict, Any, Sequence
 from numbers import Number
 from abc import ABC
 
@@ -224,6 +224,9 @@ class TimeFunction(Expression):
 
         return self.fn(t - self.tzero, args)
 
+    def evaluate(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
+        return self.fn(t - self.tzero, args)
+
 
 class _TimeFunctionUnaryOp(TimeFunction):
     def __init__(
@@ -313,6 +316,14 @@ class ConstantFunction(TimeFunction):
 
 
 class PiecewiseFunction(TimeFunction):
+    """A time function defined by Piecewise connection of a list of TimeFunctions.
+
+    Args:
+        timelist: Ordered list of N + 1 time points, where the first element is the start time
+            of the first function and the last element is the end time of the last function.
+            The function evaluates to 0 for t < timelist[0] and t > timelist[-1].
+        funclist: List of N TimeFunctions.
+    """
     def __init__(
         self,
         timelist: Sequence[float],
@@ -321,7 +332,7 @@ class PiecewiseFunction(TimeFunction):
         self.timelist = timelist
         self.funclist = funclist
 
-        parameters = sum(func.parameters for func in funclist, ())
+        parameters = sum((func.parameters for func in funclist), ())
         super().__init__(self._fn, parameters)
 
     def _fn(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
@@ -330,7 +341,7 @@ class PiecewiseFunction(TimeFunction):
 
         result = 0.
         iarg = 0
-        for time, func, _ in zip(self.timelist[:-1], self.funclist):
+        for time, func in zip(self.timelist[:-1], self.funclist):
             nparam = len(func.parameters)
             result = npmod.where(
                 t > time,

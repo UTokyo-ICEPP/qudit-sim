@@ -16,7 +16,7 @@ import warnings
 import numpy as np
 
 from .expression import (ParameterExpression, Parameter, TimeFunction, ConstantFunction, PiecewiseFunction,
-                         TimeType, ArgsType, ArrayType, ResultType)
+                         TimeType, ArgsType, ArrayType, ReturnType)
 from .pulse import Pulse
 from .config import config
 
@@ -150,8 +150,8 @@ class DriveTerm:
 
         elif all(isinstance(func, TimeFunction) for _, func, _ in funclist[:-1]):
             timelist = list(f[0] for f in funclist)
-            xlist = list(f[1] for f in funclist)
-            ylist = list(f[2] for f in funclist)
+            xlist = list(f[1] for f in funclist[:-1])
+            ylist = list(f[2] for f in funclist[:-1])
 
             fn_x = PiecewiseFunction(timelist, xlist)
             fn_y = PiecewiseFunction(timelist, ylist)
@@ -340,6 +340,10 @@ class OscillationFunction(TimeFunction):
         frequency: Union[float, ParameterExpression],
         phase: Union[float, ParameterExpression] = 0.
     ):
+        self.op = op
+        self.frequency = frequency
+        self.phase = phase
+
         if isinstance(frequency, ParameterExpression):
             if isinstance(phase, ParameterExpression):
                 fn = self._fn_PE_PE
@@ -363,13 +367,13 @@ class OscillationFunction(TimeFunction):
                        + self.phase.evaluate(args[freq_n_params:]))
 
     def _fn_PE_float(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
-        return self.op(self.frequency.evaluate(args) * t + phase)
+        return self.op(self.frequency.evaluate(args) * t + self.phase)
 
     def _fn_float_PE(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
         return self.op(self.frequency * t + self.phase.evaluate(args))
 
     def _fn_float_float(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
-        return self.op(self.frequency * t + phase)
+        return self.op(self.frequency * t + self.phase)
 
 
 class CosFunction(OscillationFunction):
@@ -398,7 +402,7 @@ class ExpFunction(OscillationFunction):
         frequency: Union[float, ParameterExpression],
         phase: Union[float, ParameterExpression] = 0.
     ):
-        super().__init__(self._op, frequency, phase)
+        super().__init__(ExpFunction._op, frequency, phase)
 
 @dataclass(frozen=True)
 class ShiftFrequency:
