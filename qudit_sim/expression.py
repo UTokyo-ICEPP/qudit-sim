@@ -29,119 +29,78 @@ ArgsType = Union[Dict[str, Any], Tuple[Any, ...]]
 ReturnType = Union[complex, ArrayType]
 
 class Expression(ABC):
-    def __add__(self, other: Union['Expression', array_like]):
+    def __add__(self, other: Union['Expression', array_like]) -> 'Expression':
         return type(self)._binary_op(self, other, config.npmod.add)
 
-    def __sub__(self, other: Union['Expression', array_like]):
+    def __sub__(self, other: Union['Expression', array_like]) -> 'Expression':
         return type(self)._binary_op(self, other, config.npmod.subtract)
 
-    def __mul__(self, other: Union['Expression', array_like]):
+    def __mul__(self, other: Union['Expression', array_like]) -> 'Expression':
         return type(self)._binary_op(self, other, config.npmod.multiply)
 
-    def __radd__(self, other: Union['Expression', array_like]):
-        return self.__add__(other)
+    def __radd__(self, other: Union['Expression', array_like]) -> 'Expression':
+        if isinstance(other, Expression):
+            return type(self)._binary_op(other, self, config.npmod.add)
+        else:
+            return self.__add__(other)
 
-    def __rsub__(self, other: Union['Expression', array_like]):
-        return (-self).__add__(other)
+    def __rsub__(self, other: Union['Expression', array_like]) -> 'Expression':
+        if isinstance(other, Expression):
+            type(self)._binary_op(other, self, config.npmod.subtract)
+        else:
+            return (-self).__add__(other)
 
-    def __rmul__(self, other: Union['Expression', array_like]):
-        return self.__mul__(other)
+    def __rmul__(self, other: Union['Expression', array_like]) -> 'Expression':
+        if isinstance(other, Expression):
+            type(self)._binary_op(other, self, config.npmod.multiply)
+        else:
+            return self.__mul__(other)
 
-    def __abs__(self):
+    def __abs__(self) -> 'Expression':
         return type(self)._unary_op(self, config.npmod.abs)
 
-    def __neg__(self):
+    def __neg__(self) -> 'Expression':
         return type(self)._unary_op(self, config.npmod.negative)
 
-    def conjugate(self):
+    def conjugate(self) -> 'Expression':
         return type(self)._unary_op(self, config.npmod.conjugate)
 
     @property
-    def real(self):
+    def real(self) -> 'Expression':
         return type(self)._unary_op(self, config.npmod.real)
 
     @property
-    def imag(self):
+    def imag(self) -> 'Expression':
         return type(self)._unary_op(self, config.npmod.imag)
-
-    @classmethod
-    def _binary_op(
-        cls,
-        lexpr: 'Expression',
-        rexpr: Union['Expression', array_like],
-        op: Callable
-    ) -> 'Expression':
-        raise NotImplementedError('To be implemented in subclasses.')
-
-    @classmethod
-    def _unary_op(
-        cls,
-        expr: 'Expression',
-        op: Callable
-    ) -> 'Expression':
-        raise NotImplementedError('To be implemented in subclasses.')
 
 
 class ParameterExpression(Expression):
-    def subs(self, args: Dict[str, Any]):
+    def subs(self, **kwargs) -> ReturnType:
         raise NotImplementedError('To be implemented in subclasses.')
 
-    def evaluate(self, args: Tuple[Any, ...]):
+    def evaluate(self, args: Tuple[Any, ...]) -> ReturnType:
         raise NotImplementedError('To be implemented in subclasses.')
 
-    @classmethod
-    def _binary_op(
-        cls,
-        lexpr: 'ParameterExpression',
-        rexpr: Union['ParameterExpression', array_like],
-        op: Callable
-    ) -> 'ParameterExpression':
-        if isinstance(rexpr, ParameterExpression):
-            def fn(args):
-                l_num_params = len(lexpr.parameters)
-                return op(
-                    lexpr.evaluate(args[:l_num_params]),
-                    rexpr.evaluate(args[l_num_params:])
-                )
-
-            return ParameterFunction(fn, lexpr.parameters + rexpr.parameters)
-
-        elif isinstance(rexpr, (np.ndarray, jnp.ndarray, Number)):
-            def fn(args):
-                return op(lexpr.evaluate(args), rexpr)
-
-            return ParameterFunction(fn, lexpr.parameters)
-
-        else:
-            raise TypeError(f'Cannot apply {op} to {type(lexpr)} and {type(rexpr)}')
-
-    @classmethod
-    def _unary_op(
-        cls,
-        expr: 'ParameterExpression',
-        op: Callable
-    ) -> 'ParameterExpression':
-        def fn(args):
-            return op(expr.evaluate(args))
-
-        return ParameterFunction(fn, expr.parameters)
+    @property
+    def parameters(self) -> Tuple[str, ...]:
+        raise NotImplementedError('To be implemented in subclasses.')
 
 
 class Constant(ParameterExpression):
-    def __init__(self, value):
+    def __init__(self, value: ReturnType):
         self.value = value
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f'Constant({self.value})'
 
-    def subs(self, args: Dict[str, Any] = {}):
+    def subs(self, **kwargs) -> ReturnType:
         return self.value
 
-    def evaluate(self, args: Tuple[Any, ...] = ()):
+    def evaluate(self, args: Tuple[Any, ...] = ()) -> ReturnType:
         return self.value
 
     @property
-    def parameters(self):
+    def parameters(self) -> Tuple[str, ...]:
         return ()
 
 
@@ -149,17 +108,17 @@ class Parameter(ParameterExpression):
     def __init__(self, name: str):
         self.name = name
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f'Parameter({self.name})'
 
-    def subs(self, args: Dict[str, Any]):
-        return args[self.parameters[0]]
+    def subs(self, **kwargs) -> ReturnType:
+        return kwargs[self.parameters[0]]
 
-    def evaluate(self, args: Tuple[Any, ...]):
+    def evaluate(self, args: Tuple[Any, ...]) -> ReturnType:
         return args[0]
 
     @property
-    def parameters(self):
+    def parameters(self) -> Tuple[str, ...]:
         return (self.name,)
 
 
@@ -172,15 +131,68 @@ class ParameterFunction(ParameterExpression):
         self.parameters = parameters
         self.fn = fn
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f'ParameterFunction({", ".join(self.parameters)})'
 
-    def subs(self, args: Optional[Dict[str, Any]] = None):
-        args = tuple(args[key] for key in self.parameters)
+    def subs(self, **kwargs) -> ReturnType:
+        args = tuple(kwargs[key] for key in self.parameters)
+        return self.evaluate(args)
+
+    def evaluate(self, args: Optional[Tuple[Any, ...]] = None) -> ReturnType:
         return self.fn(args)
 
-    def evaluate(self, args: Optional[Tuple[Any, ...]] = None):
-        return self.fn(args)
+
+class _ParameterUnaryOp(ParameterFunction):
+    def __init__(
+        self,
+        expr: ParameterExpression,
+        op: Callable
+    ):
+        self.expr = expr
+        self.op = op
+
+        super().__init__(self._fn, self.expr.parameters)
+
+    def _fn(self, args: Optional[Tuple[Any, ...]] = None) -> ReturnType:
+        return self.op(self.expr.evaluate(args))
+
+ParameterExpression._unary_op = _ParameterUnaryOp
+
+
+class _ParameterBinaryOp(ParameterFunction):
+    """Binary operation between ParameterExpressions."""
+    def __init__(
+        self,
+        lexpr: ParameterExpression,
+        rexpr: Union[ParameterExpression, array_like],
+        op: Callable
+    ):
+        self.lexpr = lexpr
+        self.rexpr = rexpr
+        self.op = op
+
+        if isinstance(rexpr, ParameterExpression):
+            fn = self._fn_ParameterExpression
+            parameters = self.lexpr.parameters + self.rexpr.parameters
+        elif isinstance(rexpr, (np.ndarray, jnp.ndarray, Number)):
+            fn = self._fn_array_like
+            parameters = self.lexpr.parameters
+        else:
+            raise TypeError(f'Cannot apply {op} to {type(lexpr)} and {type(rexpr)}')
+
+        super().__init__(fn, parameters)
+
+    def _fn_ParameterExpression(self, args: Optional[Tuple[Any, ...]] = None) -> ReturnType:
+        l_num_params = len(self.lexpr.parameters)
+        return self.op(
+            self.lexpr.evaluate(args[:l_num_params]),
+            self.rexpr.evaluate(args[l_num_params:])
+        )
+
+    def _fn_array_like(self, args: Optional[Tuple[Any, ...]] = None) -> ReturnType:
+        return self.op(self.lexpr.evaluate(args), self.rexpr)
+
+ParameterExpression._binary_op = _ParameterBinaryOp
 
 
 class TimeFunction(Expression):
@@ -198,7 +210,7 @@ class TimeFunction(Expression):
         else:
             self.parameters = parameters
 
-    def __str__(self):
+    def __str__(self) -> str:
         if self.tzero == 0.:
             targ = 't'
         else:
@@ -212,52 +224,120 @@ class TimeFunction(Expression):
 
         return self.fn(t - self.tzero, args)
 
-    @classmethod
-    def _binary_op(
-        cls,
-        lexpr: 'TimeFunction',
-        rexpr: Union['TimeFunction', array_like],
+
+class _TimeFunctionUnaryOp(TimeFunction):
+    def __init__(
+        self,
+        expr: TimeFunction,
         op: Callable
-    ) -> 'TimeFunction':
+    ):
+        self.expr = expr
+        self.op = op
+
+        super().__init__(self._fn, self.expr.parameters)
+
+    def _fn(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
+        return self.op(self.expr.fn(t - self.expr.tzero, args))
+
+TimeFunction._unary_op = _TimeFunctionUnaryOp
+
+
+class _TimeFunctionBinaryOp(TimeFunction):
+    def __init__(
+        self,
+        lexpr: TimeFunction,
+        rexpr: Union[TimeFunction, array_like],
+        op: Callable
+    ):
+        self.lexpr = lexpr
+        self.rexpr = rexpr
+        self.op = op
+
         if isinstance(rexpr, TimeFunction):
-            def fn(t, args=()):
-                l_num_params = len(lexpr.parameters)
-                return op(
-                    lexpr.fn(t - lexpr.tzero, args[:l_num_params]),
-                    rexpr.fn(t - rexpr.tzero, args[l_num_params:])
-                )
-
-            return TimeFunction(fn, lexpr.parameters + rexpr.parameters)
-
+            fn = self._fn_TimeFunction
+            parameters = lexpr.parameters + rexpr.parameters
         elif isinstance(rexpr, ParameterExpression):
-            def fn(t, args=()):
-                l_num_params = len(lexpr.parameters)
-                return op(
-                    lexpr.fn(t - lexpr.tzero, args[:l_num_params]),
-                    rexpr.evaluate(args[l_num_params:])
-                )
-
-            return TimeFunction(fn, lexpr.parameters + rexpr.parameters)
-
+            fn = self._fn_ParameterExpression
+            parameters = lexpr.parameters + rexpr.parameters
         elif isinstance(rexpr, (Number, np.ndarray, jnp.ndarray)):
-            def fn(t, args=()):
-                return op(
-                    lexpr.fn(t - lexpr.tzero, args),
-                    rexpr
-                )
-
-            return TimeFunction(fn, lexpr.parameters)
-
+            fn = self._fn_array_like
+            parameters = lexpr.parameters
         else:
             raise TypeError(f'Cannot apply {op} to {type(lexpr)} and {type(rexpr)}')
 
-    @classmethod
-    def _unary_op(
-        cls,
-        expr: 'TimeFunction',
-        op: Callable
-    ) -> 'TimeFunction':
-        def fn(t, args=()):
-            return op(expr.fn(t - expr.tzero, args))
+        super().__init__(fn, parameters)
 
-        return TimeFunction(fn, expr.parameters)
+    def _fn_TimeFunction(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
+        l_num_params = len(self.lexpr.parameters)
+        return self.op(
+            self.lexpr.fn(t - self.lexpr.tzero, args[:l_num_params]),
+            self.rexpr.fn(t - self.rexpr.tzero, args[l_num_params:])
+        )
+
+    def _fn_ParameterExpression(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
+        l_num_params = len(self.lexpr.parameters)
+        return self.op(
+            self.lexpr.fn(t - self.lexpr.tzero, args[:l_num_params]),
+            self.rexpr.evaluate(args[l_num_params:])
+        )
+
+    def _fn_array_like(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
+        return self.op(
+            self.lexpr.fn(t - self.lexpr.tzero, args),
+            self.rexpr
+        )
+
+TimeFunction._binary_op = _TimeFunctionBinaryOp
+
+
+class ConstantFunction(TimeFunction):
+    def __init__(
+        self,
+        value: Union[Number, ParameterExpression]
+    ):
+        self.value = value
+        if isinstance(value, Number):
+            fn = self._fn_Number
+            parameters = ()
+        else:
+            fn = self._fn_ParameterExpression
+            parameters = value.parameters
+
+        super().__init__(fn, parameters)
+
+    def _fn_Number(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
+        return self.value
+
+    def _fn_ParameterExpression(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
+        return self.value.evaluate(args)
+
+
+class PiecewiseFunction(TimeFunction):
+    def __init__(
+        self,
+        timelist: Sequence[float],
+        funclist: Sequence[TimeFunction]
+    ):
+        self.timelist = timelist
+        self.funclist = funclist
+
+        parameters = sum(func.parameters for func in funclist, ())
+        super().__init__(self._fn, parameters)
+
+    def _fn(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
+        npmod = config.npmod
+        t = npmod.asarray(t)
+
+        result = 0.
+        iarg = 0
+        for time, func, _ in zip(self.timelist[:-1], self.funclist):
+            nparam = len(func.parameters)
+            result = npmod.where(
+                t > time,
+                func.fn(t - func.tzero, args[iarg:iarg + nparam]),
+                result
+            )
+            iarg += nparam
+
+        result = npmod.where(t > self.timelist[-1], 0., result)
+        return result

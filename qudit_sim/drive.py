@@ -15,7 +15,8 @@ from dataclasses import dataclass
 import warnings
 import numpy as np
 
-from .expression import ParameterExpression, Parameter, TimeFunction, ArrayType
+from .expression import (ParameterExpression, Parameter, TimeFunction, ConstantFunction, PiecewiseFunction,
+                         TimeType, ArgsType, ArrayType, ResultType)
 from .pulse import Pulse
 from .config import config
 
@@ -148,21 +149,12 @@ class DriveTerm:
             fn_y = funclist[0][2]
 
         elif all(isinstance(func, TimeFunction) for _, func, _ in funclist[:-1]):
-            npmod = config.npmod
+            timelist = list(f[0] for f in funclist)
+            xlist = list(f[1] for f in funclist)
+            ylist = list(f[2] for f in funclist)
 
-            def fn_x(t, args):
-                result = 0.
-                for time, func, _ in funclist[:-1]:
-                    result = npmod.where(t > time, func(t, args), result)
-                result = npmod.where(t > funclist[-1][0], 0., result)
-                return result
-
-            def fn_y(t, args):
-                result = 0.
-                for time, _, func in funclist[:-1]:
-                    result = npmod.where(t > time, func(t, args), result)
-                result = npmod.where(t > funclist[-1][0], 0., result)
-                return result
+            fn_x = PiecewiseFunction(timelist, xlist)
+            fn_y = PiecewiseFunction(timelist, ylist)
 
         elif all(isinstance(func, np.ndarray) for _, func, _ in funclist[:-1]):
             fn_x = np.concatenate(list(x for _, x, _ in funclist[:-1]))
@@ -341,25 +333,6 @@ def _generate_single_full(amplitude, frequency, frame_frequency, drive_base, tze
             return labframe_fn * CosFunction(frame_frequency), labframe_fn * SinFunction(frame_frequency)
 
 
-class ConstantFunction(TimeFunction):
-    def __init__(
-        self,
-        value: Union[Number, ParameterExpression]
-    ):
-        if isinstance(value, Number):
-            def fn(t, args):
-                return value
-
-            parameters = ()
-        else:
-            def fn(t, args):
-                return value.evaluate(args)
-
-            parameters = value.parameters
-
-        super().__init__(fn, parameters)
-
-
 class OscillationFunction(TimeFunction):
     def __init__(
         self,
@@ -369,28 +342,35 @@ class OscillationFunction(TimeFunction):
     ):
         if isinstance(frequency, ParameterExpression):
             if isinstance(phase, ParameterExpression):
-                freq_n_params = len(frequency.parameters)
-                def fn(t, args):
-                    return op(frequency.evaluate(args[:freq_n_params]) * t
-                              + phase.evaluate(args[freq_n_params:]))
-
-                super().__init__(fn, frequency.parameters + phase.parameters)
+                fn = self._fn_PE_PE
+                parameters = frequency.parameters + phase.parameters
             else:
-                def fn(t, args):
-                    return op(frequency.evaluate(args) * t + phase)
-
-                super().__init__(fn, frequency.parameters)
+                fn = self._fn_PE_float
+                parameters = frequency.parameters
         else:
             if isinstance(phase, ParameterExpression):
-                def fn(t, args):
-                    return op(frequency * t + phase.evaluate(args))
-
-                super().__init__(fn, phase.parameters)
+                fn = self._fn_float_PE
+                parameters = phase.parameters
             else:
-                def fn(t, args=()):
-                    return op(frequency * t + phase)
+                fn = self._fn_float_float
+                parameters = ()
 
-                super().__init__(fn, ())
+        super().__init__(fn, parameters)
+
+    def _fn_PE_PE(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
+        freq_n_params = len(self.frequency.parameters)
+        return self.op(self.frequency.evaluate(args[:freq_n_params]) * t
+                       + self.phase.evaluate(args[freq_n_params:]))
+
+    def _fn_PE_float(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
+        return self.op(self.frequency.evaluate(args) * t + phase)
+
+    def _fn_float_PE(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
+        return self.op(self.frequency * t + self.phase.evaluate(args))
+
+    def _fn_float_float(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
+        return self.op(self.frequency * t + phase)
+
 
 class CosFunction(OscillationFunction):
     def __init__(
