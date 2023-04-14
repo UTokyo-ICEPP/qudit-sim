@@ -15,15 +15,10 @@ import copy
 import numpy as np
 import qutip as qtp
 
-from .drive import DriveTerm, CosFunction, SinFunction, SetFrequency
+from .drive import DriveTerm, CosFunction, SinFunction, SetFrequency, HamiltonianCoefficient
+from .frame import FrameSpec, SystemFrame
 
-@dataclass(frozen=True)
-class Frame:
-    """Frame specification for a single level gap of a qudit."""
-    frequency: np.ndarray
-    phase: np.ndarray
-
-FrameSpec = Union[str, Dict[Hashable, Frame], Sequence[Frame]]
+QobjCoeffPair = List[Union[qtp.Qobj, HamiltonianCoefficient]]
 
 @dataclass(frozen=True)
 class QuditParams:
@@ -58,8 +53,7 @@ class HamiltonianBuilder:
             augmented with ``'crosstalk'``, which should be a ``dict`` of form ``{(j, k): z}`` specifying the crosstalk
             factor ``z`` (complex corresponding to :math:`\alpha_{jk} e^{i\rho_{jk}}`) of drive on qudit :math:`j` seen
             by qudit :math:`k`. :math:`j` and :math:`k` are qudit ids given in ``qudits``.
-        default_frame: Default global frame to use. ``set_global_frame(default_frame, keep_phase=True)`` is executed
-            each time ``add_qudit`` or ``add_coupling`` is called.
+        default_frame: Default global frame to use.
     """
     def __init__(
         self,
@@ -77,7 +71,6 @@ class HamiltonianBuilder:
         self._coupling = dict()
         self._crosstalk = dict()
         self._drive = dict()
-        self._frame = dict()
 
         self.compile_hint = True
         self.use_rwa = False
@@ -131,7 +124,7 @@ class HamiltonianBuilder:
 
     def coupling(self, q1: Hashable, q2: Hashable) -> float:
         """Coupling constant between the two qudits."""
-        return self._coupling[frozenset({q1, q2})]
+        return self._coupling.get(frozenset({q1, q2}), 0.)
 
     def crosstalk(self, source: Hashable, target: Hashable) -> complex:
         """Crosstalk factor from source to target."""
@@ -146,16 +139,6 @@ class HamiltonianBuilder:
             return copy.deepcopy(self._drive)
         else:
             return list(self._drive[qudit_id])
-
-    def frame(
-        self,
-        qudit_id: Optional[Hashable] = None
-    ) -> Union[Dict[Hashable, Frame], Frame]:
-        """Frame of the qudit."""
-        if qudit_id is None:
-            return copy.deepcopy(self._frame)
-        else:
-            return self._frame[qudit_id]
 
     def add_qudit(
         self,
@@ -205,9 +188,6 @@ class HamiltonianBuilder:
 
         self._drive[qudit_id] = list()
         self._crosstalk[(qudit_id, qudit_id)] = 1.
-        self.set_frame(qudit_id)
-
-        self.set_global_frame(self.default_frame, keep_phase=True)
 
     def identity_op(self) -> qtp.Qobj:
         return qtp.tensor([qtp.qeye(self._num_levels)] * self.num_qudits)
@@ -222,13 +202,9 @@ class HamiltonianBuilder:
         Returns:
             An array of energy eigenvalues.
         """
-        hgen = self.copy(clear_drive=True)
+        hstatic = self.build_h0() + self.build_hint()[0]
 
-        # Move to the lab frame first to build a fully static H0+Hint
-        hgen.set_global_frame('lab')
-        hamiltonian = hgen.build()[0]
-
-        eigvals, unitary = np.linalg.eigh(hamiltonian.full())
+        eigvals, unitary = np.linalg.eigh(hstatic.full())
         # hamiltonian == unitary @ np.diag(eigvals) @ unitary.T.conjugate()
 
         # Row index of the biggest contributor to each column
@@ -345,303 +321,9 @@ class HamiltonianBuilder:
         else:
             return frequencies[qudit_id]
 
-    def set_frame(
-        self,
-        qudit_id: Hashable,
-        frequency: Optional[np.ndarray] = None,
-        phase: Optional[Union[np.ndarray, float]] = None
-    ) -> None:
-        """Set the frame for the qudit.
-
-        The arrays must be of size `num_levels - 1`.
-
-        Args:
-            qudit_id: Qudit ID.
-            frequency: Frame frequency for each level gap. If None, set to qudit-frame frequencies.
-            phase: Frame phase shift, either as a single global value or an array specifying the
-                phase shift for each level gap. If None, set to zero.
-        """
-        if frequency is None:
-            frequency = self.free_frequencies(qudit_id)
-
-        if phase is None:
-            phase = np.zeros(self._num_levels - 1)
-        elif isinstance(phase, float):
-            phase = np.full(self._num_levels - 1, phase)
-
-        self._frame[qudit_id] = Frame(frequency=frequency, phase=phase)
-
-    def _frame_arrays(self, frame_spec: FrameSpec) -> Tuple[np.ndarray, np.ndarray]:
-        if isinstance(frame_spec, str):
-            drive_frame = False
-
-            if (frame_spec == 'dressed' or frame_spec.startswith('noiz')) and len(self._coupling) == 0:
-                frame_spec = 'qudit'
-
-            elif frame_spec == 'drive':
-                frame_spec = self.default_frame
-                drive_frame = True
-
-            qudit_ids = self.qudit_ids()
-            frequencies = None
-
-            if frame_spec == 'qudit':
-                freqs = self.free_frequencies()
-                frequencies = np.array([freqs[qudit_id] for qudit_id in qudit_ids])
-            elif frame_spec == 'lab':
-                frequencies = np.zeros((self.num_qudits, self._num_levels - 1))
-            elif frame_spec == 'dressed':
-                freqs = self.dressed_frequencies()
-                frequencies = np.array([freqs[qudit_id] for qudit_id in qudit_ids])
-            elif frame_spec.startswith('noiz'):
-                if len(frame_spec) > 4:
-                    comp_dim = int(frame_spec[4:])
-                else:
-                    comp_dim = 0
-
-                freqs = self.noiz_frequencies(comp_dim=comp_dim)
-                frequencies = np.array([freqs[qudit_id] for qudit_id in qudit_ids])
-
-            if drive_frame:
-                for qid, drives in self._drive.items():
-                    if len(drives) == 1:
-                        idx = self.qudit_index(qid)
-                        frequencies[idx] = np.full(self._num_levels - 1, drives[0].frequency)
-                    elif len(drives) != 0:
-                        raise RuntimeError(f'Qudit {qid} has more than one drive terms')
-
-            elif frequencies is None:
-                raise ValueError(f'Global frame {frame_spec} is not defined')
-
-            phases = np.zeros((self.num_qudits, self._num_levels - 1))
-
-        elif isinstance(frame_spec, dict):
-            qudit_ids = self.qudit_ids()
-            frequencies = np.array([frame_spec[qudit_id].frequency for qudit_id in qudit_ids])
-            phases = np.array([frame_spec[qudit_id].phase for qudit_id in qudit_ids])
-
-        else:
-            frequencies = np.array([frame.frequency for frame in frame_spec])
-            phases = np.array([frame.phase for frame in frame_spec])
-
-        return frequencies, phases
-
-    def set_global_frame(self, frame_spec: FrameSpec, keep_phase: bool = False) -> None:
-        r"""Set frames for all qudits globally.
-
-        The allowed frame names are:
-
-        - 'qudit': Set frame frequencies to the individual qudit level gaps disregarding the couplings.
-          Equivalent to calling `set_frame(qid, frequency=None, phase=None)` for all `qid`.
-        - 'lab': Set frame frequencies to zero.
-        - 'dressed': Diagonalize the static Hamiltonian (in the lab frame) and set the frame frequencies
-          to cancel the phase drifts of single-qudit excitations.
-        - 'drive': For qudits with a drive term, set the frame frequency for all levels to that of the drive.
-          Use the default frame for qudits without a drive. Exception is raised if there are qudits with
-          more than one drive terms.
-
-        Args:
-            frame_spec: Frame specification in dict or list form, or a frame name ('qudit', 'lab',
-            'dressed', or 'drive').
-        """
-        frequencies, phases = self._frame_arrays(frame_spec)
-
-        qudit_ids = self.qudit_ids()
-
-        if keep_phase:
-            current_frame = self.frame()
-            phases = np.array([current_frame[qudit_id].phase for qudit_id in qudit_ids])
-
-        for idx, (frequency, phase) in enumerate(zip(frequencies, phases)):
-            self.set_frame(qudit_ids[idx], frequency=frequency, phase=phase)
-
-    def frame_change_operator(
-        self,
-        from_frame: FrameSpec,
-        to_frame: Optional[FrameSpec] = None
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        r"""Compute the change-of-frame operator.
-
-        Change of frame from
-
-        .. math::
-
-            U_{f}(t) = \bigotimes_j \exp \left[ i \sum_l \left( \Xi_j^l t + \Phi_j^l \right) | l \rangle_j \langle l |_j \right]
-
-        to
-
-        .. math::
-
-            U_{g}(t) = \bigotimes_j \exp \left[ i \sum_l \left( \Eta_j^l t + \Psi_j^l \right) | l \rangle_j \langle l |_j \right]
-
-        is effected by
-
-        .. math::
-
-            V_{gf}(t) = U_g(t) U_f^{\dagger}(t) = \bigotimes_j \exp \left[ i \sum_l \left\{ (\Eta_j^l - \Xi_j^l) t + (\Psi_j^l - \Phi_j^l) \right\} | l \rangle_j \langle l |_j \right].
-
-        Args:
-            from_frame: Specification of original frame.
-            to_frame: Specification of new frame. If None, the current frame is used.
-
-        Returns:
-            Flattened arrays corresponding to :math:`[\sum_{j} \Xi_j^{l_j}]_{\{l_j\}}` and :math:`[\sum_{j} \Phi_j^{l_j}]_{\{l_j\}}`.
-        """
-        if to_frame is None:
-            frequencies = np.array([frame.frequency for frame in self._frame.values()])
-            phases = np.array([frame.phase for frame in self._frame.values()])
-        else:
-            frequencies, phases = self._frame_arrays(to_frame)
-
-        from_freq, from_phase = self._frame_arrays(from_frame)
-
-        frequencies -= from_freq
-        phases -= from_phase
-
-        energies = np.concatenate((np.zeros(self.num_qudits)[:, None], np.cumsum(frequencies, axis=1)), axis=1)
-        offsets = np.concatenate((np.zeros(self.num_qudits)[:, None], np.cumsum(phases, axis=1)), axis=1)
-
-        en_diagonal = add_outer_multi(energies)
-        offset_diagonal = add_outer_multi(offsets)
-
-        return en_diagonal, offset_diagonal
-
-    def change_frame(
-        self,
-        tlist: np.ndarray,
-        obj: Union[np.ndarray, qtp.Qobj],
-        from_frame: FrameSpec,
-        to_frame: Optional[FrameSpec] = None,
-        objtype: str = 'evolution',
-        t0: Optional[float] = None
-    ) -> np.ndarray:
-        r"""Apply the change-of-frame unitaries to states, unitaries, hamiltonians, and observables.
-
-        Args:
-            tlist: 1D array of shape ``(T,)`` representing the time points.
-            obj: Qobj or an array of shape either ``(D)`` (state), ``(T, D)`` (state evolution), ``(T, D, D)``
-                (evolution operator, time-dependent Hamiltonian, or an observable), ``(D, D)``
-                (evolution operator for a single time point, Hamiltonian, or an observable), ``(N, D, D)``
-                (multiple observables), or ``(N, T, D, D)`` (multiple time-dependent observables), where ``D``
-                is the dimension of the quantum system (``num_levels ** num_qudits``) and ``N`` is the number
-                of observables.
-            from_frame: Specification of original frame.
-            to_frame: Specification of new frame. If None, the current frame is used.
-            objtype: ``'state'``, ``'evolution'``, ``'hamiltonian'``, or ``'observable'``. Ignored when
-                the type can be unambiguously inferred from the shape of ``obj``.
-            t0: Initial time for the frame change of the evolution operator. If None, ``tlist[0]`` is used.
-
-        Returns:
-            An array representing the frame-changed object.
-        """
-        if isinstance(obj, qtp.Qobj):
-            if obj.isket or obj.isbra:
-                obj = np.squeeze(obj.full())
-            else:
-                obj = obj.full()
-
-        ## Validate and determine the object shape & type
-        state_dim = self.num_levels ** self.num_qudits
-        shape_consistent = True
-        type_valid = True
-
-        final_shape = obj.shape
-
-        if len(obj.shape) == 1:
-            if obj.shape[0] != state_dim:
-                shape_consistent = False
-
-            if objtype == 'state':
-                obj = obj[None, :]
-                final_shape = tlist.shape + final_shape
-
-            else:
-                type_valid = False
-
-        elif len(obj.shape) == 2:
-            if obj.shape[1] != state_dim:
-                shape_consistent = False
-
-            if state_dim != tlist.shape[0] and obj.shape[0] == tlist.shape[0]:
-                # Unambiguously determined
-                objtype = 'state'
-
-            if objtype == 'state':
-                if obj.shape[0] != tlist.shape[0]:
-                    shape_consistent = False
-
-            elif objtype in ['evolution', 'hamiltonian', 'observable']:
-                if obj.shape[0] != state_dim:
-                    shape_consistent = False
-
-                obj = obj[None, ...]
-                final_shape = tlist.shape + final_shape
-
-            else:
-                type_valid = False
-
-        elif len(obj.shape) == 3:
-            if objtype in ['evolution', 'hamiltonian']:
-                if obj.shape[0] != tlist.shape[0] or obj.shape[1:] != (state_dim, state_dim):
-                    shape_consistent = False
-
-            elif objtype == 'observable':
-                if obj.shape[1:] != (state_dim, state_dim):
-                    shape_consistent = False
-
-                if obj.shape[0] != tlist.shape[0]:
-                    # Ambiguity - we may be talking about T observables, but that's rather unprobable
-                    obj = obj[:, None, ...]
-                    final_shape = (obj.shape[0], tlist.shape[0]) + obj.shape[1:]
-
-            else:
-                type_valid = False
-
-        elif len(obj.shape) == 4:
-            if obj.shape[1:] != (tlist.shape[0], state_dim, state_dim):
-                shape_consistent = False
-
-            if objtype != 'observable':
-                type_valid = False
-
-        else:
-            shape_consistent = False
-
-        if not type_valid:
-            raise ValueError(f'Invalid objtype {objtype} for an obj of shape {obj.shape}')
-        if not shape_consistent:
-            raise ValueError(f'Inconsistent obj shape {obj.shape} for objtype {objtype} and tlist length {tlist.shape[0]}')
-
-        en_diagonal, offset_diagonal = self.frame_change_operator(from_frame, to_frame)
-        cof_op_diag = np.exp(1.j * (en_diagonal[None, :] * tlist[:, None] + offset_diagonal))
-
-        if objtype == 'state':
-            # Left-multiplying by a diagonal is the same as element-wise multiplication
-            obj = cof_op_diag * obj
-
-        elif objtype == 'evolution':
-            # Right-multiplying by the inverse of a diagonal unitary = element-wise multiplication
-            # of the columns by the conjugate
-            if t0 is None:
-                cof_op_diag_t0_conj = cof_op_diag[0].conjugate()
-            else:
-                cof_op_diag_t0_conj = np.exp(-1.j * (en_diagonal * t0 + offset_diagonal))
-
-            obj = cof_op_diag[:, :, None] * obj * cof_op_diag_t0_conj
-
-        elif objtype == 'hamiltonian':
-            obj = cof_op_diag[:, :, None] * obj * cof_op_diag[:, None, :].conjugate() - np.diag(en_diagonal)
-
-        elif objtype == 'observable':
-            obj = cof_op_diag[:, :, None] * obj * cof_op_diag[:, None, :].conjugate()
-
-        return obj.reshape(final_shape)
-
     def add_coupling(self, q1: Hashable, q2: Hashable, value: float) -> None:
         """Add a coupling term between two qudits."""
         self._coupling[frozenset({q1, q2})] = value
-
-        self.set_global_frame(self.default_frame, keep_phase=True)
 
     def add_crosstalk(self, source: Hashable, target: Hashable, factor: complex) -> None:
         r"""Add a crosstalk term from the source channel to the target qudit.
@@ -684,6 +366,7 @@ class HamiltonianBuilder:
 
     def build(
         self,
+        frame: Optional[FrameSpec] = None,
         tlist: Optional[np.ndarray] = None,
         args: Optional[Dict[str, Any]] = None
     ) -> List:
@@ -697,16 +380,19 @@ class HamiltonianBuilder:
         Returns:
             A list of Hamiltonian terms that can be passed to qutip.sesolve.
         """
-        hstatic = self.build_hdiag()
-        hint = self.build_hint(tlist=tlist)
-        hdrive = self.build_hdrive(tlist=tlist, args=args)
+        if frame is not None and not isinstance(frame, SystemFrame):
+            frame = SystemFrame(frame, self)
+
+        hstatic = self.build_h0(frame=frame)
+        hint = self.build_hint(frame=frame, tlist=tlist)
+        hdrive = self.build_hdrive(frame=frame, tlist=tlist, args=args)
 
         if hint and isinstance(hint[0], qtp.Qobj):
             hstatic += hint.pop(0)
         if hdrive and isinstance(hdrive[0], qtp.Qobj):
             hstatic += hdrive.pop(0)
 
-        hamiltonian = []
+        hamiltonian = list()
 
         if np.any(hstatic.data.data):
             # The static term does not have to be the first element (nor does it have to be a single term, actually)
@@ -723,16 +409,29 @@ class HamiltonianBuilder:
         hfree += np.square(np.arange(self._num_levels)) * params.anharmonicity / 2.
         return hfree
 
-    def build_hdiag(self) -> qtp.Qobj:
+    def build_h0(
+        self,
+        frame: Optional[FrameSpec] = None
+    ) -> qtp.Qobj:
         """Build the diagonal term of the Hamiltonian.
 
+        Args:
+            frame: System frame to build the Hamiltonian in.
+
         Returns:
-            A Qobj representing Hdiag. The object may be empty if the qudit frame is used.
+            A Qobj representing Hdiag.
         """
+        if frame is not None and not isinstance(frame, SystemFrame):
+            frame = SystemFrame(frame, self)
+
         hdiag = qtp.tensor([qtp.qzero(self._num_levels)] * self.num_qudits)
 
-        for qudit_id, frame in self._frame.items():
-            energy_offset = np.cumsum(self.free_frequencies(qudit_id)) - np.cumsum(frame.frequency)
+        for qudit_id in self.qudit_ids():
+            energy_offset = np.cumsum(self.free_frequencies(qudit_id))
+
+            if frame:
+                energy_offset -= np.cumsum(frame[qudit_id].frequency)
+
             # If in qudit frame, energy_offset is zero for all levels
             if np.allclose(energy_offset, np.zeros_like(energy_offset)):
                 continue
@@ -749,11 +448,13 @@ class HamiltonianBuilder:
 
     def build_hint(
         self,
+        frame: Optional[FrameSpec] = None,
         tlist: Optional[np.ndarray] = None
-    ) -> List:
+    ) -> List[Union[qtp.Qobj, QobjCoeffPair]]:
         """Build the interaction Hamiltonian.
 
         Args:
+            frame: System frame to build the Hamiltonian in.
             tlist: Array of time points. If provided and `self.compile_hint` is False, all dynamic coefficients
                 are taken as functions and called with `(tlist, None)`, and the resulting arrays are returned.
 
@@ -761,6 +462,9 @@ class HamiltonianBuilder:
             A list of Hamiltonian terms. The first entry may be a single Qobj instance if there is a static term.
             Otherwise the entries are 2-lists `[Qobj, c(t)]`.
         """
+        if frame is not None and not isinstance(frame, SystemFrame):
+            frame = SystemFrame(frame, self)
+
         hint = list()
         hstatic = qtp.tensor([qtp.qzero(self._num_levels)] * self.num_qudits)
 
@@ -786,12 +490,9 @@ class HamiltonianBuilder:
                 frequency = 0.
 
                 for qudit_id, level, sign in [(q1, l1, 1.), (q2, l2, -1.)]:
-                    frame = self._frame[qudit_id]
-
-                    if frame.phase[level] != 0.:
-                        op *= np.exp(sign * 1.j * frame.phase[level])
-
-                    frequency += sign * frame.frequency[level]
+                    if frame:
+                        op *= np.exp(sign * 1.j * frame[qudit_id].phase[level])
+                        frequency += sign * frame[qudit_id].frequency[level]
 
                 if np.isclose(frequency, 0.):
                     hstatic += coupling * (op + op.dag())
@@ -820,12 +521,14 @@ class HamiltonianBuilder:
 
     def build_hdrive(
         self,
+        frame: Optional[FrameSpec] = None,
         tlist: Optional[np.ndarray] = None,
         args: Optional[Dict[str, Any]] = None
-    ) -> List:
+    ) -> List[Union[qtp.Qobj, QobjCoeffPair]]:
         """Build the drive Hamiltonian.
 
         Args:
+            frame: System frame to build the Hamiltonian in.
             tlist: Array of time points. Required when at least one drive amplitude is given as an array.
             args: Arguments to the callable coefficients.
 
@@ -833,16 +536,16 @@ class HamiltonianBuilder:
             A list of Hamiltonian terms. The first entry may be a single Qobj instance if there is a static term.
             Otherwise the entries are 2-lists `[Qobj, c(t)]`.
         """
+        if frame is not None and not isinstance(frame, SystemFrame):
+            frame = SystemFrame(frame, self)
+
         hdrive = list()
         hstatic = qtp.tensor([qtp.qzero(self._num_levels)] * self.num_qudits)
 
         # Construct the Qobj for each qudit/level first
         qops = list()
 
-        for iq, qudit_id in enumerate(self._frame):
-            frame = self._frame[qudit_id]
-            params = self._qudit_params[qudit_id]
-
+        for iq, (qudit_id, params) in enumerate(self._qudit_params.items()):
             for level in range(self._num_levels - 1):
                 cre = params.drive_weight[level] * qtp.basis(self._num_levels, level + 1) * qtp.basis(self._num_levels, level).dag()
 
@@ -851,10 +554,13 @@ class HamiltonianBuilder:
 
                 op = qtp.tensor(ops)
 
-                if frame.phase[level] != 0.:
-                    op *= np.exp(1.j * frame.phase[level])
+                if frame:
+                    op *= np.exp(1.j * frame[qudit_id].phase[level])
+                    frame_freq = frame[qudit_id].frequency[level]
+                else:
+                    frame_freq = 0.
 
-                qops.append((qudit_id, op, frame.frequency[level]))
+                qops.append((qudit_id, op, frame_freq))
 
         # Loop over the drive channels
         for channel, drives in self._drive.items():
@@ -939,35 +645,39 @@ class HamiltonianBuilder:
 
         max_frequency = 0.
 
-        if frame is not None:
-            hgen = self.copy()
-            hgen.set_global_frame(frame)
-        else:
-            hgen = self
+        if frame is not None and not isinstance(frame, SystemFrame):
+            frame = SystemFrame(frame, self)
 
-        for q1, q2 in hgen._coupling.keys():
-            max_freq_diffs = np.amax(np.abs(np.subtract.outer(hgen._frame[q1].frequency, hgen._frame[q2].frequency)))
-            max_frequency = max(max_frequency, max_freq_diffs)
+        if frame:
+            max_freq_diffs = list()
+            for q1, q2 in self._coupling.keys():
+                freq_diffs = np.subtract.outer(frame[q1].frequency, frame[q2].frequency)
+                max_freq_diffs.append(np.amax(np.abs(freq_diffs)))
 
-        for qid, drives in hgen._drive.items():
-            if len(drives) == 0:
-                continue
+            for qid, drives in self._drive.items():
+                if len(drives) == 0:
+                    continue
 
-            drive_freqs = np.array(list(drive.frequency for drive in drives))
-            if self.use_rwa:
-                rel_sign = -1
-            else:
-                rel_sign = 1
+                drive_freqs = np.array(list(drive.frequency for drive in drives))
+                if self.use_rwa:
+                    rel_sign = -1
+                else:
+                    rel_sign = 1
 
-            max_frame_drive_freqs = np.amax(np.abs(np.add.outer(rel_sign * drive_freqs, hgen._frame[qid].frequency)))
-            max_frequency = max(max_frequency, max_frame_drive_freqs)
+                frame_drive_freqs = np.add.outer(rel_sign * drive_freqs, frame[qid].frequency)
+                max_freq_diffs.append(np.amax(np.abs(frame_drive_freqs)))
+
+            max_frequency = max(max_freq_diffs)
 
         if max_frequency == 0.:
             eigvals = self.eigenvalues()
 
+            max_level_gaps = list()
+
             for axis in range(self.num_qudits):
-                level_gaps = np.diff(eigvals, axis=axis)
-                max_frequency = max(max_frequency, np.amax(level_gaps))
+                max_level_gaps.append(np.amax(np.diff(eigvals, axis=axis)))
+
+            max_frequency = max(max_level_gaps)
 
         cycle = 2. * np.pi / max_frequency
 
@@ -1000,7 +710,5 @@ class HamiltonianBuilder:
         if not clear_drive:
             for qudit_id, drive in self._drive.items():
                 instance._drive[qudit_id].extend(drive)
-
-        instance._frame.update(self._frame.items())
 
         return instance
