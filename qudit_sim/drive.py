@@ -9,14 +9,13 @@ See :ref:`drive-hamiltonian` for theoretical background.
 """
 
 from typing import Callable, Optional, Union, Tuple, List, Any
-from numbers import Number
 import copy
 from dataclasses import dataclass
 import warnings
 import numpy as np
 
 from .expression import (ParameterExpression, Parameter, TimeFunction, ConstantFunction, PiecewiseFunction,
-                         TimeType, ArgsType, ArrayType, ReturnType)
+                         TimeType, ArrayType, ReturnType)
 from .pulse import Pulse
 from .config import config
 
@@ -236,9 +235,8 @@ def _generate_single_rwa(amplitude, frequency, frame_frequency, drive_base, tzer
         if not isinstance(amplitude, TimeFunction):
             amplitude = TimeFunction(amplitude)
 
-        if tzero != 0.:
-            envelope = copy.copy(amplitude * drive_base)
-            envelope.tzero = tzero
+        envelope = amplitude * drive_base
+        envelope.tzero = tzero
 
         if is_resonant:
             return envelope.real, envelope.imag
@@ -296,7 +294,7 @@ def _generate_single_full(amplitude, frequency, frame_frequency, drive_base, tze
     elif isinstance(amplitude, np.ndarray):
         double_envelope = amplitude * 2. * drive_base
 
-        labframe_fn = (double_envelope * ExpFunction(-frequency)).real
+        labframe_fn = (ExpFunction(-frequency) * double_envelope).real
 
     elif callable(amplitude):
         if not isinstance(amplitude, TimeFunction):

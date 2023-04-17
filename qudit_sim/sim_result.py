@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 import h5py
 
-from .hamiltonian import Frame
+from .frame import QuditFrame
 
 @dataclass(frozen=True)
 class PulseSimResult:
@@ -18,7 +18,7 @@ class PulseSimResult:
     expect: Union[List[np.ndarray], None]
     states: Union[np.ndarray, None]
     dim: Tuple[int, ...]
-    frame: Tuple[Frame, ...]
+    frame: Tuple[QuditFrame, ...]
 
 
 def save_sim_result(filename: str, result: PulseSimResult):
@@ -46,6 +46,6 @@ def load_sim_result(filename: str) -> PulseSimResult:
         except KeyError:
             states = None
         dim = tuple(source['dim'][()])
-        frame = tuple(Frame(d[0], d[1]) for d in source['frame'][()])
+        frame = tuple(QuditFrame(d[0], d[1]) for d in source['frame'][()])
 
     return PulseSimResult(times, expect, states, dim, frame)

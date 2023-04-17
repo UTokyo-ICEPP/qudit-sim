@@ -11,6 +11,7 @@ See :doc:`/hamiltonian` for theoretical background.
 from typing import Union, Dict, Hashable, Sequence, Tuple, Optional
 from dataclasses import dataclass
 import numpy as np
+import qutip as qtp
 
 @dataclass(frozen=True)
 class QuditFrame:
@@ -61,8 +62,12 @@ class SystemFrame(dict):
         """Compute the frequencies of a named frame."""
         drive_frame = False
 
-        if frame_name == 'drive':
-            frame_name = 'lab'
+        if frame_name.startswith('drive'):
+            # drive|base_frame
+            frame_name = frame_name[6:]
+            if not frame_name:
+                frame_name = 'dressed'
+
             drive_frame = True
 
         qudit_ids = hgen.qudit_ids()
@@ -97,6 +102,22 @@ class SystemFrame(dict):
 
         return {qudit_id: QuditFrame(frequencies[qudit_id], np.zeros(hgen.num_levels - 1))
                 for qudit_id in qudit_ids}
+
+    def set_frequency(
+        self,
+        qudit_id: Hashable,
+        frequency: np.ndarray
+    ):
+        current = self[qudit_id]
+        self[qudit_id] = QuditFrame(frequency, current.phase)
+
+    def set_phase(
+        self,
+        qudit_id: Hashable,
+        phase: np.ndarray
+    ):
+        current = self[qudit_id]
+        self[qudit_id] = QuditFrame(current.frequency, phase)
 
     def frame_change_operator(
         self,
@@ -280,3 +301,12 @@ class SystemFrame(dict):
             value &= np.allclose(qudit_frame.frequency, 0.) and np.allclose(qudit_frame.phase, 0.)
 
         return value
+
+
+def add_outer_multi(arr):
+    # Compute the summation "kron"
+    diagonal = np.zeros(1)
+    for subarr in arr:
+        diagonal = np.add.outer(diagonal, subarr).reshape(-1)
+
+    return diagonal

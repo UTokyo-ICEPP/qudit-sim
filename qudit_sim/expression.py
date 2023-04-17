@@ -15,7 +15,6 @@ from typing import Callable, Optional, Union, Tuple, Dict, Any, Sequence
 from numbers import Number
 from abc import ABC
 
-from dataclasses import dataclass
 import numpy as np
 import jax.numpy as jnp
 

@@ -8,14 +8,14 @@ Hamiltonian builder (:mod:`qudit_sim.hamiltonian`)
 See :doc:`/hamiltonian` for theoretical background.
 """
 
-from typing import Any, Dict, Sequence, List, Tuple, Callable, Optional, Union, Hashable
+from typing import Any, Dict, Sequence, List, Callable, Optional, Union, Hashable
 from numbers import Number
 from dataclasses import dataclass
 import copy
 import numpy as np
 import qutip as qtp
 
-from .drive import DriveTerm, CosFunction, SinFunction, SetFrequency, HamiltonianCoefficient
+from .drive import DriveTerm, SetFrequency, HamiltonianCoefficient
 from .frame import FrameSpec, SystemFrame
 
 QobjCoeffPair = List[Union[qtp.Qobj, HamiltonianCoefficient]]
@@ -27,15 +27,6 @@ class QuditParams:
     anharmonicity: float
     drive_amplitude: float
     drive_weight: np.ndarray
-
-
-def add_outer_multi(arr):
-    # Compute the summation "kron"
-    diagonal = np.zeros(1)
-    for subarr in arr:
-        diagonal = np.add.outer(diagonal, subarr).reshape(-1)
-
-    return diagonal
 
 
 class HamiltonianBuilder:
@@ -196,7 +187,7 @@ class HamiltonianBuilder:
         Returns:
             An array of energy eigenvalues.
         """
-        hstatic = self.build_hdiag() + self.build_hint()[0]
+        hstatic = self.build_hdiag(frame='lab') + self.build_hint(frame='lab')[0]
 
         eigvals, unitary = np.linalg.eigh(hstatic.full())
         # hamiltonian == unitary @ np.diag(eigvals) @ unitary.T.conjugate()
@@ -360,7 +351,7 @@ class HamiltonianBuilder:
 
     def build(
         self,
-        frame: Optional[FrameSpec] = None,
+        frame: FrameSpec = 'dressed',
         hint_compiled: bool = True,
         tlist: Optional[np.ndarray] = None,
         args: Optional[Dict[str, Any]] = None
@@ -375,7 +366,7 @@ class HamiltonianBuilder:
         Returns:
             A list of Hamiltonian terms that can be passed to qutip.sesolve.
         """
-        if frame is not None and not isinstance(frame, SystemFrame):
+        if not isinstance(frame, SystemFrame):
             frame = SystemFrame(frame, self)
 
         hstatic = self.build_hdiag(frame=frame)
@@ -399,14 +390,9 @@ class HamiltonianBuilder:
 
         return hamiltonian
 
-    def _qudit_hfree(self, params: QuditParams) -> np.ndarray:
-        hfree = np.arange(self._num_levels) * (params.qubit_frequency - params.anharmonicity / 2.)
-        hfree += np.square(np.arange(self._num_levels)) * params.anharmonicity / 2.
-        return hfree
-
     def build_hdiag(
         self,
-        frame: Optional[FrameSpec] = None
+        frame: FrameSpec = 'dressed'
     ) -> qtp.Qobj:
         """Build the diagonal term of the Hamiltonian.
 
@@ -416,16 +402,14 @@ class HamiltonianBuilder:
         Returns:
             A Qobj representing Hdiag.
         """
-        if frame is not None and not isinstance(frame, SystemFrame):
+        if not isinstance(frame, SystemFrame):
             frame = SystemFrame(frame, self)
 
         hdiag = qtp.tensor([qtp.qzero(self._num_levels)] * self.num_qudits)
 
         for qudit_id in self.qudit_ids():
             energy_offset = np.cumsum(self.free_frequencies(qudit_id))
-
-            if frame:
-                energy_offset -= np.cumsum(frame[qudit_id].frequency)
+            energy_offset -= np.cumsum(frame[qudit_id].frequency)
 
             # If in qudit frame, energy_offset is zero for all levels
             if np.allclose(energy_offset, np.zeros_like(energy_offset)):
@@ -443,7 +427,7 @@ class HamiltonianBuilder:
 
     def build_hint(
         self,
-        frame: Optional[FrameSpec] = None,
+        frame: FrameSpec = 'dressed',
         compiled: bool = True,
         tlist: Optional[np.ndarray] = None
     ) -> List[Union[qtp.Qobj, QobjCoeffPair]]:
@@ -459,7 +443,7 @@ class HamiltonianBuilder:
             A list of Hamiltonian terms. The first entry may be a single Qobj instance if there is a static term.
             Otherwise the entries are 2-lists `[Qobj, c(t)]`.
         """
-        if frame is not None and not isinstance(frame, SystemFrame):
+        if not isinstance(frame, SystemFrame):
             frame = SystemFrame(frame, self)
 
         hint = list()
@@ -487,9 +471,8 @@ class HamiltonianBuilder:
                 frequency = 0.
 
                 for qudit_id, level, sign in [(q1, l1, 1.), (q2, l2, -1.)]:
-                    if frame:
-                        op *= np.exp(sign * 1.j * frame[qudit_id].phase[level])
-                        frequency += sign * frame[qudit_id].frequency[level]
+                    op *= np.exp(sign * 1.j * frame[qudit_id].phase[level])
+                    frequency += sign * frame[qudit_id].frequency[level]
 
                 if np.isclose(frequency, 0.):
                     hstatic += coupling * (op + op.dag())
@@ -518,7 +501,7 @@ class HamiltonianBuilder:
 
     def build_hdrive(
         self,
-        frame: Optional[FrameSpec] = None,
+        frame: FrameSpec = 'dressed',
         tlist: Optional[np.ndarray] = None,
         args: Optional[Dict[str, Any]] = None
     ) -> List[Union[qtp.Qobj, QobjCoeffPair]]:
@@ -533,7 +516,7 @@ class HamiltonianBuilder:
             A list of Hamiltonian terms. The first entry may be a single Qobj instance if there is a static term.
             Otherwise the entries are 2-lists `[Qobj, c(t)]`.
         """
-        if frame is not None and not isinstance(frame, SystemFrame):
+        if not isinstance(frame, SystemFrame):
             frame = SystemFrame(frame, self)
 
         hdrive = list()
@@ -551,13 +534,9 @@ class HamiltonianBuilder:
 
                 op = qtp.tensor(ops)
 
-                if frame:
-                    op *= np.exp(1.j * frame[qudit_id].phase[level])
-                    frame_freq = frame[qudit_id].frequency[level]
-                else:
-                    frame_freq = 0.
+                op *= np.exp(1.j * frame[qudit_id].phase[level])
 
-                qops.append((qudit_id, op, frame_freq))
+                qops.append((qudit_id, op, frame[qudit_id].frequency[level]))
 
         # Loop over the drive channels
         for channel, drives in self._drive.items():
@@ -619,7 +598,7 @@ class HamiltonianBuilder:
         num_cycles: Optional[int] = None,
         duration: Optional[float] = None,
         num_points: Optional[int] = None,
-        frame: Optional[FrameSpec] = None
+        frame: FrameSpec = 'dressed'
     ) -> np.ndarray:
         r"""Build a list of time points using the maximum frequency in the Hamiltonian.
 
@@ -642,29 +621,28 @@ class HamiltonianBuilder:
 
         max_frequency = 0.
 
-        if frame is not None and not isinstance(frame, SystemFrame):
+        if not isinstance(frame, SystemFrame):
             frame = SystemFrame(frame, self)
 
-        if frame:
-            max_freq_diffs = list()
-            for q1, q2 in self._coupling.keys():
-                freq_diffs = np.subtract.outer(frame[q1].frequency, frame[q2].frequency)
-                max_freq_diffs.append(np.amax(np.abs(freq_diffs)))
+        max_freq_diffs = list()
+        for q1, q2 in self._coupling.keys():
+            freq_diffs = np.subtract.outer(frame[q1].frequency, frame[q2].frequency)
+            max_freq_diffs.append(np.amax(np.abs(freq_diffs)))
 
-            for qid, drives in self._drive.items():
-                if len(drives) == 0:
-                    continue
+        for qid, drives in self._drive.items():
+            if len(drives) == 0:
+                continue
 
-                drive_freqs = np.array(list(drive.frequency for drive in drives))
-                if self.use_rwa:
-                    rel_sign = -1
-                else:
-                    rel_sign = 1
+            drive_freqs = np.array(list(drive.frequency for drive in drives))
+            if self.use_rwa:
+                rel_sign = -1
+            else:
+                rel_sign = 1
 
-                frame_drive_freqs = np.add.outer(rel_sign * drive_freqs, frame[qid].frequency)
-                max_freq_diffs.append(np.amax(np.abs(frame_drive_freqs)))
+            frame_drive_freqs = np.add.outer(rel_sign * drive_freqs, frame[qid].frequency)
+            max_freq_diffs.append(np.amax(np.abs(frame_drive_freqs)))
 
-            max_frequency = max(max_freq_diffs)
+        max_frequency = max(max_freq_diffs)
 
         if max_frequency == 0.:
             eigvals = self.eigenvalues()

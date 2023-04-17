@@ -10,73 +10,13 @@ Classes in this module represent pulse envelopes. Subclasses of Pulse can be pas
 class (``sequence`` parameter).
 """
 
-from typing import List, Union, Optional, Any, Sequence, Callable, Tuple
+from typing import Union, Optional, Any, Callable, Tuple
 from numbers import Number
-import copy
-from dataclasses import dataclass
 import numpy as np
-import jax.numpy as jnp
 
-from .expression import (ParameterExpression, Constant, Parameter, TimeFunction,
-                         TimeType, ArrayType, array_like, ReturnType)
+from .expression import (ParameterExpression, Constant, TimeFunction,
+                         TimeType, ReturnType)
 from .config import config
-
-class PulseSequence(list):
-    """Pulse sequence.
-
-    This class represents a sequence of instructions (pulse, delay, frequency/phase shift/set)
-    given to a single channel. In practice, the class is implemented as a subclass of Python
-    list with a single additional function `generate_fn`.
-    """
-
-    @property
-    def duration(self):
-        d = sum(inst.value for inst in self if isinstance(inst, Delay))
-        d += sum(inst.duration for inst in self if isinstance(inst, Pulse))
-        return d
-
-    def __str__(self):
-        return f'PulseSequence([{", ".join(str(inst) for inst in self)}])'
-
-    def envelope(self, t: Union[float, np.ndarray], args: Any = None) -> np.ndarray:
-        """Return the envelope of the sequence as a function of time.
-
-        This function is mostly for visualization purposes. Phase and frequency information is lost in the
-        returned array.
-
-        Args:
-            t: Time or array of time points.
-            args: Second argument to the pulse envelope functions.
-
-        Returns:
-            Pulse sequence envelope (complex) as a function of time.
-        """
-        funclist = list()
-        time = 0.
-
-        for inst in self:
-            if isinstance(inst, Delay):
-                funclist.append((time, 0.))
-                time += inst.value
-            elif isinstance(inst, Pulse):
-                pulse = copy.copy(inst)
-                pulse.tzero = time
-                funclist.append((time, pulse))
-                time += inst.duration
-
-        funclist.append((time, None))
-
-        result = 0.
-        for time, func in funclist[:-1]:
-            if isinstance(func, TimeFunction):
-                result = np.where(t > time, func(t, args), result)
-            else:
-                result = np.where(t > time, func, result)
-
-        result = np.where(t > timelist[-1], 0., result)
-
-        return result
-
 
 class Pulse(TimeFunction):
     """Base class for all pulse shapes.
