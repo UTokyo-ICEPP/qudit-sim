@@ -62,7 +62,7 @@ class SystemFrame(dict):
         drive_frame = False
 
         if frame_name == 'drive':
-            frame_name = hgen.default_frame
+            frame_name = 'lab'
             drive_frame = True
 
         qudit_ids = hgen.qudit_ids()
@@ -273,3 +273,10 @@ class SystemFrame(dict):
             obj = cof_op_diag[:, :, None] * obj * cof_op_diag[:, None, :].conjugate()
 
         return obj.reshape(final_shape)
+
+    def is_lab_frame(self) -> bool:
+        value = True
+        for qudit_frame in self.values():
+            value &= np.allclose(qudit_frame.frequency, 0.) and np.allclose(qudit_frame.phase, 0.)
+
+        return value

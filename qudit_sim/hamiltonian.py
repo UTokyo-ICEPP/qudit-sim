@@ -41,9 +41,8 @@ def add_outer_multi(arr):
 class HamiltonianBuilder:
     r"""Hamiltonian with static transverse couplings and external drive terms.
 
-    The class has two option flags that alter the Hamiltonian-building behavior:
+    The class has one option flag that alter the Hamiltonian-building behavior:
 
-    - compile_hint: If True, interaction Hamiltonian terms are given as compilable strings.
     - use_rwa: If True, apply the rotating-wave approximation to the drive Hamiltonian.
 
     Args:
@@ -53,18 +52,14 @@ class HamiltonianBuilder:
             augmented with ``'crosstalk'``, which should be a ``dict`` of form ``{(j, k): z}`` specifying the crosstalk
             factor ``z`` (complex corresponding to :math:`\alpha_{jk} e^{i\rho_{jk}}`) of drive on qudit :math:`j` seen
             by qudit :math:`k`. :math:`j` and :math:`k` are qudit ids given in ``qudits``.
-        default_frame: Default global frame to use.
     """
     def __init__(
         self,
         num_levels: int = 2,
         qudits: Optional[Union[int, Sequence[int]]] = None,
-        params: Optional[Dict[str, Any]] = None,
-        default_frame: str = 'dressed'
+        params: Optional[Dict[str, Any]] = None
     ) -> None:
         self._num_levels = num_levels
-
-        self.default_frame = default_frame
 
         # Makes use of dict order guarantee from python 3.7
         self._qudit_params = dict()
@@ -72,7 +67,6 @@ class HamiltonianBuilder:
         self._crosstalk = dict()
         self._drive = dict()
 
-        self.compile_hint = True
         self.use_rwa = False
 
         if qudits is None:
@@ -202,7 +196,7 @@ class HamiltonianBuilder:
         Returns:
             An array of energy eigenvalues.
         """
-        hstatic = self.build_h0() + self.build_hint()[0]
+        hstatic = self.build_hdiag() + self.build_hint()[0]
 
         eigvals, unitary = np.linalg.eigh(hstatic.full())
         # hamiltonian == unitary @ np.diag(eigvals) @ unitary.T.conjugate()
@@ -367,6 +361,7 @@ class HamiltonianBuilder:
     def build(
         self,
         frame: Optional[FrameSpec] = None,
+        hint_compiled: bool = True,
         tlist: Optional[np.ndarray] = None,
         args: Optional[Dict[str, Any]] = None
     ) -> List:
@@ -383,8 +378,8 @@ class HamiltonianBuilder:
         if frame is not None and not isinstance(frame, SystemFrame):
             frame = SystemFrame(frame, self)
 
-        hstatic = self.build_h0(frame=frame)
-        hint = self.build_hint(frame=frame, tlist=tlist)
+        hstatic = self.build_hdiag(frame=frame)
+        hint = self.build_hint(frame=frame, compiled=hint_compiled, tlist=tlist)
         hdrive = self.build_hdrive(frame=frame, tlist=tlist, args=args)
 
         if hint and isinstance(hint[0], qtp.Qobj):
@@ -409,7 +404,7 @@ class HamiltonianBuilder:
         hfree += np.square(np.arange(self._num_levels)) * params.anharmonicity / 2.
         return hfree
 
-    def build_h0(
+    def build_hdiag(
         self,
         frame: Optional[FrameSpec] = None
     ) -> qtp.Qobj:
@@ -449,14 +444,16 @@ class HamiltonianBuilder:
     def build_hint(
         self,
         frame: Optional[FrameSpec] = None,
+        compiled: bool = True,
         tlist: Optional[np.ndarray] = None
     ) -> List[Union[qtp.Qobj, QobjCoeffPair]]:
         """Build the interaction Hamiltonian.
 
         Args:
             frame: System frame to build the Hamiltonian in.
-            tlist: Array of time points. If provided and `self.compile_hint` is False, all dynamic coefficients
-                are taken as functions and called with `(tlist, None)`, and the resulting arrays are returned.
+            compiled: If True, dynamic coefficients are defined as strings to be compiled in QuTiP.
+            tlist: Array of time points. If provided and ``compiled`` is False, all dynamic coefficients
+                are taken as functions and called with ``(tlist, None)``, and the resulting arrays are returned.
 
         Returns:
             A list of Hamiltonian terms. The first entry may be a single Qobj instance if there is a static term.
@@ -501,7 +498,7 @@ class HamiltonianBuilder:
                     h_x = coupling * (op + op.dag())
                     h_y = coupling * 1.j * (op - op.dag())
 
-                    if self.compile_hint:
+                    if compiled:
                         hint.append([h_x, f'cos({frequency}*t)'])
                         hint.append([h_y, f'sin({frequency}*t)'])
                     else:
@@ -696,9 +693,6 @@ class HamiltonianBuilder:
     def copy(self, clear_drive: bool = False):
         instance = HamiltonianBuilder(self._num_levels)
 
-        instance.default_frame = self.default_frame
-
-        instance.compile_hint = self.compile_hint
         instance.use_rwa = self.use_rwa
 
         # Not sure if copy.deepcopy keeps the dict ordering, so we insert by hand
