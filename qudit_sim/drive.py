@@ -49,7 +49,7 @@ class DriveTerm:
                 self._sequence.insert(0, SetFrequency(frequency))
 
     @property
-    def frequency(self) -> Union[float, Parameter, None]:
+    def frequency(self) -> Union[float, ParameterExpression, None]:
         frequencies = set(inst.value for inst in self._sequence if isinstance(inst, SetFrequency))
         if len(frequencies) == 1:
             return frequencies.pop()

@@ -15,57 +15,6 @@ logger = logging.getLogger(__name__)
 # For whatever reason multiprocessing.Pool hangs in jupyter without ever starting the processes,
 # so I'm sticking to a more crude approach
 
-class ThreadConn:
-    def __init__(self):
-        pass
-
-    def poll(self):
-        return hasattr(self, 'value')
-
-    def send(self, value):
-        self.value = value
-
-    def recv(self):
-        return self.value
-
-    def close(self):
-        del self.value
-
-
-def _wait_procs(processes, results, max_num, wait=2):
-    while True:
-        ip = 0
-        while ip < len(processes):
-            process, idx, conn = processes[ip]
-            if conn.poll():
-                results[idx] = conn.recv()
-                conn.close()
-
-                process.join()
-                processes.pop(ip)
-            else:
-                ip += 1
-
-        if len(processes) > max_num:
-            logger.debug('More than %d processes are running. Waiting for %f seconds', max_num, wait)
-            time.sleep(wait)
-        else:
-            break
-
-def _process_wrapper(target, args, kwargs, conn, proc_name, proc_config=None):
-    if proc_config:
-        for key, value in proc_config.items():
-            setattr(config, key, value)
-
-    try:
-        result = target(*args, **kwargs)
-    except Exception:
-        sys.stderr.write(f'Exception in {proc_name}:\n')
-        traceback.print_exc()
-        conn.send(None)
-    else:
-        conn.send(result)
-
 def parallel_map(
     target: Callable,
     args: Optional[List[Any]] = None,
@@ -74,7 +23,7 @@ def parallel_map(
     common_args: Optional[tuple] = None,
     common_kwargs: Optional[dict] = None,
     arg_position: Optional[Union[int, Sequence[int]]] = None,
-    thread_based: bool = False,
+    thread_based: Union[bool, str] = False,
     log_level: int = logging.WARNING
 ) -> list:
     """Call the target on a list of args in parallel processes.
@@ -103,7 +52,8 @@ def parallel_map(
         common_args: Positional arguments common to all invocation of the function.
         common_kwargs: Keyword arguments common to all invocation of the function.
         arg_position: Positions of each element of args in the function call.
-        thread_based: Use threads instead of processes.
+        thread_based: Use threads instead of processes. As a debugging option, string ``serial`` can be
+            passed, in which case no parallelization is performed.
         log_level: logger level.
 
     Returns:
@@ -190,7 +140,14 @@ def parallel_map(
             jax_device_id = config.jax_devices[itask % len(config.jax_devices)]
             proc_config = {'jax_devices': [jax_device_id]}
             proc_args = (target, a, k, conn, proc_name, proc_config)
-            process = threading.Thread(target=_process_wrapper, args=proc_args, name=proc_name)
+
+            if thread_based == 'serial':
+                # Serial (debug) mode
+                logger.debug('Running process %d', itask)
+                _process_wrapper(*proc_args)
+                continue
+            else:
+                process = threading.Thread(target=_process_wrapper, args=proc_args, name=proc_name)
         else:
             conn_recv, conn_send = multiprocessing.Pipe()
             # JAX (or CUDA in general?) does not seem to work with multiprocessing
@@ -210,3 +167,55 @@ def parallel_map(
     logger.setLevel(original_log_level)
 
     return results
+
+
+class ThreadConn:
+    def __init__(self):
+        pass
+
+    def poll(self):
+        return hasattr(self, 'value')
+
+    def send(self, value):
+        self.value = value
+
+    def recv(self):
+        return self.value
+
+    def close(self):
+        del self.value
+
+
+def _wait_procs(processes, results, max_num, wait=2):
+    while True:
+        ip = 0
+        while ip < len(processes):
+            process, idx, conn = processes[ip]
+            if conn.poll():
+                results[idx] = conn.recv()
+                conn.close()
+
+                process.join()
+                processes.pop(ip)
+            else:
+                ip += 1
+
+        if len(processes) > max_num:
+            logger.debug('More than %d processes are running. Waiting for %f seconds', max_num, wait)
+            time.sleep(wait)
+        else:
+            break
+
+def _process_wrapper(target, args, kwargs, conn, proc_name, proc_config=None):
+    if proc_config:
+        for key, value in proc_config.items():
+            setattr(config, key, value)
+
+    try:
+        result = target(*args, **kwargs)
+    except Exception:
+        sys.stderr.write(f'Exception in {proc_name}:\n')
+        traceback.print_exc()
+        conn.send(None)
+    else:
+        conn.send(result)

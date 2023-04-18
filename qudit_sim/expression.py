@@ -321,10 +321,10 @@ class ConstantFunction(TimeFunction):
         super().__init__(fn, parameters)
 
     def _fn_Number(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
-        return self.value
+        return (t * 0.) + self.value
 
     def _fn_ParameterExpression(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
-        return self.value.evaluate(args)
+        return (t * 0.) + self.value.evaluate(args)
 
 
 class PiecewiseFunction(TimeFunction):

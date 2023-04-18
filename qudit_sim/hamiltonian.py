@@ -15,7 +15,7 @@ import copy
 import numpy as np
 import qutip as qtp
 
-from .expression import TimeFunction
+from .expression import ParameterExpression, TimeFunction, ConstantFunction
 from .drive import DriveTerm, SetFrequency, HamiltonianCoefficient, CosFunction, SinFunction
 from .frame import FrameSpec, SystemFrame
 
@@ -49,14 +49,19 @@ class Hamiltonian(list):
             A list of Hamiltonian terms that can be passed to qutip.sesolve.
         """
         evaluated = list()
+        hstatic = qtp.Qobj()
         for term in self:
             if isinstance(term, list):
-                if isinstance(term[1], TimeFunction):
+                if isinstance(term[1], ConstantFunction):
+                    hstatic += term[0] * term[1](0., args)
+                elif isinstance(term[1], TimeFunction):
                     evaluated.append([term[0], term[1](tlist, args)])
                 else:
                     evaluated.append(list(term))
             else:
-                evaluated.append(term)
+                hstatic += term
+
+        evaluated.insert(0, hstatic)
 
         return evaluated
 
@@ -607,7 +612,8 @@ class HamiltonianBuilder:
         num_cycles: Optional[int] = None,
         duration: Optional[float] = None,
         num_points: Optional[int] = None,
-        frame: FrameSpec = 'dressed'
+        frame: FrameSpec = 'dressed',
+        freq_args: Dict[str, Any] = {}
     ) -> np.ndarray:
         r"""Build a list of time points using the maximum frequency in the Hamiltonian.
 
@@ -621,6 +627,7 @@ class HamiltonianBuilder:
             duration: Maximum value of the tlist.
             num_points: Total number of time points including 0.
             frame: If specified, the frame in which to find the maximum frequency.
+            freq_args: Arguments to pass to parametric drive frequencies (if there are any).
 
         Returns:
             Array of time points.
@@ -642,7 +649,21 @@ class HamiltonianBuilder:
             if len(drives) == 0:
                 continue
 
-            drive_freqs = np.array(list(drive.frequency for drive in drives))
+            drive_freqs = list()
+            for drive in drives:
+                frequency = drive.frequency
+                if isinstance(frequency, ParameterExpression):
+                    try:
+                        args = tuple(freq_args[param] for param in frequency.parameters)
+                    except KeyError:
+                        raise RuntimeError(f'Frequency for a drive term of {qid} is parametric but no value'
+                                           ' was given as freq_args')
+
+                    drive_freqs.append(frequency.evaluate(args))
+                else:
+                    drive_freqs.append(frequency)
+
+            drive_freqs = np.array(drive_freqs)
             if self.use_rwa:
                 rel_sign = -1
             else:
