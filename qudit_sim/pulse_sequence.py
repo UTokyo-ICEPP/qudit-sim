@@ -8,7 +8,7 @@ Pulse sequence (:mod:`qudit_sim.pulse_sequence`)
 Implementation of pulse sequence.
 """
 
-from typing import Union
+from typing import Union, Any
 import copy
 import numpy as np
 
@@ -20,8 +20,7 @@ class PulseSequence(list):
     """Pulse sequence.
 
     This class represents a sequence of instructions (pulse, delay, frequency/phase shift/set)
-    given to a single channel. In practice, the class is implemented as a subclass of Python
-    list with a single additional function `generate_fn`.
+    given to a single channel.
     """
 
     @property

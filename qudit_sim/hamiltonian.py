@@ -15,7 +15,8 @@ import copy
 import numpy as np
 import qutip as qtp
 
-from .drive import DriveTerm, SetFrequency, HamiltonianCoefficient
+from .expression import TimeFunction
+from .drive import DriveTerm, SetFrequency, HamiltonianCoefficient, CosFunction, SinFunction
 from .frame import FrameSpec, SystemFrame
 
 QobjCoeffPair = List[Union[qtp.Qobj, HamiltonianCoefficient]]
@@ -27,6 +28,37 @@ class QuditParams:
     anharmonicity: float
     drive_amplitude: float
     drive_weight: np.ndarray
+
+
+class Hamiltonian(list):
+    """Hamiltonian list with function evaluation subroutine."""
+    def evaluate_coeffs(
+        self,
+        tlist: np.ndarray,
+        args: Optional[Dict[str, Any]] = None
+    ) -> List[Union[qtp.Qobj, QobjCoeffPair]]:
+        """
+        Evaluate functional Hamiltonian coefficients at given time points.
+
+        Args:
+            tlist: If not None, all callable Hamiltonian coefficients are called with `(tlist, args)` and the
+                resulting arrays are instead passed to sesolve.
+            args: Arguments to the callable coefficients.
+
+        Returns:
+            A list of Hamiltonian terms that can be passed to qutip.sesolve.
+        """
+        evaluated = list()
+        for term in self:
+            if isinstance(term, list):
+                if isinstance(term[1], TimeFunction):
+                    evaluated.append([term[0], term[1](tlist, args)])
+                else:
+                    evaluated.append(list(term))
+            else:
+                evaluated.append(term)
+
+        return evaluated
 
 
 class HamiltonianBuilder:
@@ -325,7 +357,6 @@ class HamiltonianBuilder:
         qudit_id: Hashable,
         frequency: Optional[float] = None,
         amplitude: Union[float, complex, str, np.ndarray, Callable, None] = 1.+0.j,
-        constant_phase: Optional[float] = None,
         sequence: Optional[List[Any]] = None
     ) -> None:
         r"""Add a drive term.
@@ -335,13 +366,10 @@ class HamiltonianBuilder:
             frequency: Carrier frequency of the drive. Required when using ``amplitude`` or when ``sequence`` does not
                 start from ``SetFrequency``.
             amplitude: Function :math:`r(t)`. Ignored if ``sequence`` is set.
-            constant_phase: The phase value of ``amplitude`` when it is a str or a callable and is known to have a
-                constant phase. None otherwise. Ignored if ``sequence`` is set.
             sequence: Pulse sequence of the drive.
         """
         self._drive[qudit_id].append(
-            DriveTerm(frequency=frequency, amplitude=amplitude, constant_phase=constant_phase,
-                      sequence=sequence)
+            DriveTerm(frequency=frequency, amplitude=amplitude, sequence=sequence)
         )
 
     def clear_drive(self) -> None:
@@ -352,16 +380,13 @@ class HamiltonianBuilder:
     def build(
         self,
         frame: FrameSpec = 'dressed',
-        hint_compiled: bool = True,
-        tlist: Optional[np.ndarray] = None,
-        args: Optional[Dict[str, Any]] = None
-    ) -> List:
+        as_timefn: bool = False
+    ) -> Hamiltonian:
         """Return the list of Hamiltonian terms passable to qutip.sesolve.
 
         Args:
-            tlist: If not None, all callable Hamiltonian coefficients are called with `(tlist, args)` and the
-                resulting arrays are instead passed to sesolve.
-            args: Arguments to the callable coefficients.
+            frame: System frame to build the Hamiltonian in.
+            as_timefn: If True, force the coefficients to be TimeFunctions.
 
         Returns:
             A list of Hamiltonian terms that can be passed to qutip.sesolve.
@@ -370,15 +395,15 @@ class HamiltonianBuilder:
             frame = SystemFrame(frame, self)
 
         hstatic = self.build_hdiag(frame=frame)
-        hint = self.build_hint(frame=frame, compiled=hint_compiled, tlist=tlist)
-        hdrive = self.build_hdrive(frame=frame, tlist=tlist, args=args)
+        hint = self.build_hint(frame=frame, as_timefn=as_timefn)
+        hdrive = self.build_hdrive(frame=frame, as_timefn=as_timefn)
 
         if hint and isinstance(hint[0], qtp.Qobj):
             hstatic += hint.pop(0)
         if hdrive and isinstance(hdrive[0], qtp.Qobj):
             hstatic += hdrive.pop(0)
 
-        hamiltonian = list()
+        hamiltonian = Hamiltonian()
 
         if np.any(hstatic.data.data):
             # The static term does not have to be the first element (nor does it have to be a single term, actually)
@@ -428,16 +453,13 @@ class HamiltonianBuilder:
     def build_hint(
         self,
         frame: FrameSpec = 'dressed',
-        compiled: bool = True,
-        tlist: Optional[np.ndarray] = None
-    ) -> List[Union[qtp.Qobj, QobjCoeffPair]]:
+        as_timefn: bool = False
+    ) -> Hamiltonian:
         """Build the interaction Hamiltonian.
 
         Args:
             frame: System frame to build the Hamiltonian in.
-            compiled: If True, dynamic coefficients are defined as strings to be compiled in QuTiP.
-            tlist: Array of time points. If provided and ``compiled`` is False, all dynamic coefficients
-                are taken as functions and called with ``(tlist, None)``, and the resulting arrays are returned.
+            as_timefn: Return the coefficients as TimeFunctions (True) or string expressions (False).
 
         Returns:
             A list of Hamiltonian terms. The first entry may be a single Qobj instance if there is a static term.
@@ -446,7 +468,7 @@ class HamiltonianBuilder:
         if not isinstance(frame, SystemFrame):
             frame = SystemFrame(frame, self)
 
-        hint = list()
+        hint = Hamiltonian()
         hstatic = qtp.tensor([qtp.qzero(self._num_levels)] * self.num_qudits)
 
         for (q1, q2), coupling in self._coupling.items():
@@ -481,18 +503,12 @@ class HamiltonianBuilder:
                     h_x = coupling * (op + op.dag())
                     h_y = coupling * 1.j * (op - op.dag())
 
-                    if compiled:
+                    if as_timefn:
+                        hint.append([h_x, CosFunction(frequency)])
+                        hint.append([h_y, SinFunction(frequency)])
+                    else:
                         hint.append([h_x, f'cos({frequency}*t)'])
                         hint.append([h_y, f'sin({frequency}*t)'])
-                    else:
-                        fn_x = cos_freq(frequency)
-                        fn_y = sin_freq(frequency)
-                        if tlist is None:
-                            hint.append([h_x, fn_x])
-                            hint.append([h_y, fn_y])
-                        else:
-                            hint.append([h_x, fn_x(tlist, None)])
-                            hint.append([h_y, fn_y(tlist, None)])
 
         if np.any(hstatic.data.data):
             hint.insert(0, hstatic)
@@ -502,15 +518,14 @@ class HamiltonianBuilder:
     def build_hdrive(
         self,
         frame: FrameSpec = 'dressed',
-        tlist: Optional[np.ndarray] = None,
-        args: Optional[Dict[str, Any]] = None
-    ) -> List[Union[qtp.Qobj, QobjCoeffPair]]:
+        as_timefn: bool = False
+    ) -> Hamiltonian:
         """Build the drive Hamiltonian.
 
         Args:
             frame: System frame to build the Hamiltonian in.
-            tlist: Array of time points. Required when at least one drive amplitude is given as an array.
-            args: Arguments to the callable coefficients.
+            as_timefn: If True, force the coefficients to be TimeFunctions. Raises a TypeError for a drive with
+                an incompatible type is
 
         Returns:
             A list of Hamiltonian terms. The first entry may be a single Qobj instance if there is a static term.
@@ -519,7 +534,7 @@ class HamiltonianBuilder:
         if not isinstance(frame, SystemFrame):
             frame = SystemFrame(frame, self)
 
-        hdrive = list()
+        hdrive = Hamiltonian()
         hstatic = qtp.tensor([qtp.qzero(self._num_levels)] * self.num_qudits)
 
         # Construct the Qobj for each qudit/level first
@@ -527,7 +542,8 @@ class HamiltonianBuilder:
 
         for iq, (qudit_id, params) in enumerate(self._qudit_params.items()):
             for level in range(self._num_levels - 1):
-                cre = params.drive_weight[level] * qtp.basis(self._num_levels, level + 1) * qtp.basis(self._num_levels, level).dag()
+                cre = qtp.basis(self._num_levels, level + 1) * qtp.basis(self._num_levels, level).dag()
+                cre *= params.drive_weight[level]
 
                 ops = [qtp.qeye(self._num_levels)] * self.num_qudits
                 ops[iq] = cre
@@ -543,9 +559,6 @@ class HamiltonianBuilder:
             ch_params = self._qudit_params[channel]
 
             for drive in drives:
-                if isinstance(drive.amplitude, np.ndarray) and tlist is None:
-                    raise RuntimeError('Time points array is needed to build a Hamiltonian with array-based drive.')
-
                 # Loop over the driven operators
                 for qudit_id, creation_op, frame_frequency in qops:
                     drive_base = ch_params.drive_amplitude / 2.
@@ -558,7 +571,7 @@ class HamiltonianBuilder:
                         continue
 
                     # Generate the potentially time-dependent Hamiltonian coefficients
-                    fn_x, fn_y = drive.generate_fn(frame_frequency, drive_base, self.use_rwa)
+                    fn_x, fn_y = drive.generate_fn(frame_frequency, drive_base, self.use_rwa, as_timefn=as_timefn)
 
                     h_x = creation_op + creation_op.dag()
                     h_y = 1.j * (creation_op - creation_op.dag())
@@ -580,12 +593,8 @@ class HamiltonianBuilder:
 
                     else:
                         # Callable coefficient
-                        if tlist is None:
-                            hdrive.append([h_x, fn_x])
-                            hdrive.append([h_y, fn_y])
-                        else:
-                            hdrive.append([h_x, fn_x(tlist, args)])
-                            hdrive.append([h_y, fn_y(tlist, args)])
+                        hdrive.append([h_x, fn_x])
+                        hdrive.append([h_y, fn_y])
 
         if np.any(hstatic.data.data):
             hdrive.insert(0, hstatic)

@@ -237,7 +237,7 @@ class Drag(Gaussian):
         duration: float,
         amp: Union[float, complex, ParameterExpression],
         sigma: float,
-        beta: float,
+        beta: Union[float, ParameterExpression],
         center: Optional[float] = None,
         zero_ends: bool = True,
         tzero: float = 0.
@@ -251,7 +251,12 @@ class Drag(Gaussian):
             tzero=tzero
         )
 
-        self.beta = beta
+        if isinstance(beta, Number):
+            self.beta = Constant(float(beta))
+        else:
+            self.beta = beta
+
+        self.parameters += self.beta.parameters
 
     def __str__(self) -> str:
         return (f'Drag(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, beta={self.beta}, '
@@ -264,7 +269,9 @@ class Drag(Gaussian):
         gauss = super()._fn(t, args)
         dgauss = -(t - self.center) / npmod.square(self.sigma) * gauss
 
-        return gauss + 1.j * self.beta * dgauss
+        beta = self.beta.evaluate(args[-len(self.beta.parameters):])
+
+        return gauss + 1.j * beta * dgauss
 
 
 class Square(Pulse):

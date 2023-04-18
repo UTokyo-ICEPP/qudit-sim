@@ -25,7 +25,7 @@ array_like = Union[ArrayType, Number]
 # Type for the callable time-dependent Hamiltonian coefficient
 TimeType = Union[float, ArrayType]
 ArgsType = Union[Dict[str, Any], Tuple[Any, ...]]
-ReturnType = Union[complex, ArrayType]
+ReturnType = Union[float, complex, ArrayType]
 
 class Expression(ABC):
     def __add__(self, other: Union['Expression', array_like]) -> 'Expression':
@@ -71,6 +71,15 @@ class Expression(ABC):
     @property
     def imag(self) -> 'Expression':
         return type(self)._unary_op(self, config.npmod.imag)
+
+    def cos(self) -> 'Expression':
+        return type(self)._unary_op(self, config.npmod.cos)
+
+    def sin(self) -> 'Expression':
+        return type(self)._unary_op(self, config.npmod.sin)
+
+    def exp(self) -> 'Expression':
+        return type(self)._unary_op(self, config.npmod.exp)
 
 
 class ParameterExpression(Expression):
@@ -127,18 +136,22 @@ class ParameterFunction(ParameterExpression):
         fn: Callable[[Tuple[Any, ...]], ReturnType],
         parameters: Tuple[str, ...]
     ):
-        self.parameters = parameters
+        self._parameters = parameters
         self.fn = fn
 
     def __str__(self) -> str:
-        return f'ParameterFunction({", ".join(self.parameters)})'
+        return f'ParameterFunction({", ".join(self._parameters)})'
 
     def subs(self, **kwargs) -> ReturnType:
-        args = tuple(kwargs[key] for key in self.parameters)
+        args = tuple(kwargs[key] for key in self._parameters)
         return self.evaluate(args)
 
     def evaluate(self, args: Optional[Tuple[Any, ...]] = None) -> ReturnType:
         return self.fn(args)
+
+    @property
+    def parameters(self) -> Tuple[str, ...]:
+        return self._parameters
 
 
 class _ParameterUnaryOp(ParameterFunction):

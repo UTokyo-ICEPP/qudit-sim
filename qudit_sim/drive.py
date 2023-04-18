@@ -9,13 +9,14 @@ See :ref:`drive-hamiltonian` for theoretical background.
 """
 
 from typing import Callable, Optional, Union, Tuple, List, Any
+from numbers import Number
 import copy
 from dataclasses import dataclass
 import warnings
 import numpy as np
 
-from .expression import (ParameterExpression, Parameter, TimeFunction, ConstantFunction, PiecewiseFunction,
-                         TimeType, ArrayType, ReturnType)
+from .expression import (Expression, ParameterExpression, Parameter, TimeFunction, ConstantFunction,
+                         PiecewiseFunction, TimeType, ArrayType, ReturnType)
 from .pulse import Pulse
 from .config import config
 
@@ -28,8 +29,6 @@ class DriveTerm:
         frequency: Carrier frequency of the drive. None is allowed if amplitude is a PulseSequence
             that starts with SetFrequency.
         amplitude: Function :math:`r(t)`.
-        constant_phase: The phase value of `amplitude` when it is a str or a callable and is known to have
-            a constant phase. None otherwise.
         sequence: Drive sequence. If this argument is present and not None, all other arguments are ignored,
             except when the sequence does not start with SetFrequency and frequency is not None.
     """
@@ -37,7 +36,6 @@ class DriveTerm:
         self,
         frequency: Optional[Union[float, Parameter]] = None,
         amplitude: Union[float, complex, str, np.ndarray, Parameter, Callable] = 1.+0.j,
-        constant_phase: Optional[Union[float, Parameter]] = None,
         sequence: Optional[List[Any]] = None
     ):
         if sequence is None:
@@ -45,13 +43,10 @@ class DriveTerm:
                 raise RuntimeError('Frequency and amplitude must be set if not using a PulseSequence.')
 
             self._sequence = [SetFrequency(frequency), amplitude]
-            self.constant_phase = constant_phase
         else:
             self._sequence = list(sequence)
             if frequency is not None and not isinstance(self._sequence[0], SetFrequency):
                 self._sequence.insert(0, SetFrequency(frequency))
-
-            self.constant_phase = None
 
     @property
     def frequency(self) -> Union[float, Parameter, None]:
@@ -74,7 +69,8 @@ class DriveTerm:
         self,
         frame_frequency: float,
         drive_base: complex,
-        rwa: bool
+        rwa: bool,
+        as_timefn: bool = False
     ) -> Tuple[HamiltonianCoefficient, HamiltonianCoefficient]:
         r"""Generate the coefficients for X and Y drives.
 
@@ -82,6 +78,7 @@ class DriveTerm:
             frame_frequency: Frame frequency :math:`\xi_k^{l}`.
             drive_base: Factor :math:`\alpha_{jk} e^{i \rho_{jk}} \frac{\Omega_j}{2}`.
             rwa: If True, returns the RWA coefficients.
+            as_timefn: If True, force all terms to be TimeFunctions.
 
         Returns:
             X and Y coefficient functions.
@@ -93,9 +90,9 @@ class DriveTerm:
         time = 0.
 
         if rwa:
-            generate_single = _generate_single_rwa
+            _generate_single = _generate_single_rwa
         else:
-            generate_single = _generate_single_full
+            _generate_single = _generate_single_full
 
         for inst in self._sequence:
             if isinstance(inst, ShiftFrequency):
@@ -119,16 +116,10 @@ class DriveTerm:
                 if frequency is None:
                     raise RuntimeError('Pulse called before SetFrequency')
 
-                if isinstance(inst, str):
-                    # If this is actually a static expression, convert to complex
-                    try:
-                        inst = complex(eval(inst))
-                    except:
-                        pass
+                envelope = _make_envelope(inst, drive_base, phase_offset, time, as_timefn)
 
-                fn_x, fn_y = generate_single(inst, frequency, frame_frequency,
-                                             drive_base * np.exp(-1.j * phase_offset), time,
-                                             self.constant_phase)
+                fn_x, fn_y = _generate_single(envelope, frequency, frame_frequency)
+
                 funclist.append((time, fn_x, fn_y))
 
                 if isinstance(inst, Pulse):
@@ -167,29 +158,94 @@ class DriveTerm:
         return fn_x, fn_y
 
 
-def _generate_single_rwa(amplitude, frequency, frame_frequency, drive_base, tzero, constant_phase=None):
+def _make_envelope(inst, drive_base, phase_offset, time, as_timefn):
+    phase_factor = None
+    if isinstance(phase_offset, Number):
+        if phase_offset != 0.:
+            phase_factor = np.exp(-1.j * phase_offset)
+    else:
+        phase_factor = (phase_offset * (-1.j)).exp()
+
+    if isinstance(inst, str):
+        # If this is actually a static expression, convert to complex
+        try:
+            inst = complex(eval(inst))
+        except:
+            pass
+
+    if isinstance(inst, (float, complex, Parameter)):
+        # static envelope
+        envelope = inst * drive_base
+
+        if phase_factor is not None:
+            envelope = phase_factor * envelope
+
+        if as_timefn:
+            envelope = ConstantFunction(envelope)
+
+    elif isinstance(inst, str):
+        if time != 0. and 't' in inst:
+            warnings.warn('Possibly time-dependent string amplitude in a sequence'
+                          ' detected; this is not supported.', UserWarning)
+
+        envelope = f'({drive_base}) * ({inst})'
+
+        if isinstance(phase_factor, ParameterExpression):
+            raise TypeError(f'String amplitude expression {inst} not compatible with'
+                            ' parameterized phase offset')
+        elif phase_factor is not None:
+            envelope += f' * ({phase_factor})'
+
+        if as_timefn:
+            raise TypeError(f'String amplitude expression {inst} cannot be converted'
+                            ' to a TimeFunction')
+
+    elif isinstance(inst, np.ndarray):
+        envelope = inst * drive_base
+
+        if phase_factor is not None:
+            envelope = phase_factor * envelope
+
+        if as_timefn:
+            raise TypeError(f'Array amplitude cannot be converted to a TimeFunction')
+
+    elif callable(inst):
+        if not isinstance(inst, TimeFunction):
+            inst = TimeFunction(inst)
+
+        envelope = inst * drive_base
+        envelope.tzero = time
+
+        if phase_factor is not None:
+            envelope *= phase_factor
+
+    else:
+        raise TypeError(f'Unsupported amplitude type f{type(inst)}')
+
+    return envelope
+
+
+def _generate_single_rwa(envelope, frequency, frame_frequency):
     detuning = frequency - frame_frequency
 
-    if isinstance(frequency, Parameter):
+    if isinstance(frequency, ParameterExpression):
         is_resonant = False
     else:
         is_resonant = np.isclose(detuning, 0.)
 
-    if isinstance(amplitude, (float, complex, Parameter)):
-        # static envelope
-        envelope = amplitude * drive_base
-
+    if isinstance(detuning, ParameterExpression) or isinstance(envelope, (np.ndarray, Expression)):
         if is_resonant:
-            if isinstance(envelope, Parameter):
+            if isinstance(envelope, Expression) and not isinstance(envelope, TimeFunction):
                 envelope = ConstantFunction(envelope)
 
             return envelope.real, envelope.imag
-
-        elif (isinstance(amplitude, Parameter) or isinstance(frequency, Parameter)
-              or config.pulse_sim_solver == 'jax'):
+        else:
             fun = ExpFunction(-detuning) * envelope
             return fun.real, fun.imag
 
+    elif isinstance(envelope, (float, complex)):
+        if is_resonant:
+            return envelope.real, envelope.imag
         else:
             fn_x = []
             fn_y = []
@@ -202,133 +258,46 @@ def _generate_single_rwa(amplitude, frequency, frame_frequency, drive_base, tzer
 
             return ' + '.join(fn_x), ' + '.join(fn_y)
 
-    elif isinstance(amplitude, str):
-        if tzero != 0. and 't' in amplitude:
-            warnings.warn('Possibly time-dependent string amplitude in a sequence detected; this is not supported.',
-                          UserWarning)
-
-        envelope = f'({drive_base}) * ({amplitude})'
-
+    else: # str
         if is_resonant:
             return f'({envelope}).real', f'({envelope}).imag'
-
-        elif constant_phase is None:
+        else:
             return (f'({envelope}).real * cos({detuning} * t) + ({envelope}).imag * sin({detuning} * t)',
                     f'({envelope}).imag * cos({detuning} * t) - ({envelope}).real * sin({detuning} * t)')
 
+
+def _generate_single_full(envelope, frequency, frame_frequency):
+    if isinstance(frequency, ParameterExpression) or isinstance(envelope, (np.ndarray, Expression)):
+        envelope *= 2.
+        labframe_fn = CosFunction(frequency) * envelope.real + SinFunction(frequency) * envelope.imag
+
+        if frame_frequency == 0.:
+            return labframe_fn, ConstantFunction(0.)
         else:
-            phase = np.angle(drive_base) + constant_phase
-            return (f'abs({envelope}) * cos({phase} - ({detuning} * t))',
-                    f'abs({envelope}) * sin({phase} - ({detuning} * t))')
-
-    elif isinstance(amplitude, np.ndarray):
-        envelope = amplitude * drive_base
-
-        if is_resonant:
-            return envelope.real, envelope.imag
-
-        else:
-            fun = ExpFunction(-detuning) * envelope
-            return fun.real, fun.imag
-
-    elif callable(amplitude):
-        if not isinstance(amplitude, TimeFunction):
-            amplitude = TimeFunction(amplitude)
-
-        envelope = amplitude * drive_base
-        envelope.tzero = tzero
-
-        if is_resonant:
-            return envelope.real, envelope.imag
-
-        elif constant_phase is None:
-            fun = envelope * ExpFunction(-detuning)
-            return fun.real, fun.imag
-
-        else:
-            phase = constant_phase + np.angle(drive_base)
-            absf = abs(envelope)
-            return absf * CosFunction(-detuning, phase), absf * SinFunction(-detuning, phase)
+            return labframe_fn * CosFunction(frame_frequency), labframe_fn * SinFunction(frame_frequency)
 
     else:
-        raise TypeError(f'Unsupported amplitude type f{type(amplitude)}')
+        if isinstance(envelope, (float, complex)):
+            envelope *= 2.
 
-
-def _generate_single_full(amplitude, frequency, frame_frequency, drive_base, tzero, constant_phase=None):
-    if isinstance(amplitude, (float, complex, Parameter)):
-        # static envelope
-        double_envelope = amplitude * 2. * drive_base
-
-        if (isinstance(amplitude, Parameter) or isinstance(frequency, Parameter)
-            or config.pulse_sim_solver == 'jax'):
-            labframe_fn = (double_envelope.real * CosFunction(frequency)
-                           + double_envelope.imag * SinFunction(frequency))
-        else:
             labframe_fn_terms = []
-            if double_envelope.real != 0.:
-                labframe_fn_terms.append(f'({double_envelope.real} * cos({frequency} * t))')
-            if double_envelope.imag != 0.:
-                labframe_fn_terms.append(f'({double_envelope.imag} * sin({frequency} * t))')
+            if envelope.real != 0.:
+                labframe_fn_terms.append(f'({envelope.real} * cos({frequency} * t))')
+            if envelope.imag != 0.:
+                labframe_fn_terms.append(f'({envelope.imag} * sin({frequency} * t))')
 
             labframe_fn = ' + '.join(labframe_fn_terms)
             if len(labframe_fn_terms) > 1:
                 labframe_fn = f'({labframe_fn})'
 
-    elif isinstance(amplitude, str):
-        if tzero != 0. and 't' in amplitude:
-            warnings.warn('Possibly time-dependent string amplitude in a sequence detected; this is not supported.',
-                          UserWarning)
+        else: # str
+            labframe_fn = f'(2. * ({envelope}) * (cos({frequency} * t) - 1.j * sin({frequency} * t))).real'
 
-        double_envelope = f'({2. * drive_base}) * ({amplitude})'
-
-        if constant_phase is None:
-            labframe_fn = f'({double_envelope} * (cos({frequency} * t) - 1.j * sin({frequency} * t))).real'
-
-        else:
-            phase = constant_phase + np.angle(drive_base)
-            if isinstance(constant_phase, Parameter):
-                labframe_fn = CosFunction(-frequency, phase) * abs(double_envelope)
-            else:
-                labframe_fn = f'abs({double_envelope}) * cos({phase} - ({frequency} * t))'
-
-    elif isinstance(amplitude, np.ndarray):
-        double_envelope = amplitude * 2. * drive_base
-
-        labframe_fn = (ExpFunction(-frequency) * double_envelope).real
-
-    elif callable(amplitude):
-        if not isinstance(amplitude, TimeFunction):
-            amplitude = TimeFunction(amplitude)
-
-        double_envelope = amplitude * 2. * drive_base
-
-        if tzero != 0.:
-            double_envelope = copy.copy(double_envelope)
-            double_envelope.tzero = tzero
-
-        if constant_phase is None:
-            labframe_fn = (double_envelope * ExpFunction(-frequency)).real
-
-        else:
-            phase = constant_phase + np.angle(drive_phase)
-            absf = abs(double_envelope)
-            labframe_fn = absf * CosFunction(-frequency, phase)
-
-    else:
-        raise TypeError(f'Unsupported amplitude type f{type(amplitude)}')
-
-    if isinstance(labframe_fn, str):
         if frame_frequency == 0.:
             return labframe_fn, ''
         else:
             return (f'{labframe_fn} * cos({frame_frequency} * t)',
                     f'{labframe_fn} * sin({frame_frequency} * t)')
-
-    else:
-        if frame_frequency == 0.:
-            return labframe_fn, ConstantFunction(0.)
-        else:
-            return labframe_fn * CosFunction(frame_frequency), labframe_fn * SinFunction(frame_frequency)
 
 
 class OscillationFunction(TimeFunction):
