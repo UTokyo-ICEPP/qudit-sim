@@ -51,7 +51,7 @@ def inspect_heff_fit(
         A list of two (three if metrics=True) figures.
     """
     with h5py.File(filename, 'r') as source:
-        dim_tuple = source['dim'][()]
+        frame = source['frame'][()]
         time_evolution = source['states'][()]
         tlist = source['times'][()]
         comp_dim = int(source['comp_dim'][()])
@@ -68,8 +68,8 @@ def inspect_heff_fit(
             heff_grads = None
             offset_grads = None
 
-    num_qudits = len(dim_tuple)
-    num_sim_levels = dim_tuple[0]
+    num_qudits = frame.shape[0]
+    num_sim_levels = frame.shape[-1] + 1
     dim = (comp_dim,) * num_qudits
 
     tlist_fit = tlist[fit_start:fit_end + 1] - tlist[fit_start]

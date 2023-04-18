@@ -50,6 +50,10 @@ class SystemFrame(dict):
         return list(self.values())[0].frequency.shape[0] + 1
 
     @property
+    def dim(self) -> Tuple[int, ...]:
+        return (self.num_levels,) * self.num_qudits
+
+    @property
     def frequencies(self) -> np.ndarray:
         return np.array(list(qudit_frame.frequency for qudit_frame in self.values()))
 

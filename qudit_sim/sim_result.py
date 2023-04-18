@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 import h5py
 
-from .frame import QuditFrame
+from .frame import SystemFrame
 
 @dataclass(frozen=True)
 class PulseSimResult:
@@ -17,8 +17,7 @@ class PulseSimResult:
     times: np.ndarray
     expect: Union[List[np.ndarray], None]
     states: Union[np.ndarray, None]
-    dim: Tuple[int, ...]
-    frame: Tuple[QuditFrame, ...]
+    frame: SystemFrame
 
 
 def save_sim_result(filename: str, result: PulseSimResult):
@@ -29,8 +28,8 @@ def save_sim_result(filename: str, result: PulseSimResult):
             out.create_dataset('expect', data=result.expect)
         if result.states is not None:
             out.create_dataset('states', data=result.states)
-        out.create_dataset('dim', data=np.array(result.dim, dtype=int))
-        out.create_dataset('frame', data=np.array([[frame.frequency, frame.phase] for frame in result.frame]))
+        out.create_dataset('qudit_ids', data=np.array(list(result.frame.keys()), dtype=object))
+        out.create_dataset('frame', data=np.array([[frame.frequency, frame.phase] for frame in result.frame.values()]))
 
 
 def load_sim_result(filename: str) -> PulseSimResult:
@@ -45,7 +44,7 @@ def load_sim_result(filename: str) -> PulseSimResult:
             states = source['states'][()]
         except KeyError:
             states = None
-        dim = tuple(source['dim'][()])
-        frame = tuple(QuditFrame(d[0], d[1]) for d in source['frame'][()])
+        qudit_ids = source['qudit_ids'][()]
+        frame = SystemFrame({qid: QuditFrame(d[0], d[1]) for qid, d in zip(qudit_ids, source['frame'][()])})
 
-    return PulseSimResult(times, expect, states, dim, frame)
+    return PulseSimResult(times, expect, states, frame)

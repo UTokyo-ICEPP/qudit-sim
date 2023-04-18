@@ -16,7 +16,7 @@ from jax.experimental.ode import odeint
 from rqutils.math import matrix_exp
 
 from .hamiltonian import HamiltonianBuilder
-from .frame import FrameSpec, SystemFrame
+from .frame import FrameSpec, SystemFrame, QuditFrame
 from .sim_result import PulseSimResult, save_sim_result
 from .unitary import closest_unitary
 from .parallel import parallel_map
@@ -257,7 +257,6 @@ class StatesAndExpectations:
             frame = 'dressed'
 
         self.frame = SystemFrame(frame, hgen)
-        self.lab_frame = SystemFrame('lab', hgen)
         self.psi0 = psi0
         self.e_ops = e_ops
         self.tlist = tlist
@@ -267,7 +266,10 @@ class StatesAndExpectations:
             tlist = self.tlist
 
         # Change the frame back to original
-        evolution = self.frame.change_frame(tlist, evolution, from_frame=self.lab_frame,
+        lab_frame = SystemFrame({qid: QuditFrame(np.zeros_like(qf.frequency), np.zeros_like(qf.phase))
+                                for qid, qf in self.frame.items()})
+
+        evolution = self.frame.change_frame(tlist, evolution, from_frame=lab_frame,
                                             objtype='evolution', t0=self.tlist[0])
 
         # State evolution in the original frame
@@ -341,10 +343,7 @@ def _run_single(
     if calculator.e_ops and options and not options.store_states:
         states = None
 
-    dim = (calculator.frame.num_levels,) * calculator.frame.num_qudits
-    frame_tuple = tuple(calculator.frame.values())
-
-    result = PulseSimResult(times=tlist, expect=expect, states=states, dim=dim, frame=frame_tuple)
+    result = PulseSimResult(times=tlist, expect=expect, states=states, frame=calculator.frame)
 
     if save_result_to:
         logger.info('Saving the simulation result to %s.h5', save_result_to)

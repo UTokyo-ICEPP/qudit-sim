@@ -281,7 +281,7 @@ def plot_evolution(
     if sim_result is not None:
         time_evolution = sim_result.states
         tlist = sim_result.times
-        dim = sim_result.dim
+        dim = sim_result.frame.dim
 
     if tscale is FrequencyScale.auto:
         tscale = FrequencyScale.find_time_scale(tlist[-1])
