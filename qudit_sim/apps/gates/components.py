@@ -28,9 +28,10 @@ def gate_and_fidelity(
         the fidelity of the truncated gate.
     """
     gate = sim_result.states[-1]
+    frame = sim_result.frame
 
-    if comp_dim is not None and sim_result.dim[0] != comp_dim:
-        truncated = truncate_matrix(gate, len(sim_result.dim), sim_result.dim[0], comp_dim)
+    if comp_dim is not None and frame.num_levels != comp_dim:
+        truncated = truncate_matrix(gate, frame.num_qudits, frame.num_levels, comp_dim)
         return closest_unitary(truncated, with_fidelity=True)
     else:
         return gate, 1.
@@ -53,9 +54,9 @@ def gate_components_from_log(
     gate, _ = gate_and_fidelity(sim_result, comp_dim)
 
     if comp_dim is None:
-        components_dim = sim_result.dim
+        components_dim = sim_result.frame.dim
     else:
-        components_dim = (comp_dim,) * len(sim_result.dim)
+        components_dim = (comp_dim,) * len(sim_result.frame.dim)
 
     components = paulis.components(-matrix_angle(gate), components_dim).real
 
@@ -74,11 +75,11 @@ def gate_components(
 ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
     jax_device = jax.devices()[config.jax_devices[0]]
 
-    num_qudits = len(sim_result.dim)
+    num_qudits = sim_result.frame.num_qudits
     comp_dim = np.sqrt(target.shape[0]).astype(int)
     dim = (comp_dim,) * num_qudits
 
-    trunc_gate = truncate_matrix(sim_result.states[-1], num_qudits, sim_result.dim[0], comp_dim)
+    trunc_gate = truncate_matrix(sim_result.states[-1], num_qudits, sim_result.frame.num_levels, comp_dim)
     trunc_gate = jax.device_put(trunc_gate, device=jax_device)
 
     def loss_fn(params):
