@@ -1,5 +1,8 @@
 from typing import Tuple, Union
+from types import ModuleType
 import numpy as np
+
+from rqutils import ArrayType
 
 def truncate_matrix(
     matrix: np.ndarray,
@@ -44,8 +47,9 @@ def truncate_matrix(
 
 def closest_unitary(
     matrix: np.ndarray,
-    with_fidelity: bool = False
-) -> Union[np.ndarray, Tuple[np.ndarray, float]]:
+    with_fidelity: bool = False,
+    npmod: ModuleType = np
+) -> Union[ArrayType, Tuple[ArrayType, float]]:
     r"""Find the closest unitary to a matrix.
 
     In general, the closest unitary :math:`U`, i.e., one with the smallest 2-norm :math:`\lVert U-A \rVert`,
@@ -66,14 +70,14 @@ def closest_unitary(
         A matrix or an array of matrices corresponding to the closest unitary to the input. If with_fidelity
         is True, the fidelity of the computed unitary with respect to the input matrix is appended.
     """
-    v, _, wdag = np.linalg.svd(matrix)
+    v, _, wdag = npmod.linalg.svd(matrix)
 
     unitary = v @ wdag
 
     if with_fidelity:
-        conjugate_unitary = np.moveaxis(unitary.conjugate(), -1, -2)
-        norm_tr = np.trace(matrix @ conjugate_unitary, axis1=-2, axis2=-1) / unitary.shape[-1]
-        fidelity = np.square(norm_tr.real) + np.square(norm_tr.imag)
+        conjugate_unitary = npmod.moveaxis(unitary.conjugate(), -1, -2)
+        norm_tr = npmod.trace(matrix @ conjugate_unitary, axis1=-2, axis2=-1) / unitary.shape[-1]
+        fidelity = npmod.square(norm_tr.real) + npmod.square(norm_tr.imag)
         return unitary, fidelity
     else:
         return unitary

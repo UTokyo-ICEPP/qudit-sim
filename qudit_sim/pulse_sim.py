@@ -6,12 +6,13 @@ import tempfile
 import logging
 import time
 import copy
+from functools import partial
 
 import numpy as np
 import qutip as qtp
 import jax
 import jax.numpy as jnp
-from jax.experimental.ode import odeint
+from jax.experimental.ode import _odeint_wrapper
 
 from rqutils.math import matrix_exp
 
@@ -99,9 +100,11 @@ def pulse_sim(
         frame: System frame to represent the simulation results in.
         final_only: Throw away intermediate states and expectation values to save memory. Due to implementation details,
             implies ``unitarize_evolution=True``.
-        reunitarize: Whether to reunitarize the time evolution matrices.
-        interval_len: Number of time steps to run ``sesolve`` uninterrupted. Only used when ``reunitarize=True``
-            and ``psi0`` is a unitary.
+        reunitarize: Whether to reunitarize the time evolution matrices. Note that SVD can be very slow for large system
+            sizes and ``final_only=False``.
+        interval_len: When integrating with QuTiP ``sesolve``, the number of time steps to run ``sesolve`` uninterrupted.
+            In this case the parameter is ignored unless ``reunitarize=True`` and ``psi0`` is a unitary. When integrating
+            with JAX ``odeint``,
         options: QuTiP solver options.
         save_result_to: File name (without the extension) to save the simulation result to.
         log_level: Log level.
@@ -201,6 +204,9 @@ def _prepare_args(
         if drive_args is None:
             drive_args = dict()
 
+        ## Identity matrix (used for evolution calculation)
+        identity = hgen.identity_op()
+
         ## Build the Hamiltonian
         if config.pulse_sim_solver == 'jax':
             if len(args):
@@ -221,14 +227,15 @@ def _prepare_args(
 
                         return -1.j * jnp.matmul(h_t, u_t)
 
+                    hamiltonian, _ = jax.custom_derivatives.closure_convert(hamiltonian, identity.full(),
+                                                                            tlist[0], drive_args)
+
         else:
             hamiltonian = hgen.build(frame='lab').evaluate_coeffs(tlist, drive_args)
 
         ## Initial state
         if psi0 is None:
-            psi0 = hgen.identity_op()
-
-        identity = hgen.identity_op()
+            psi0 = identity
 
         ## Set up the states and expectation values calculator
         calculator = StatesAndExpectations(frame, psi0, tlist, e_ops=e_ops, hgen=hgen)
@@ -239,7 +246,8 @@ def _prepare_args(
     if config.pulse_sim_solver == 'jax' and len(args) > 1:
         # Precompile the hamiltonian function
         hamiltonian, _, identity, drive_args = args[0][:4]
-        odeint(hamiltonian, identity.full(), tlist[:1], drive_args, rtol=1.e-8, atol=1.e-8)
+        rtol, atol, mxstep, hmax = 1.e-8, 1.e-8, jnp.inf, jnp.inf
+        vodeint(hamiltonian, rtol, atol, mxstep, hmax, identity.full(), tlist[None, :1], drive_args)
 
     return args
 
@@ -327,7 +335,7 @@ def _run_single(
             logger.info('XLA-compiled Hamiltonian built. Starting simulation..')
 
             states, expect = simulate_drive_odeint(hamiltonian, identity, calculator, drive_args, final_only,
-                                                   reunitarize, logger)
+                                                   reunitarize, interval_len, logger)
         else:
             logger.info('Hamiltonian with %d terms built. Starting simulation..', len(hamiltonian))
 
@@ -507,6 +515,7 @@ def simulate_drive_sesolve(
 
     return states, expect
 
+
 def simulate_drive_odeint(
     hamiltonian: Callable,
     identity: qtp.Qobj,
@@ -514,20 +523,40 @@ def simulate_drive_odeint(
     drive_args: Dict[str, Any],
     final_only: bool,
     reunitarize: bool,
+    interval_len: int,
     logger: logging.Logger
 ):
+    tlist = calculator.tlist
+    num_intervals = (tlist.shape[0] - 1) // interval_len
+    if (tlist.shape[0] - 1) % interval_len != 0:
+        num_extra_points = tlist.shape[0] - 1 - interval_len * num_intervals
+        num_intervals += 1
+        num_extra_points = interval_len * num_intervals - (tlist.shape[0] - 1)
+        dt = tlist[-1] - tlist[-2]
+        new_end = tlist[-1] + dt * num_extra_points
+        tlist = np.concatenate([tlist[:-1], np.linspace(tlist[-1], new_end, num_extra_points + 1)])
+
     if final_only:
-        tlist = jnp.array([calculator.tlist[0], calculator.tlist[-1]], dtype='float64')
+        tlists = np.array(list([tlist[iv * interval_len], tlist[(iv + 1) * interval_len]]
+                               for iv in range(num_intervals)))
     else:
-        tlist = calculator.tlist
+        tlists = np.array(list(tlist[iv * interval_len:(iv + 1) * interval_len + 1]
+                               for iv in range(num_intervals)))
 
     sim_start = time.time()
 
-    evolution = odeint(hamiltonian, identity.full(), tlist, drive_args, rtol=1.e-8, atol=1.e-8)
+    rtol, atol, mxstep, hmax = 1.e-8, 1.e-8, jnp.inf, jnp.inf
+    stacked_u = vodeint(hamiltonian, rtol, atol, mxstep, hmax, identity.full(), tlists, drive_args)
+
+    evolution = serialize_evolution(stacked_u)
+    if final_only:
+        evolution = evolution[-1:]
+        tlist = tlist[-1:]
 
     # Apply reunitarization
     if reunitarize:
-        evolution = closest_unitary(evolution)
+        # Note: Downloading the evolution matrices and using the numpy SVD because that seems faster
+        evolution = closest_unitary(evolution, npmod=np)
 
     ## Restore the actual global phase
     #evolution *= np.exp(-1.j * global_phase * local_tlist[:, None, None])
@@ -538,6 +567,23 @@ def simulate_drive_odeint(
     logger.info('Done in %f seconds.', time.time() - sim_start)
 
     return states, expect
+
+vodeint = jax.vmap(_odeint_wrapper, in_axes=(None, None, None, None, None, None, 0, None))
+
+@jax.jit
+def serialize_evolution(stacked_u):
+    dot_last = lambda ip, matrices: matrices.at[ip].set(stacked_u[ip, -1] @ matrices[ip - 1])
+
+    num_pieces = stacked_u.shape[0]
+    init = jnp.repeat(jnp.eye(stacked_u.shape[-1], dtype=complex)[None, :, :], num_pieces, axis=0)
+    init = jax.lax.fori_loop(1, num_pieces, dot_last, init)
+
+    matrix_shape = stacked_u.shape[-2:]
+    evolution = jnp.einsum('ptij,pjk->ptik', stacked_u[:, :-1], init)
+    evolution = jnp.concatenate([evolution.reshape((-1,) + matrix_shape),
+                                 jnp.matmul(stacked_u[-1, -1], init[-1])[None, ...]], axis=0)
+
+    return evolution
 
 def exponentiate_hstat(
     hamiltonian: qtp.Qobj,
