@@ -234,10 +234,19 @@ class TimeFunction(Expression):
         if isinstance(args, dict):
             args = tuple(args[key] for key in self.parameters)
 
-        return self.fn(t - self.tzero, args)
+        # Calling fn(t - self.tzero) would cause the JIT-compiled function
+        # to create a zero tensor and subtract it each time - better to
+        # check the value here
+        if self.tzero:
+            t -= self.tzero
+
+        return self.fn(t, args)
 
     def evaluate(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
-        return self.fn(t - self.tzero, args)
+        if self.tzero:
+            t -= self.tzero
+
+        return self.fn(t, args)
 
 
 class _TimeFunctionUnaryOp(TimeFunction):
@@ -252,7 +261,10 @@ class _TimeFunctionUnaryOp(TimeFunction):
         super().__init__(self._fn, self.expr.parameters)
 
     def _fn(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
-        return self.op(self.expr.fn(t - self.expr.tzero, args))
+        if self.expr.tzero:
+            t -= self.expr.tzero
+
+        return self.op(self.expr.fn(t, args))
 
 TimeFunction._unary_op = _TimeFunctionUnaryOp
 
@@ -284,21 +296,38 @@ class _TimeFunctionBinaryOp(TimeFunction):
 
     def _fn_TimeFunction(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
         l_num_params = len(self.lexpr.parameters)
+        if self.lexpr.tzero:
+            tl = t - self.lexpr.tzero
+        else:
+            tl = t
+
+        if self.rexpr.tzero:
+            tr = t - self.rexpr.tzero
+        else:
+            tr = t
+
         return self.op(
-            self.lexpr.fn(t - self.lexpr.tzero, args[:l_num_params]),
-            self.rexpr.fn(t - self.rexpr.tzero, args[l_num_params:])
+            self.lexpr.fn(tl, args[:l_num_params]),
+            self.rexpr.fn(tr, args[l_num_params:])
         )
 
     def _fn_ParameterExpression(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
         l_num_params = len(self.lexpr.parameters)
+
+        if self.lexpr.tzero:
+            t -= self.lexpr.tzero
+
         return self.op(
-            self.lexpr.fn(t - self.lexpr.tzero, args[:l_num_params]),
+            self.lexpr.fn(t, args[:l_num_params]),
             self.rexpr.evaluate(args[l_num_params:])
         )
 
     def _fn_array_like(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
+        if self.lexpr.tzero:
+            t -= self.lexpr.tzero
+
         return self.op(
-            self.lexpr.fn(t - self.lexpr.tzero, args),
+            self.lexpr.fn(t, args),
             self.rexpr
         )
 
@@ -355,9 +384,15 @@ class PiecewiseFunction(TimeFunction):
         iarg = 0
         for time, func in zip(self.timelist[:-1], self.funclist):
             nparam = len(func.parameters)
+
+            if func.tzero:
+                tfunc = t - func.tzero
+            else:
+                tfunc = t
+
             result = npmod.where(
                 t > time,
-                func.fn(t - func.tzero, args[iarg:iarg + nparam]),
+                func.fn(tfunc, args[iarg:iarg + nparam]),
                 result
             )
             iarg += nparam

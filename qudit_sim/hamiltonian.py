@@ -597,9 +597,11 @@ class HamiltonianBuilder:
                             hdrive.append([h_y, fn_y])
 
                     else:
-                        # Callable coefficient
-                        hdrive.append([h_x, fn_x])
-                        hdrive.append([h_y, fn_y])
+                        # TimeFunction
+                        if not (isinstance(fn_x, ConstantFunction) and fn_x.value == 0.):
+                            hdrive.append([h_x, fn_x])
+                        if not (isinstance(fn_y, ConstantFunction) and fn_y.value == 0.):
+                            hdrive.append([h_y, fn_y])
 
         if np.any(hstatic.data.data):
             hdrive.insert(0, hstatic)

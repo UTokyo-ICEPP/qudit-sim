@@ -90,8 +90,8 @@ class Gaussian(Pulse):
     def _fn(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
         npmod = config.npmod
 
-        x = (t - self.center) / self.sigma
-        v = npmod.exp(-npmod.square(x) * 0.5)
+        x_over_sqrt2 = (t - self.center) / self.sigma * np.sqrt(0.5)
+        v = npmod.exp(-npmod.square(x_over_sqrt2))
         amp = self.amp.evaluate(args)
         return npmod.asarray(amp / (1. - self._pedestal) * (v - self._pedestal),
                              dtype='complex128')
@@ -139,7 +139,7 @@ class GaussianSquare(Pulse):
 
         if rise:
             self.t_plateau = gauss_duration / 2.
-            self.gauss_rise = Gaussian(duration=gauss_duration, amp=self.amp, sigma=sigma,
+            self.gauss_rise = Gaussian(duration=gauss_duration, amp=1., sigma=sigma,
                                        center=None, zero_ends=zero_ends)
         else:
             self.t_plateau = 0.
@@ -147,7 +147,7 @@ class GaussianSquare(Pulse):
 
         if fall:
             fall_tzero = self.t_plateau + self.width - gauss_duration / 2.
-            self.gauss_fall = Gaussian(duration=gauss_duration, amp=self.amp, sigma=sigma,
+            self.gauss_fall = Gaussian(duration=gauss_duration, amp=1., sigma=sigma,
                                        center=None, zero_ends=zero_ends, tzero=fall_tzero)
         else:
             self.gauss_fall = None
@@ -177,47 +177,26 @@ class GaussianSquare(Pulse):
         npmod = config.npmod
         t = npmod.asarray(t)
 
-        return npmod.where(
-            (t <= 0.) | (t > self.duration),
-            0.,
-            npmod.where(
-                t <= self.t_plateau,
-                self.gauss_rise(t, args),
-                npmod.where(
-                    t <= self.t_plateau + self.width,
-                    self.amp.evaluate(args),
-                    self.gauss_fall(t, args)
-                )
-            )
-        )
+        value_left = npmod.asarray(t <= self.t_plateau) * (self.gauss_rise(t) - 1.)
+        value_right = npmod.asarray(t > self.t_plateau + self.width) * (self.gauss_fall(t) - 1.)
+
+        return (value_left + value_right + 1.) * self.amp.evaluate(args)
 
     def _fn_left(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
         npmod = config.npmod
         t = npmod.asarray(t)
 
-        return npmod.where(
-            (t <= 0.) | (t > self.duration),
-            0.,
-            npmod.where(
-                t <= self.t_plateau,
-                self.gauss_rise(t, args),
-                self.amp.evaluate(args)
-            )
-        )
+        value_left = npmod.asarray(t <= self.t_plateau) * (self.gauss_rise(t) - 1.)
+
+        return (value_left + 1.) * self.amp.evaluate(args)
 
     def _fn_right(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
         npmod = config.npmod
         t = npmod.asarray(t)
 
-        return npmod.where(
-            (t <= 0.) | (t > self.duration),
-            0.,
-            npmod.where(
-                t <= self.width,
-                self.amp.evaluate(args),
-                self.gauss_fall(t, args)
-            )
-        )
+        value_right = npmod.asarray(t > self.t_plateau + self.width) * (self.gauss_fall(t) - 1.)
+
+        return (value_right + 1.) * self.amp.evaluate(args)
 
 
 class Drag(Gaussian):

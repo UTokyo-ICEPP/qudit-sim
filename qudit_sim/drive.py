@@ -151,7 +151,6 @@ class DriveTerm:
             fn_y = np.concatenate(list(y for _, _, y in funclist[:-1]))
 
         else:
-            print(str(funclist[0][1]), str(funclist[1][1]))
             raise ValueError('Cannot generate a Hamiltonian coefficient from amplitude types'
                              f' {list(type(func) for _, func, _ in funclist[:-1])}')
 
@@ -269,7 +268,7 @@ def _generate_single_rwa(envelope, frequency, frame_frequency):
 def _generate_single_full(envelope, frequency, frame_frequency):
     if isinstance(frequency, ParameterExpression) or isinstance(envelope, (np.ndarray, Expression)):
         envelope *= 2.
-        labframe_fn = CosFunction(frequency) * envelope.real + SinFunction(frequency) * envelope.imag
+        labframe_fn = (ExpFunction(-frequency) * envelope).real
 
         if frame_frequency == 0.:
             return labframe_fn, ConstantFunction(0.)
