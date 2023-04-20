@@ -1,15 +1,16 @@
 """Pulse simulation frontend."""
 
-from typing import Any, Dict, List, Tuple, Sequence, Optional, Union, Callable
+from typing import Any, Dict, List, Tuple, Sequence, Iterable, Optional, Union, Callable
 import os
 import tempfile
 import logging
 import time
 import copy
-from functools import partial
+from dataclasses import dataclass
 
 import numpy as np
-import qutip as qtp
+from qutip import Qobj, qeye, sesolve, rhs_clear
+from qutip.solver import Options
 import jax
 import jax.numpy as jnp
 from jax.experimental.ode import _odeint_wrapper
@@ -26,19 +27,18 @@ from .config import config
 logger = logging.getLogger(__name__)
 
 TList = Union[np.ndarray, Tuple[int, int], Dict[str, Union[int, float]]]
-EOps = Sequence[qtp.Qobj]
 
 def pulse_sim(
     hgen: HamiltonianBuilder,
     tlist: Union[TList, List[TList]] = (10, 100),
-    psi0: Optional[Union[qtp.Qobj, List[qtp.Qobj]]] = None,
-    drive_args: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
-    e_ops: Optional[Union[EOps, List[EOps]]] = None,
-    frame: Optional[Union[FrameSpec, List[FrameSpec]]] = None,
-    final_only: Optional[Union[bool, List[bool]]] = False,
-    reunitarize: Optional[Union[bool, List[bool]]] = True,
-    interval_len: Optional[Union[int, List[int]]] = 1000,
-    options: Optional[qtp.solver.Options] = None,
+    psi0: Optional[Union[Qobj, List[Qobj]]] = None,
+    drive_args: Union[Dict[str, Any], List[Dict[str, Any]]] = dict(),
+    e_ops: Optional[Union[Sequence[Qobj], List[Sequence[Qobj]]]] = None,
+    frame: Union[FrameSpec, List[FrameSpec]] = 'dressed',
+    final_only: Union[bool, List[bool]] = False,
+    reunitarize: Union[bool, List[bool]] = True,
+    interval_len: Union[int, str, List[Union[int, str]]] = 'auto',
+    sesolve_options: Union[Options, List[Options]] = Options(),
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING
 ) -> Union['PulseSimResult', List['PulseSimResult']]:
@@ -54,7 +54,7 @@ def pulse_sim(
     the initial state (or initial unitary). If expectation ops are given, their expectation values are computed from the
     resulting evolved states.
 
-    All parameters except ``hgen``, ``options``, ``save_result_to``, and ``log_level`` can be given as lists to trigger a
+    All parameters except ``hgen``, ``save_result_to``, and ``log_level`` can be given as lists to trigger a
     parallel execution of ``sesolve``. If more than one parameter is a list, their lengths must be identical, and all
     parameters are "zipped" together to form the argument lists of individual single simulation jobs. Parallel jobs
     are run as separate processes if QuTiP (internally scipy)-based integrator is used, and as threads if JAX integrator
@@ -105,7 +105,7 @@ def pulse_sim(
         interval_len: When integrating with QuTiP ``sesolve``, the number of time steps to run ``sesolve`` uninterrupted.
             In this case the parameter is ignored unless ``reunitarize=True`` and ``psi0`` is a unitary. When integrating
             with JAX ``odeint``,
-        options: QuTiP solver options.
+        sesolve_options: QuTiP solver options.
         save_result_to: File name (without the extension) to save the simulation result to.
         log_level: Log level.
 
@@ -116,17 +116,22 @@ def pulse_sim(
     logger.setLevel(log_level)
 
     num_tasks = None
-    zip_list = []
+
+    if isinstance(drive_args, list):
+        num_tasks = len(drive_args)
+
+    # Put inputs to PulseSimParameters in a zipped list
+    zip_list = list()
 
     parallel_params = [
         (tlist, (np.ndarray, tuple, dict)),
-        (psi0, qtp.Qobj),
-        (drive_args, dict),
+        (psi0, Qobj),
         (e_ops, Sequence),
         (frame, (str, dict, Sequence)),
         (final_only, bool),
         (reunitarize, bool),
-        (interval_len, int)
+        (interval_len, int),
+        (sesolve_options, Options)
     ]
 
     # Pack parallelizable arguments into per-job tuples
@@ -143,21 +148,13 @@ def pulse_sim(
             zip_list.append(None)
 
     if num_tasks is None:
-        raw_args = [tuple(param for param, _ in parallel_params)]
-        args = _prepare_args(hgen, raw_args)[0]
-        kwargs = {'options': options, 'save_result_to': save_result_to}
+        hamiltonian = build_hamiltonian(hgen, drive_args)
+        raw_args = tuple(param for param, _ in parallel_params)
+        parameters = compose_parameters(hgen, raw_args)
 
-        result = _run_single(*args, **kwargs)
+        result = _run_single(hamiltonian, parameters, drive_args=drive_args, save_result_to=save_result_to)
 
     else:
-        for iparam, (param, _) in enumerate(parallel_params):
-            if zip_list[iparam] is None:
-                zip_list[iparam] = [param] * num_tasks
-
-        args = _prepare_args(hgen, list(zip(*zip_list)))
-
-        common_kwargs = {'options': options}
-
         if save_result_to:
             if not (os.path.exists(save_result_to) and os.path.isdir(save_result_to)):
                 os.makedirs(save_result_to)
@@ -168,108 +165,72 @@ def pulse_sim(
         else:
             save_result_path = lambda itask: None
 
-        kwarg_keys = ('logger_name', 'save_result_to')
-        kwarg_values = list()
-        for itask in range(num_tasks):
-            kwarg_values.append((f'{__name__}.{itask}', save_result_path(itask)))
+        if not isinstance(drive_args, list):
+            drive_args = [drive_args] * num_tasks
 
-        thread_based = config.pulse_sim_solver == 'jax'
+        hamiltonian = build_hamiltonian(hgen, drive_args[0])
+
+        for iparam, (param, _) in enumerate(parallel_params):
+            if zip_list[iparam] is None:
+                zip_list[iparam] = [param] * num_tasks
+
+        parameters = compose_parameters(hgen, zip(*zip_list))
+
+        if config.pulse_sim_solver == 'jax':
+            thread_based = True
+
+            # Precompile the hamiltonian function
+            rtol, atol, mxstep, hmax = 1.e-8, 1.e-8, jnp.inf, jnp.inf
+            y0 = hgen.identity_op().full()
+            ts = parameters[0].tlist[None, :1]
+            vodeint(hamiltonian, rtol, atol, mxstep, hmax, y0, ts, drive_args[0])
+
+            common_args = (hamiltonian,)
+            args = parameters
+            arg_position = 1
+            kwarg_keys = ('drive_args', 'logger_name', 'save_result_to')
+            kwarg_values = list((drive_args[itask], f'{__name__}.{itask}', save_result_path(itask))
+                                for itask in range(num_tasks))
+
+        else:
+            thread_based = False
+
+            # Convert the functional Hamiltonian coefficients to arrays before passing them to parallel_map
+            hamiltonians = list()
+            for params, dargs in zip(parameters, drive_args):
+                hamiltonians.append(hamiltonian.evaluate_coeffs(params.tlist, dargs))
+
+            common_args = None
+            args = list(zip(hamiltonians, parameters))
+            arg_position = (0, 1)
+            kwarg_keys = ('logger_name', 'save_result_to')
+            kwarg_values = list((f'{__name__}.{itask}', save_result_path(itask)) for itask in range(num_tasks))
 
         result = parallel_map(_run_single, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
-                              common_kwargs=common_kwargs,
-                              log_level=log_level, thread_based=thread_based)
+                              arg_position=arg_position, common_args=common_args, log_level=log_level,
+                              thread_based=thread_based)
 
     logger.setLevel(original_log_level)
 
     return result
 
 
-def _prepare_args(
-    hgen: HamiltonianBuilder,
-    raw_args_list: List[Tuple[Any, ...]]
-) -> List[Tuple[Any, ...]]:
-    """Generate the arguments for parallel jobs using the HamiltonianBuilder."""
-    args = list()
+@dataclass
+class PulseSimParameters:
+    frame: SystemFrame
+    tlist: np.ndarray
+    psi0: Qobj
+    e_ops: Optional[Sequence[Qobj]] = None
+    final_only: bool = False
+    reunitarize: bool = True
+    interval_len: Union[int, str] = 'auto'
+    sesolve_options: Options = Options()
 
-    for tlist, psi0, drive_args, e_ops, frame, final_only, reunitarize, interval_len in raw_args_list:
-        ## Time points
-        if isinstance(tlist, tuple):
-            tlist = {'points_per_cycle': tlist[0], 'num_cycles': tlist[1]}
-        if isinstance(tlist, dict):
-            tlist = dict(tlist)
-            tlist['frame'] = 'lab'
-            tlist = hgen.make_tlist(**tlist)
-
-        ## Drive args
-        if drive_args is None:
-            drive_args = dict()
-
-        ## Identity matrix (used for evolution calculation)
-        identity = hgen.identity_op()
-
-        ## Build the Hamiltonian
-        if config.pulse_sim_solver == 'jax':
-            if len(args):
-                # All threads will use the same hamiltonian function
-                hamiltonian = args[0][0]
-            else:
-                h_terms = hgen.build(frame='lab', as_timefn=True)
-
-                if len(h_terms) == 1 and isinstance(h_terms[0], qtp.Qobj):
-                    # Will just exponentiate
-                    hamiltonian = h_terms
-                else:
-                    @jax.jit
-                    def hamiltonian(u_t, t, drive_args):
-                        h_t = h_terms[0].full()
-                        for qobj, fn in h_terms[1:]:
-                            h_t += qobj.full() * fn(t, drive_args)
-
-                        return -1.j * jnp.matmul(h_t, u_t)
-
-                    hamiltonian, _ = jax.custom_derivatives.closure_convert(hamiltonian, identity.full(),
-                                                                            tlist[0], drive_args)
-
-        else:
-            hamiltonian = hgen.build(frame='lab').evaluate_coeffs(tlist, drive_args)
-
-        ## Initial state
-        if psi0 is None:
-            psi0 = identity
-
-        ## Set up the states and expectation values calculator
-        calculator = StatesAndExpectations(frame, psi0, tlist, e_ops=e_ops, hgen=hgen)
-
-        args.append((hamiltonian, calculator, identity, drive_args,
-                     final_only, reunitarize, interval_len))
-
-    if config.pulse_sim_solver == 'jax' and len(args) > 1:
-        # Precompile the hamiltonian function
-        hamiltonian, _, identity, drive_args = args[0][:4]
-        rtol, atol, mxstep, hmax = 1.e-8, 1.e-8, jnp.inf, jnp.inf
-        vodeint(hamiltonian, rtol, atol, mxstep, hmax, identity.full(), tlist[None, :1], drive_args)
-
-    return args
-
-
-class StatesAndExpectations:
-    def __init__(
+    def transform_evolution(
         self,
-        frame: FrameSpec,
-        psi0: qtp.Qobj,
-        tlist: np.ndarray,
-        e_ops: Optional[EOps] = None,
-        hgen: Optional[HamiltonianBuilder] = None
+        evolution: np.ndarray,
+        tlist: Optional[np.ndarray] = None
     ):
-        if frame is None:
-            frame = 'dressed'
-
-        self.frame = SystemFrame(frame, hgen)
-        self.psi0 = psi0
-        self.e_ops = e_ops
-        self.tlist = tlist
-
-    def calculate(self, evolution, tlist=None):
         if tlist is None:
             tlist = self.tlist
 
@@ -289,7 +250,7 @@ class StatesAndExpectations:
         # Fill the expectation values
         expect = list()
         for observable in self.e_ops:
-            if isinstance(observable, qtp.Qobj):
+            if isinstance(observable, Qobj):
                 op = observable.full()
                 if len(states.shape) == 3:
                     out = np.einsum('ij,tij->t', op.conjugate(), states)
@@ -306,52 +267,116 @@ class StatesAndExpectations:
         return states, expect
 
 
+def build_hamiltonian(
+    hgen: HamiltonianBuilder,
+    sample_drive_args: Optional[Dict[str, Any]] = None
+) -> Any:
+    """Build the Hamiltonian according to the pulse_sim_solver option."""
+    if config.pulse_sim_solver == 'jax':
+        h_terms = hgen.build(frame='lab', as_timefn=True)
+
+        if len(h_terms) == 1 and isinstance(h_terms[0], Qobj):
+            # Will just exponentiate
+            hamiltonian = h_terms
+        else:
+            @jax.jit
+            def du_dt(u_t, t, drive_args):
+                h_t = h_terms[0].full()
+                for qobj, fn in h_terms[1:]:
+                    h_t += qobj.full() * fn(t, drive_args)
+
+                return -1.j * jnp.matmul(h_t, u_t)
+
+            if sample_drive_args is None:
+                hamiltonian = du_dt
+            else:
+                hamiltonian, _ = jax.custom_derivatives.closure_convert(du_dt, hgen.identity_op().full(),
+                                                                        0., sample_drive_args)
+
+    else:
+        hamiltonian = hgen.build(frame='lab')
+
+    return hamiltonian
+
+
+def compose_parameters(
+    hgen: HamiltonianBuilder,
+    raw_args_list: Union[Tuple[Any, ...], Iterable[Tuple[Any, ...]]]
+) -> List[Tuple[Any, ...]]:
+    """Generate the arguments for parallel jobs using the HamiltonianBuilder."""
+    singleton_input = False
+    if isinstance(raw_args_list, tuple) and isinstance(raw_args_list[-1], Options):
+        singleton_input = True
+        raw_args_list = [raw_args_list]
+
+    parameters_list = list()
+
+    for tlist, psi0, e_ops, frame, final_only, reunitarize, interval_len, sesolve_options in raw_args_list:
+        ## Time points
+        if isinstance(tlist, tuple):
+            tlist = {'points_per_cycle': tlist[0], 'num_cycles': tlist[1]}
+        if isinstance(tlist, dict):
+            tlist = dict(tlist)
+            tlist['frame'] = 'lab'
+            tlist = hgen.make_tlist(**tlist)
+
+        if psi0 is None:
+            psi0 = hgen.identity_op()
+
+        if not isinstance(frame, SystemFrame):
+            frame = SystemFrame(frame, hgen)
+
+        parameters = PulseSimParameters(frame, tlist, psi0, e_ops=e_ops, final_only=final_only,
+                                        reunitarize=reunitarize, interval_len=interval_len,
+                                        sesolve_options=sesolve_options)
+
+        parameters_list.append(parameters)
+
+    if singleton_input:
+        return parameters_list[0]
+    else:
+        return parameters_list
+
+
 def _run_single(
-    hamiltonian: Union[List[Union[qtp.Qobj, List]], Callable],
-    calculator: StatesAndExpectations,
-    identity: qtp.Qobj,
-    drive_args: Dict[str, Any],
-    final_only: bool,
-    reunitarize: bool,
-    interval_len: int,
-    options: Optional[qtp.solver.Options] = None,
+    hamiltonian: Any,
+    parameters: PulseSimParameters,
+    drive_args: Optional[Dict[str, Any]] = None,
     save_result_to: Optional[str] = None,
     logger_name: str = __name__
 ) -> PulseSimResult:
     """Run one pulse simulation."""
     logger = logging.getLogger(logger_name)
 
-    logger.info('Using %d time points from %.3e to %.3e', calculator.tlist.shape[0], calculator.tlist[0],
-                calculator.tlist[-1])
+    logger.info('Using %d time points from %.3e to %.3e', parameters.tlist.shape[0], parameters.tlist[0],
+                parameters.tlist[-1])
 
     ## Run the simulation or exponentiate the static Hamiltonian
-    if isinstance(hamiltonian, list) and len(hamiltonian) == 1 and isinstance(hamiltonian[0], qtp.Qobj):
+    if isinstance(hamiltonian, list) and len(hamiltonian) == 1 and isinstance(hamiltonian[0], Qobj):
         logger.info('Static Hamiltonian built. Exponentiating..')
 
-        states, expect = exponentiate_hstat(hamiltonian[0], calculator, final_only, logger)
+        states, expect = exponentiate_hstat(hamiltonian, parameters, logger_name)
+
+    elif config.pulse_sim_solver == 'jax':
+        logger.info('XLA-compiled Hamiltonian built. Starting simulation..')
+
+        states, expect = simulate_drive_odeint(hamiltonian, parameters, drive_args, logger_name)
 
     else:
-        if config.pulse_sim_solver == 'jax':
-            logger.info('XLA-compiled Hamiltonian built. Starting simulation..')
+        logger.info('Hamiltonian with %d terms built. Starting simulation..', len(h))
 
-            states, expect = simulate_drive_odeint(hamiltonian, identity, calculator, drive_args, final_only,
-                                                   reunitarize, interval_len, logger)
-        else:
-            logger.info('Hamiltonian with %d terms built. Starting simulation..', len(hamiltonian))
-
-            states, expect = simulate_drive_sesolve(hamiltonian, identity, calculator, final_only, reunitarize,
-                                                    interval_len, options, logger)
+        states, expect = simulate_drive_sesolve(hamiltonian, parameters, drive_args, logger_name)
 
     ## Compile the result and return
-    if final_only:
-        tlist = calculator.tlist[-1:]
+    if parameters.final_only:
+        tlist = parameters.tlist[-1:]
     else:
-        tlist = calculator.tlist
+        tlist = parameters.tlist
 
-    if calculator.e_ops and options and not options.store_states:
+    if parameters.e_ops and not parameters.sesolve_options.store_states:
         states = None
 
-    result = PulseSimResult(times=tlist, expect=expect, states=states, frame=calculator.frame)
+    result = PulseSimResult(times=tlist, expect=expect, states=states, frame=parameters.frame)
 
     if save_result_to:
         logger.info('Saving the simulation result to %s.h5', save_result_to)
@@ -361,33 +386,40 @@ def _run_single(
 
 
 def simulate_drive_sesolve(
-    hamiltonian: List[Union[qtp.Qobj, List]],
-    identity: qtp.Qobj,
-    calculator: StatesAndExpectations,
-    final_only: bool,
-    reunitarize: bool,
-    interval_len: int,
-    options: Union[None, qtp.solver.Options],
-    logger: logging.Logger
+    hamiltonian: List[Union[Qobj, List]],
+    parameters: PulseSimParameters,
+    drive_args: Optional[Dict[str, Any]] = None,
+    logger_name: str = __name__
 ):
-    ## Options that are actually used in sesolve
+    logger = logging.getLogger(logger_name)
 
-    if options is None:
-        solve_options = qtp.solver.Options()
-    else:
-        solve_options = copy.deepcopy(options)
+    # Convert functional coefficients to arrays
+    if isinstance(hamiltonian, Hamiltonian):
+        hamiltonian = hamiltonian.evaluate_coeffs(parameters.tlist, drive_args)
 
-    ## Reunitarization and interval running setting
+    if len(hamiltonian) == 1 and isinstance(hamiltonian[0], Qobj):
+        return exponentiate_hstat(hamiltonian, parameters, logger_name)
 
-    if final_only and interval_len < calculator.tlist.shape[0]:
+    # Take a copy of options because we change its values
+
+    sesolve_options = copy.deepcopy(parameters.sesolve_options)
+
+    # Reunitarization and interval running setting
+
+    reunitarize = parameters.reunitarize
+    if parameters.final_only and parameters.interval_len < parameters.tlist.shape[0]:
         # Final only option with a short interval len implies that we run sesolve in intervals.
         # The evolution matrices must be reunitarized in this case because an op psi0 argument
         # of sesolve must be unitary, but the evolution matrices diverge from unitary typically
         # within a few hundred time steps.
         reunitarize = True
 
-    if not reunitarize:
-        interval_len = calculator.tlist.shape[0]
+    interval_len = parameters.interval_len
+    if interval_len == 'auto':
+        if reunitarize:
+            interval_len = 500
+        else:
+            interval_len = parameters.tlist.shape[0]
 
     # sesolve generates O(1e-6) error in the global phase when the Hamiltonian is not traceless.
     # Since we run the simulation in the lab frame, the only traceful term is hdiag.
@@ -395,49 +427,39 @@ def simulate_drive_sesolve(
     # according to the shift.
     hdiag = hamiltonian[0]
     global_phase = np.trace(hdiag.full()).real / hdiag.shape[0]
-    hamiltonian[0] -= global_phase
+    hamiltonian[0] = hdiag - global_phase
 
-    array_terms = list()
+    isarray = list(isinstance(term, list) and isinstance(term[1], np.ndarray) for term in hamiltonian)
+    if not any(isarrayd):
+        # No interval dependency in the Hamiltonian (all constants or string expressions)
+        # -> Can reuse the compiled objects
+        sesolve_options.rhs_reuse = True
 
-    if interval_len < calculator.tlist.shape[0]:
-        local_hamiltonian = copy.deepcopy(hamiltonian)
+    # Arrays to store the unitaries and expectation values
 
-        for iterm, term in enumerate(hamiltonian):
-            if isinstance(term, list) and isinstance(term[1], np.ndarray):
-                array_terms.append(iterm)
-
-        if not array_terms:
-            # We can reuse the same Hamiltonian for multiple intervals
-            solve_options.rhs_reuse = True
-
-    else:
-        local_hamiltonian = hamiltonian
-
-    ## Arrays to store the unitaries and expectation values
-
-    if not calculator.e_ops or solve_options.store_states:
+    if not parameters.e_ops or sesolve_options.store_states:
         # squeezed shape
-        state_shape = tuple(s for s in calculator.psi0.shape if s != 1)
-        if final_only:
+        state_shape = tuple(s for s in parameters.psi0.shape if s != 1)
+        if parameters.final_only:
             states = np.empty((1,) + state_shape, dtype=np.complex128)
         else:
-            states = np.empty(calculator.tlist.shape + state_shape, dtype=np.complex128)
+            states = np.empty(parameters.tlist.shape + state_shape, dtype=np.complex128)
     else:
         states = None
 
-    if calculator.e_ops:
-        num_e_ops = len(calculator.e_ops)
-        if final_only:
+    if parameters.e_ops:
+        num_e_ops = len(parameters.e_ops)
+        if parameters.final_only:
             expect = list(np.empty(1) for _ in range(num_e_ops))
         else:
-            expect = list(np.empty_like(calculator.tlist) for _ in range(num_e_ops))
+            expect = list(np.empty_like(parameters.tlist) for _ in range(num_e_ops))
     else:
         expect = None
 
     ## Run sesolve in a temporary directory
 
     # We'll always need the states
-    solve_options.store_states = True
+    sesolve_options.store_states = True
 
     sim_start = time.time()
 
@@ -448,20 +470,24 @@ def simulate_drive_sesolve(
 
             start = 0
             # Compute the time evolution in the lab frame -> initial unitary is identity
-            local_psi0 = identity
+            local_psi0 = qeye(hdiag.dims[0])
             while True:
-                for iterm in array_terms:
-                    local_hamiltonian[iterm][1] = hamiltonian[iterm][1][start:start + interval_len]
+                local_hamiltonian = list()
+                for h_term, isa in zip(hamiltonian, isarray):
+                    if isa:
+                        local_hamiltonian.append([h_term[0], h_term[1][start:start + interval_len]])
+                    else:
+                        local_hamiltonian.append(h_term)
 
-                local_tlist = calculator.tlist[start:start + interval_len]
+                local_tlist = parameters.tlist[start:start + interval_len]
 
-                qtp_result = qtp.sesolve(local_hamiltonian,
-                                         local_psi0,
-                                         local_tlist,
-                                         options=solve_options)
+                qtp_result = sesolve(local_hamiltonian,
+                                     local_psi0,
+                                     local_tlist,
+                                     options=sesolve_options)
 
                 # Array of lab-frame evolution ops
-                if final_only:
+                if parameters.final_only:
                     evolution = np.squeeze(qtp_result.states[-1].full())[None, ...]
                     local_tlist = local_tlist[-1:]
                 else:
@@ -477,10 +503,10 @@ def simulate_drive_sesolve(
                 evolution *= np.exp(-1.j * global_phase * local_tlist[:, None, None])
 
                 # Compute the states and expectation values in the original frame
-                local_states, local_expect = calculator.calculate(evolution, local_tlist)
+                local_states, local_expect = parameters.transform_evolution(evolution, local_tlist)
 
                 # Indices for the output arrays
-                if final_only:
+                if parameters.final_only:
                     out_slice = slice(0, 1)
                 else:
                     out_slice = slice(start, start + interval_len)
@@ -497,9 +523,9 @@ def simulate_drive_sesolve(
                 # Update start and local_psi0
                 start += interval_len - 1
 
-                if start < calculator.tlist.shape[0] - 1:
+                if start < parameters.tlist.shape[0] - 1:
                     # evolution[-1] is the lab-frame evolution operator
-                    local_psi0 = qtp.Qobj(inpt=last_unitary, dims=local_psi0.dims)
+                    local_psi0 = Qobj(inpt=last_unitary, dims=local_psi0.dims)
                 else:
                     break
 
@@ -509,7 +535,7 @@ def simulate_drive_sesolve(
         finally:
             os.chdir(cwd)
             # Clear the cached solver
-            qtp.rhs_clear()
+            rhs_clear()
 
     logger.info('Done in %f seconds.', time.time() - sim_start)
 
@@ -518,25 +544,28 @@ def simulate_drive_sesolve(
 
 def simulate_drive_odeint(
     hamiltonian: Callable,
-    identity: qtp.Qobj,
-    calculator: StatesAndExpectations,
-    drive_args: Dict[str, Any],
-    final_only: bool,
-    reunitarize: bool,
-    interval_len: int,
-    logger: logging.Logger
+    parameters: PulseSimParameters,
+    drive_args: Dict[str, Any] = dict(),
+    logger_name: str = __name__
 ):
-    tlist = calculator.tlist
+    logger = logging.getLogger(logger_name)
+
+    interval_len = parameters.interval_len
+    if interval_len == 'auto':
+        # Best determined by the representative frequency and simulation duration
+        interval_len = 100
+
+    tlist = parameters.tlist
     num_intervals = (tlist.shape[0] - 1) // interval_len
-    if (tlist.shape[0] - 1) % interval_len != 0:
-        num_extra_points = tlist.shape[0] - 1 - interval_len * num_intervals
+    num_extra_points = tlist.shape[0] - 1 - interval_len * num_intervals
+    if num_extra_points != 0:
         num_intervals += 1
         num_extra_points = interval_len * num_intervals - (tlist.shape[0] - 1)
         dt = tlist[-1] - tlist[-2]
         new_end = tlist[-1] + dt * num_extra_points
         tlist = np.concatenate([tlist[:-1], np.linspace(tlist[-1], new_end, num_extra_points + 1)])
 
-    if final_only:
+    if parameters.final_only:
         tlists = np.array(list([tlist[iv * interval_len], tlist[(iv + 1) * interval_len]]
                                for iv in range(num_intervals)))
     else:
@@ -545,16 +574,27 @@ def simulate_drive_odeint(
 
     sim_start = time.time()
 
+    y0 = qeye(parameters.psi0.dims[0]).full()
+
+    if hamiltonian.__name__ == 'du_dt':
+        hamiltonian, _ = jax.custom_derivatives.closure_convert(hamiltonian, y0, 0., drive_args)
+
     rtol, atol, mxstep, hmax = 1.e-8, 1.e-8, jnp.inf, jnp.inf
-    stacked_u = vodeint(hamiltonian, rtol, atol, mxstep, hmax, identity.full(), tlists, drive_args)
+    stacked_u = vodeint(hamiltonian, rtol, atol, mxstep, hmax, y0, tlists, drive_args)
 
     evolution = serialize_evolution(stacked_u)
-    if final_only:
+
+    if num_extra_points != 0:
+        # Truncate back to the original tlist
+        evolution = evolution[:-num_extra_points]
+        tlist = tlist[:-num_extra_points]
+
+    if parameters.final_only:
         evolution = evolution[-1:]
         tlist = tlist[-1:]
 
     # Apply reunitarization
-    if reunitarize:
+    if parameters.reunitarize:
         # Note: Downloading the evolution matrices and using the numpy SVD because that seems faster
         evolution = closest_unitary(evolution, npmod=np)
 
@@ -562,7 +602,7 @@ def simulate_drive_odeint(
     #evolution *= np.exp(-1.j * global_phase * local_tlist[:, None, None])
 
     # Compute the states and expectation values in the original frame
-    states, expect = calculator.calculate(evolution, tlist)
+    states, expect = parameters.transform_evolution(evolution, tlist)
 
     logger.info('Done in %f seconds.', time.time() - sim_start)
 
@@ -585,22 +625,24 @@ def serialize_evolution(stacked_u):
 
     return evolution
 
+
 def exponentiate_hstat(
-    hamiltonian: qtp.Qobj,
-    calculator: StatesAndExpectations,
-    final_only: bool,
-    logger: logging.Logger
+    hamiltonian: Qobj,
+    parameters: PulseSimParameters,
+    logger_name: str = __name__
 ):
     """Compute exp(-iHt)."""
+    logger = logging.getLogger(__name__)
+
     hamiltonian = hamiltonian.full()
 
-    if final_only:
-        tlist = calculator.tlist[-1:]
+    if parameters.final_only:
+        tlist = parameters.tlist[-1:]
     else:
-        tlist = calculator.tlist
+        tlist = parameters.tlist
 
     evolution = matrix_exp(-1.j * hamiltonian[None, ...] * tlist[:, None, None], hermitian=-1)
 
-    states, expect = calculator.calculate(evolution, tlist)
+    states, expect = parameters.transform_evolution(evolution, tlist)
 
     return states, expect
