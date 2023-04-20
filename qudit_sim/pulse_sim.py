@@ -6,7 +6,10 @@ import tempfile
 import logging
 import time
 import copy
+from concurrent import futures
 from dataclasses import dataclass
+from threading import Lock
+from functools import partial
 
 import numpy as np
 from qutip import Qobj, qeye, sesolve, rhs_clear
@@ -130,7 +133,7 @@ def pulse_sim(
         (frame, (str, dict, Sequence)),
         (final_only, bool),
         (reunitarize, bool),
-        (interval_len, int),
+        (interval_len, (int, str)),
         (sesolve_options, Options)
     ]
 
@@ -179,11 +182,27 @@ def pulse_sim(
         if config.pulse_sim_solver == 'jax':
             thread_based = True
 
-            # Precompile the hamiltonian function
-            rtol, atol, mxstep, hmax = 1.e-8, 1.e-8, jnp.inf, jnp.inf
+            # Precompile the hamiltonian function for all unique tlist-stack shapes
+            tlist_shape_params = set((p.tlist.shape[0], p.interval_len, p.final_only)
+                                     for p in parameters)
+
             y0 = hgen.identity_op().full()
-            ts = parameters[0].tlist[None, :1]
-            vodeint(hamiltonian, rtol, atol, mxstep, hmax, y0, ts, drive_args[0])
+
+            # Compile in threads
+            with futures.ThreadPoolExecutor() as pool:
+                thread_jobs = dict()
+                for tlist_len, interval_len, final_only in tlist_shape_params:
+                    num_intervals = int(np.ceil((tlist_len - 1) / (interval_len - 1)))
+
+                    if final_only:
+                        dummy_tlists = np.empty((num_intervals, 2))
+                    else:
+                        dummy_tlists = np.empty((num_intervals, interval_len))
+
+                    lowered = vodeint.lower(hamiltonian, y0, dummy_tlists, drive_args[0])
+                    thread_jobs[dummy_tlists.shape] = pool.submit(lowered.compile)
+
+            hamiltonian.compiled_vodeint = {shape: job.result() for shape, job in thread_jobs.items()}
 
             common_args = (hamiltonian,)
             args = parameters
@@ -220,10 +239,10 @@ class PulseSimParameters:
     frame: SystemFrame
     tlist: np.ndarray
     psi0: Qobj
-    e_ops: Optional[Sequence[Qobj]] = None
-    final_only: bool = False
-    reunitarize: bool = True
-    interval_len: Union[int, str] = 'auto'
+    e_ops: Union[Sequence[Qobj], None]
+    final_only: bool
+    reunitarize: bool
+    interval_len: int
     sesolve_options: Options = Options()
 
     def transform_evolution(
@@ -326,8 +345,17 @@ def compose_parameters(
         if not isinstance(frame, SystemFrame):
             frame = SystemFrame(frame, hgen)
 
-        parameters = PulseSimParameters(frame, tlist, psi0, e_ops=e_ops, final_only=final_only,
-                                        reunitarize=reunitarize, interval_len=interval_len,
+        if interval_len == 'auto':
+            # Best determined by the representative frequency and simulation duration
+            if config.pulse_sim_solver == 'jax':
+                interval_len = 41
+            else:
+                if reunitarize:
+                    interval_len = 501
+                else:
+                    interval_len = tlist.shape[0]
+
+        parameters = PulseSimParameters(frame, tlist, psi0, e_ops, final_only, reunitarize, interval_len,
                                         sesolve_options=sesolve_options)
 
         parameters_list.append(parameters)
@@ -355,7 +383,7 @@ def _run_single(
     if isinstance(hamiltonian, list) and len(hamiltonian) == 1 and isinstance(hamiltonian[0], Qobj):
         logger.info('Static Hamiltonian built. Exponentiating..')
 
-        states, expect = exponentiate_hstat(hamiltonian, parameters, logger_name)
+        states, expect = exponentiate_hstat(hamiltonian[0], parameters, logger_name)
 
     elif config.pulse_sim_solver == 'jax':
         logger.info('XLA-compiled Hamiltonian built. Starting simulation..')
@@ -398,7 +426,7 @@ def simulate_drive_sesolve(
         hamiltonian = hamiltonian.evaluate_coeffs(parameters.tlist, drive_args)
 
     if len(hamiltonian) == 1 and isinstance(hamiltonian[0], Qobj):
-        return exponentiate_hstat(hamiltonian, parameters, logger_name)
+        return exponentiate_hstat(hamiltonian[0], parameters, logger_name)
 
     # Take a copy of options because we change its values
 
@@ -413,13 +441,6 @@ def simulate_drive_sesolve(
         # of sesolve must be unitary, but the evolution matrices diverge from unitary typically
         # within a few hundred time steps.
         reunitarize = True
-
-    interval_len = parameters.interval_len
-    if interval_len == 'auto':
-        if reunitarize:
-            interval_len = 500
-        else:
-            interval_len = parameters.tlist.shape[0]
 
     # sesolve generates O(1e-6) error in the global phase when the Hamiltonian is not traceless.
     # Since we run the simulation in the lab frame, the only traceful term is hdiag.
@@ -468,28 +489,33 @@ def simulate_drive_sesolve(
         try:
             os.chdir(tempdir)
 
-            start = 0
+            num_intervals = int(np.ceil((parameters.tlist.shape[0] - 1) / (parameters.interval_len - 1)))
+
             # Compute the time evolution in the lab frame -> initial unitary is identity
-            local_psi0 = qeye(hdiag.dims[0])
-            while True:
+
+            last_unitary = np.eye(np.prod(hdiag.dims[0]))
+
+            for interval in range(num_intervals):
+                psi0 = Qobj(inpt=last_unitary, dims=hdiag.dims)
+
+                start = interval * (parameters.interval_len - 1)
+                end = start + parameters.interval_len
+
                 local_hamiltonian = list()
                 for h_term, isa in zip(hamiltonian, isarray):
                     if isa:
-                        local_hamiltonian.append([h_term[0], h_term[1][start:start + interval_len]])
+                        local_hamiltonian.append([h_term[0], h_term[1][start:end]])
                     else:
                         local_hamiltonian.append(h_term)
 
-                local_tlist = parameters.tlist[start:start + interval_len]
+                tlist = parameters.tlist[start:end]
 
-                qtp_result = sesolve(local_hamiltonian,
-                                     local_psi0,
-                                     local_tlist,
-                                     options=sesolve_options)
+                qtp_result = sesolve(local_hamiltonian, psi0, tlist, options=sesolve_options)
 
                 # Array of lab-frame evolution ops
                 if parameters.final_only:
                     evolution = np.squeeze(qtp_result.states[-1].full())[None, ...]
-                    local_tlist = local_tlist[-1:]
+                    tlist = tlist[-1:]
                 else:
                     evolution = np.stack(list(np.squeeze(state.full()) for state in qtp_result.states))
 
@@ -497,19 +523,20 @@ def simulate_drive_sesolve(
                 if reunitarize:
                     evolution = closest_unitary(evolution)
 
+                # evolution[-1] is the lab-frame evolution operator
                 last_unitary = evolution[-1].copy()
 
                 # Restore the actual global phase
-                evolution *= np.exp(-1.j * global_phase * local_tlist[:, None, None])
+                evolution *= np.exp(-1.j * global_phase * tlist[:, None, None])
 
                 # Compute the states and expectation values in the original frame
-                local_states, local_expect = parameters.transform_evolution(evolution, local_tlist)
+                local_states, local_expect = parameters.transform_evolution(evolution, tlist)
 
                 # Indices for the output arrays
                 if parameters.final_only:
                     out_slice = slice(0, 1)
                 else:
-                    out_slice = slice(start, start + interval_len)
+                    out_slice = slice(start, end)
 
                 # Fill the states
                 if states is not None:
@@ -520,17 +547,8 @@ def simulate_drive_sesolve(
                     for out, local in zip(expect, local_expect):
                         out[out_slice] = local
 
-                # Update start and local_psi0
-                start += interval_len - 1
-
-                if start < parameters.tlist.shape[0] - 1:
-                    # evolution[-1] is the lab-frame evolution operator
-                    local_psi0 = Qobj(inpt=last_unitary, dims=local_psi0.dims)
-                else:
-                    break
-
-                logger.debug('Processed interval %d-%d. Cumulative simulation time %f seconds.',
-                             start - interval_len + 1, start + 1, time.time() - sim_start)
+                logger.debug('Processed interval %d/%d. Cumulative simulation time %f seconds.',
+                             interval, num_intervals, time.time() - sim_start)
 
         finally:
             os.chdir(cwd)
@@ -542,6 +560,8 @@ def simulate_drive_sesolve(
     return states, expect
 
 
+odeint_lock = Lock()
+
 def simulate_drive_odeint(
     hamiltonian: Callable,
     parameters: PulseSimParameters,
@@ -550,27 +570,24 @@ def simulate_drive_odeint(
 ):
     logger = logging.getLogger(logger_name)
 
-    interval_len = parameters.interval_len
-    if interval_len == 'auto':
-        # Best determined by the representative frequency and simulation duration
-        interval_len = 100
-
     tlist = parameters.tlist
-    num_intervals = (tlist.shape[0] - 1) // interval_len
-    num_extra_points = tlist.shape[0] - 1 - interval_len * num_intervals
-    if num_extra_points != 0:
-        num_intervals += 1
-        num_extra_points = interval_len * num_intervals - (tlist.shape[0] - 1)
+
+    interval_len = parameters.interval_len
+
+    num_intervals = int(np.ceil((tlist.shape[0] - 1) / (interval_len - 1)))
+
+    residual = (tlist.shape[0] - 1) % (interval_len - 1)
+    if residual != 0:
+        num_extra_points = interval_len - residual
         dt = tlist[-1] - tlist[-2]
         new_end = tlist[-1] + dt * num_extra_points
         tlist = np.concatenate([tlist[:-1], np.linspace(tlist[-1], new_end, num_extra_points + 1)])
 
+    starts = np.arange(num_intervals) * (interval_len - 1)
     if parameters.final_only:
-        tlists = np.array(list([tlist[iv * interval_len], tlist[(iv + 1) * interval_len]]
-                               for iv in range(num_intervals)))
+        tlists = np.array(list([tlist[start], tlist[start + interval_len]] for start in starts))
     else:
-        tlists = np.array(list(tlist[iv * interval_len:(iv + 1) * interval_len + 1]
-                               for iv in range(num_intervals)))
+        tlists = np.array(list(tlist[start:start + interval_len] for start in starts))
 
     sim_start = time.time()
 
@@ -579,15 +596,22 @@ def simulate_drive_odeint(
     if hamiltonian.__name__ == 'du_dt':
         hamiltonian, _ = jax.custom_derivatives.closure_convert(hamiltonian, y0, 0., drive_args)
 
-    rtol, atol, mxstep, hmax = 1.e-8, 1.e-8, jnp.inf, jnp.inf
-    stacked_u = vodeint(hamiltonian, rtol, atol, mxstep, hmax, y0, tlists, drive_args)
+    with odeint_lock:
+        if not hasattr(hamiltonian, 'compiled_vodeint'):
+            hamiltonian.compiled_vodeint = dict()
 
-    evolution = serialize_evolution(stacked_u)
+        try:
+            integrator = hamiltonian.compiled_vodeint[tlists.shape]
+        except KeyError:
+            integrator = vodeint.lower(hamiltonian, y0, tlists, drive_args).compile()
+            hamiltonian.compiled_vodeint[tlists.shape] = integrator
 
-    if num_extra_points != 0:
+    evolution = np.asarray(integrator(y0, tlists, drive_args))
+
+    if tlist.shape[0] - parameters.tlist.shape[0] != 0:
         # Truncate back to the original tlist
-        evolution = evolution[:-num_extra_points]
-        tlist = tlist[:-num_extra_points]
+        evolution = evolution[:parameters.tlist.shape[0]]
+        tlist = tlist[:parameters.tlist.shape[0]]
 
     if parameters.final_only:
         evolution = evolution[-1:]
@@ -608,11 +632,14 @@ def simulate_drive_odeint(
 
     return states, expect
 
-vodeint = jax.vmap(_odeint_wrapper, in_axes=(None, None, None, None, None, None, 0, None))
+@partial(jax.jit, static_argnums=0)
+def vodeint(hamiltonian, y0, tlists, drive_args):
+    vwrapper = jax.vmap(_odeint_wrapper, in_axes=(None, None, None, None, None, None, 0, None))
 
-@jax.jit
-def serialize_evolution(stacked_u):
-    dot_last = lambda ip, matrices: matrices.at[ip].set(stacked_u[ip, -1] @ matrices[ip - 1])
+    rtol, atol, mxstep, hmax = 1.e-8, 1.e-8, jnp.inf, jnp.inf
+    stacked_u = vwrapper(hamiltonian, rtol, atol, mxstep, hmax, y0, tlists, drive_args)
+
+    dot_last = lambda ip, matrices: matrices.at[ip].set(stacked_u[ip - 1, -1] @ matrices[ip - 1])
 
     num_pieces = stacked_u.shape[0]
     init = jnp.repeat(jnp.eye(stacked_u.shape[-1], dtype=complex)[None, :, :], num_pieces, axis=0)
