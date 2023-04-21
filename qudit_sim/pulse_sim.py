@@ -584,10 +584,7 @@ def simulate_drive_odeint(
         tlist = np.concatenate([tlist[:-1], np.linspace(tlist[-1], new_end, num_extra_points + 1)])
 
     starts = np.arange(num_intervals) * (interval_len - 1)
-    if parameters.final_only:
-        tlists = np.array(list([tlist[start], tlist[start + interval_len - 1]] for start in starts))
-    else:
-        tlists = np.array(list(tlist[start:start + interval_len] for start in starts))
+    tlists = np.array(list(tlist[start:start + interval_len] for start in starts))
 
     sim_start = time.time()
 
