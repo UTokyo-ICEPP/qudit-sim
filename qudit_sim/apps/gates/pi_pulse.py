@@ -11,8 +11,10 @@ from rqutils.math import matrix_exp, matrix_angle
 
 from ...hamiltonian import HamiltonianBuilder
 from ...pulse import Drag
-from ...pulse_sim import pulse_sim
+from ...expression import Parameter
+from ...pulse_sim import build_hamiltonian, compose_parameters, simulate_drive_odeint, simulate_drive_sesolve
 from ...basis import change_basis
+from ...config import config
 from .components import gate_components
 
 logger = logging.getLogger(__name__)
@@ -95,6 +97,23 @@ def pi_pulse(
         beta_estimate -= (params.drive_weight[level - 1] / params.drive_weight[level]) ** 2 / params.anharmonicity
     beta_estimate *= -1. / 4.
 
+    amp = Parameter('amp')
+    beta = Parameter('beta')
+    x_pulse = Drag(duration=duration, amp=amp, sigma=sigma, beta=beta)
+    hgen.add_drive(qudit_id, frequency=drive_frequency, amplitude=x_pulse)
+
+    tlist = hgen.make_tlist(points_per_cycle=10, duration=duration)
+    interval_len = (tlist.shape[0] - 1) // 64 + 1
+
+    hamiltonian = build_hamiltonian(hgen, {'amp': 0., 'beta': 0.})
+    parameters = compose_parameters(hgen, tlist, final_only=True, reunitarize=False,
+                                    interval_len=interval_len)
+
+    if config.pulse_sim_solver == 'jax':
+        simulate_drive = simulate_drive_odeint
+    else:
+        simulate_drive = simulate_drive_sesolve
+
     icall = 0
 
     def fun(params):
@@ -104,19 +123,12 @@ def pi_pulse(
         icall += 1
 
         # params are O(1) -> normalize
-        amp = params[0] * amp_estimate
-        beta = params[1] * beta_estimate
-        pulse = Drag(duration=duration, amp=amp, sigma=sigma, beta=beta)
+        drive_args = {'amp': params[0] * amp_estimate, 'beta': params[1] * beta_estimate}
 
-        hgen.clear_drive()
-        hgen.add_drive(qudit_id, frequency=drive_frequency, amplitude=pulse)
-
-        sim_result = pulse_sim(hgen,
-                               tlist={'points_per_cycle': 10, 'duration': pulse.duration},
-                               final_only=True)
+        states, _ = simulate_drive(hamiltonian, parameters, drive_args)
 
         # Take the prod with the target and extract the diagonals
-        diag_prod = np.diag(sim_result.states[-1] @ target).reshape((hgen.num_levels,) * hgen.num_qudits)
+        diag_prod = np.diag(states[-1] @ target).reshape((hgen.num_levels,) * hgen.num_qudits)
         # Integrate out the non-participating qudits
         norm_ptr = np.sum(diag_prod, axis=spectator_indices) / (hgen.num_levels ** (hgen.num_qudits - 1))
         # Compute the fidelity (sum of abs-squared of commuting diagonals + abs-square of the trace of target levels)
