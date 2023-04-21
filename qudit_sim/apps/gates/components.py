@@ -83,11 +83,10 @@ def gate_components(
     trunc_gate = jax.device_put(trunc_gate, device=jax_device)
 
     def loss_fn(params):
-        with jax.default_device(jax_device):
-            hermitian = paulis.compose(params['components'], dim, npmod=jnp)
-            ansatz = jax.scipy.linalg.expm(1.j * hermitian)
-            trace = jnp.trace(trunc_gate @ ansatz)
-            return -(jnp.square(trace.real) + jnp.square(trace.imag))
+        hermitian = paulis.compose(params['components'], dim, npmod=jnp)
+        ansatz = jax.scipy.linalg.expm(1.j * hermitian)
+        trace = jnp.trace(trunc_gate @ ansatz)
+        return -(jnp.square(trace.real) + jnp.square(trace.imag))
 
     value_and_grad = jax.value_and_grad(loss_fn)
 
@@ -99,12 +98,9 @@ def gate_components(
 
     @jax.jit
     def step(opt_params, opt_state):
-        # https://github.com/google/jax/issues/11478
-        # default_device is thread-local
-        with jax.default_device(jax_device):
-            loss, gradient = value_and_grad(opt_params)
-            updates, opt_state = grad_trans.update(gradient, opt_state)
-            new_params = optax.apply_updates(opt_params, updates)
+        loss, gradient = value_and_grad(opt_params)
+        updates, opt_state = grad_trans.update(gradient, opt_state)
+        new_params = optax.apply_updates(opt_params, updates)
 
         return new_params, opt_state, loss
 
@@ -112,10 +108,15 @@ def gate_components(
     with jax.default_device(jax_device):
         opt_state = grad_trans.init(opt_params)
 
+    step = step.lower(opt_params, opt_state).compile()
+
     losses = np.zeros(max_update)
 
     for iup in range(max_update):
-        opt_params, opt_state, loss = step(opt_params, opt_state)
+        # https://github.com/google/jax/issues/11478
+        # default_device is thread-local
+        with jax.default_device(jax_device):
+            opt_params, opt_state, loss = step(opt_params, opt_state)
 
         losses[iup] = loss
 
@@ -125,6 +126,8 @@ def gate_components(
 
             if change < convergence:
                 break
+
+    losses = losses[:iup + 1]
 
     components = np.array(opt_params['components'])
 

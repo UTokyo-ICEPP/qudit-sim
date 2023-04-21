@@ -672,6 +672,9 @@ def _minimize(
     with jax.default_device(jax_device):
         opt_state = grad_trans.init(opt_params)
 
+    ## Compile the step function
+    step = step.lower(opt_params, opt_state).compile()
+
     losses = np.ones(convergence_window)
 
     if return_intermediate:
