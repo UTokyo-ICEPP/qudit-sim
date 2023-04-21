@@ -65,7 +65,7 @@ def gate_components_from_log(
 
 def gate_components(
     sim_result: PulseSimResult,
-    target: np.ndarray,
+    initial_guess: np.ndarray,
     optimizer: str = 'adam',
     optimizer_args: Optional[Any] = 0.005,
     max_update: int = 1000,
@@ -76,7 +76,7 @@ def gate_components(
     jax_device = jax.devices()[config.jax_devices[0]]
 
     num_qudits = sim_result.frame.num_qudits
-    comp_dim = np.sqrt(target.shape[0]).astype(int)
+    comp_dim = np.sqrt(initial_guess.shape[0]).astype(int)
     dim = (comp_dim,) * num_qudits
 
     trunc_gate = truncate_matrix(sim_result.states[-1], num_qudits, sim_result.frame.num_levels, comp_dim)
@@ -104,7 +104,7 @@ def gate_components(
 
         return new_params, opt_state, loss
 
-    opt_params = {'components': target}
+    opt_params = {'components': initial_guess}
     with jax.default_device(jax_device):
         opt_state = grad_trans.init(opt_params)
 
