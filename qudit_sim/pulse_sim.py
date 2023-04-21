@@ -20,7 +20,7 @@ from jax.experimental.ode import _odeint_wrapper
 
 from rqutils.math import matrix_exp
 
-from .hamiltonian import HamiltonianBuilder
+from .hamiltonian import Hamiltonian, HamiltonianBuilder
 from .frame import FrameSpec, SystemFrame, QuditFrame
 from .sim_result import PulseSimResult, save_sim_result
 from .unitary import closest_unitary
@@ -154,12 +154,20 @@ def pulse_sim(
 
     if num_tasks is None:
         hamiltonian = build_hamiltonian(hgen, drive_args)
+
         raw_args = tuple(param for param, _ in parallel_params)
-        parameters = compose_parameters(hgen, raw_args)
+        parameters = compose_parameters(hgen, *raw_args)
 
         result = _run_single(hamiltonian, parameters, drive_args=drive_args, save_result_to=save_result_to)
 
     else:
+        for iparam, (param, _) in enumerate(parallel_params):
+            if zip_list[iparam] is None:
+                zip_list[iparam] = [param] * num_tasks
+
+        if not isinstance(drive_args, list):
+            drive_args = [drive_args] * num_tasks
+
         if save_result_to:
             if not (os.path.exists(save_result_to) and os.path.isdir(save_result_to)):
                 os.makedirs(save_result_to)
@@ -170,23 +178,17 @@ def pulse_sim(
         else:
             save_result_path = lambda itask: None
 
-        if not isinstance(drive_args, list):
-            drive_args = [drive_args] * num_tasks
-
         hamiltonian = build_hamiltonian(hgen, drive_args[0])
 
-        for iparam, (param, _) in enumerate(parallel_params):
-            if zip_list[iparam] is None:
-                zip_list[iparam] = [param] * num_tasks
-
-        parameters = compose_parameters(hgen, zip(*zip_list))
+        raw_args_list = list(zip(*zip_list))
+        parameters_list = list(compose_parameters(hgen, *raw_args) for raw_args in raw_args_list)
 
         if config.pulse_sim_solver == 'jax':
             thread_based = True
 
             # Precompile the hamiltonian function for all unique tlist-stack shapes
             tlist_shape_params = set((p.tlist.shape[0], p.interval_len, p.final_only)
-                                     for p in parameters)
+                                     for p in parameters_list)
 
             y0 = hgen.identity_op().full()
 
@@ -207,7 +209,7 @@ def pulse_sim(
             hamiltonian.compiled_vodeint = {shape: job.result() for shape, job in thread_jobs.items()}
 
             common_args = (hamiltonian,)
-            args = parameters
+            args = parameters_list
             arg_position = 1
             kwarg_keys = ('drive_args', 'logger_name', 'save_result_to')
             kwarg_values = list((drive_args[itask], f'{__name__}.{itask}', save_result_path(itask))
@@ -218,14 +220,15 @@ def pulse_sim(
 
             # Convert the functional Hamiltonian coefficients to arrays before passing them to parallel_map
             hamiltonians = list()
-            for params, dargs in zip(parameters, drive_args):
+            for params, dargs in zip(parameters_list, drive_args):
                 hamiltonians.append(hamiltonian.evaluate_coeffs(params.tlist, dargs))
 
             common_args = None
-            args = list(zip(hamiltonians, parameters))
+            args = list(zip(hamiltonians, parameters_list))
             arg_position = (0, 1)
             kwarg_keys = ('logger_name', 'save_result_to')
-            kwarg_values = list((f'{__name__}.{itask}', save_result_path(itask)) for itask in range(num_tasks))
+            kwarg_values = list((f'{__name__}.{itask}', save_result_path(itask))
+                                for itask in range(num_tasks))
 
         result = parallel_map(_run_single, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
                               arg_position=arg_position, common_args=common_args, log_level=log_level,
@@ -322,53 +325,45 @@ def build_hamiltonian(
 
 def compose_parameters(
     hgen: HamiltonianBuilder,
-    raw_args_list: Union[Tuple[Any, ...], Iterable[Tuple[Any, ...]]]
-) -> List[Tuple[Any, ...]]:
+    tlist: TList = (10, 100),
+    psi0: Optional[Qobj] = None,
+    e_ops: Optional[Sequence[Qobj]] = None,
+    frame: FrameSpec = 'dressed',
+    final_only: bool = False,
+    reunitarize: bool = True,
+    interval_len: Union[int, str] = 'auto',
+    sesolve_options: Options = Options()
+) -> PulseSimParameters:
     """Generate the arguments for parallel jobs using the HamiltonianBuilder."""
-    singleton_input = False
-    if isinstance(raw_args_list, tuple) and isinstance(raw_args_list[-1], Options):
-        singleton_input = True
-        raw_args_list = [raw_args_list]
+    ## Time points
+    if isinstance(tlist, tuple):
+        tlist = {'points_per_cycle': tlist[0], 'num_cycles': tlist[1]}
+    if isinstance(tlist, dict):
+        tlist = dict(tlist)
+        tlist['frame'] = 'lab'
+        tlist = hgen.make_tlist(**tlist)
 
-    parameters_list = list()
+    if psi0 is None:
+        psi0 = hgen.identity_op()
 
-    for tlist, psi0, e_ops, frame, final_only, reunitarize, interval_len, sesolve_options in raw_args_list:
-        ## Time points
-        if isinstance(tlist, tuple):
-            tlist = {'points_per_cycle': tlist[0], 'num_cycles': tlist[1]}
-        if isinstance(tlist, dict):
-            tlist = dict(tlist)
-            tlist['frame'] = 'lab'
-            tlist = hgen.make_tlist(**tlist)
+    if not isinstance(frame, SystemFrame):
+        frame = SystemFrame(frame, hgen)
 
-        if psi0 is None:
-            psi0 = hgen.identity_op()
-
-        if not isinstance(frame, SystemFrame):
-            frame = SystemFrame(frame, hgen)
-
-        if interval_len == 'auto':
-            # Best determined by the representative frequency and simulation duration
-            if config.pulse_sim_solver == 'jax':
-                interval_len = 101
+    if interval_len == 'auto':
+        # Best determined by the representative frequency and simulation duration
+        if config.pulse_sim_solver == 'jax':
+            interval_len = 101
+        else:
+            if reunitarize:
+                interval_len = 501
             else:
-                if reunitarize:
-                    interval_len = 501
-                else:
-                    interval_len = tlist.shape[0]
+                interval_len = tlist.shape[0]
 
-        if interval_len <= 1:
-            interval_len = tlist.shape[0]
+    if interval_len <= 1:
+        interval_len = tlist.shape[0]
 
-        parameters = PulseSimParameters(frame, tlist, psi0, e_ops, final_only, reunitarize, interval_len,
-                                        sesolve_options=sesolve_options)
-
-        parameters_list.append(parameters)
-
-    if singleton_input:
-        return parameters_list[0]
-    else:
-        return parameters_list
+    return PulseSimParameters(frame, tlist, psi0, e_ops, final_only, reunitarize, interval_len,
+                              sesolve_options=sesolve_options)
 
 
 def _run_single(
@@ -396,7 +391,7 @@ def _run_single(
         states, expect = simulate_drive_odeint(hamiltonian, parameters, drive_args, logger_name)
 
     else:
-        logger.info('Hamiltonian with %d terms built. Starting simulation..', len(h))
+        logger.info('Hamiltonian with %d terms built. Starting simulation..', len(hamiltonian))
 
         states, expect = simulate_drive_sesolve(hamiltonian, parameters, drive_args, logger_name)
 
@@ -456,7 +451,7 @@ def simulate_drive_sesolve(
     hamiltonian[0] = hdiag - global_phase
 
     isarray = list(isinstance(term, list) and isinstance(term[1], np.ndarray) for term in hamiltonian)
-    if not any(isarrayd):
+    if not any(isarray):
         # No interval dependency in the Hamiltonian (all constants or string expressions)
         # -> Can reuse the compiled objects
         sesolve_options.rhs_reuse = True
@@ -590,7 +585,7 @@ def simulate_drive_odeint(
 
     starts = np.arange(num_intervals) * (interval_len - 1)
     if parameters.final_only:
-        tlists = np.array(list([tlist[start], tlist[start + interval_len]] for start in starts))
+        tlists = np.array(list([tlist[start], tlist[start + interval_len - 1]] for start in starts))
     else:
         tlists = np.array(list(tlist[start:start + interval_len] for start in starts))
 
