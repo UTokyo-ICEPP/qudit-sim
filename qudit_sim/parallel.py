@@ -134,19 +134,25 @@ def parallel_map(
         proc_name = f'task{itask}'
 
         if thread_based:
-            conn = ThreadConn()
-            conn_recv = conn
             # In thread-based parallelization, each thread sees only one GPU
             jax_device_id = config.jax_devices[itask % len(config.jax_devices)]
-            proc_config = {'jax_devices': [jax_device_id]}
-            proc_args = (target, a, k, conn, proc_name, proc_config)
 
             if thread_based == 'serial':
                 # Serial (debug) mode
                 logger.debug('Running process %d', itask)
-                _process_wrapper(*proc_args)
+                current_jax_devices = config.jax_devices
+                config.jax_devices = [jax_device_id]
+
+                results[itask] = target(*a, **k)
+
+                config.jax_devices = current_jax_devices
+
                 continue
             else:
+                conn = ThreadConn()
+                conn_recv = conn
+                proc_config = {'jax_devices': [jax_device_id]}
+                proc_args = (target, a, k, conn, proc_name, proc_config)
                 process = threading.Thread(target=_process_wrapper, args=proc_args, name=proc_name)
         else:
             conn_recv, conn_send = multiprocessing.Pipe()
