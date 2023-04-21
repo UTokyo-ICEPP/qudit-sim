@@ -23,7 +23,7 @@ from ..expression import Parameter
 from ..hamiltonian import HamiltonianBuilder
 from ..frame import FrameSpec, SystemFrame
 from ..pulse import GaussianSquare
-from ..pulse_sim import pulse_sim, StatesAndExpectations, exponentiate_hstat
+from ..pulse_sim import pulse_sim, PulseSimParameters, exponentiate_hstat
 from ..sim_result import PulseSimResult, save_sim_result, load_sim_result
 from ..unitary import truncate_matrix, closest_unitary
 from .heff_tools import unitary_subtraction, trace_norm_squared, heff_fidelity
@@ -43,7 +43,7 @@ def find_heff(
     frequency: Union[FrequencySpec, List[FrequencySpec], np.ndarray],
     amplitude: Union[AmplitudeSpec, List[AmplitudeSpec], np.ndarray],
     comp_dim: Optional[int] = None,
-    frame: Optional[FrameSpec] = None,
+    frame: FrameSpec = 'dressed',
     cycles: float = 1000.,
     ramp_cycles: float = 100.,
     init: Optional[Union[np.ndarray, Dict[Tuple[int, ...], Union[float, Tuple[float, bool]]]]] = None,
@@ -55,7 +55,7 @@ def find_heff(
     min_fidelity: float = 0.9,
     zero_suppression: bool = True,
     save_result_to: Optional[str] = None,
-    log_level: int = logging.WARNING,
+    log_level: int = logging.WARNING
 ) -> Union[np.ndarray, List[np.ndarray]]:
     r"""Determine the effective Hamiltonian from the result of constant-drive simulations.
 
@@ -76,7 +76,7 @@ def find_heff(
         frequency: Drive frequency(ies).
         amplitude: Drive amplitude(s).
         comp_dim: Dimensionality of the computational space. If not set, number of levels in the Hamiltonian is used.
-        frame: System frame. If not set, the dressed frame is used.
+        frame: System frame.
         cycles: Number of drive signal cycles in the plateau of the GaussianSquare pulse.
         ramp_cycles: Number of drive signal cycles to use for ramp-up.
         init: Initial values of the effective Hamiltonian components. An array specifies all initial values.
@@ -102,6 +102,66 @@ def find_heff(
     original_log_level = logger.level
     logger.setLevel(log_level)
 
+    hgen_drv, tlist, drive_args, time_range = add_drive_for_heff(hgen, qudit, frequency, amplitude,
+                                                                 cycles, ramp_cycles)
+
+    sim_result = pulse_sim(hgen_drv, tlist, drive_args=drive_args, frame=frame,
+                           save_result_to=save_result_to, log_level=log_level)
+
+    if isinstance(init, np.ndarray):
+        hstat = None
+    else:
+        hstat = hgen_drv.build_hstatic(frame='lab')
+
+    if isinstance(drive_args, dict):
+        components = heff_fit(sim_result, comp_dim=comp_dim, time_range=time_range,
+                              init=init, hstat=hstat, optimizer=optimizer, optimizer_args=optimizer_args,
+                              max_updates=max_updates, convergence=convergence,
+                              convergence_window=convergence_window, min_fidelity=min_fidelity,
+                              zero_suppression=zero_suppression,
+                              save_result_to=save_result_to, log_level=log_level)
+
+    else:
+        num_tasks = len(drive_args)
+
+        logger_names = list(f'{__name__}.{i}' for i in range(len(drive_args)))
+
+        if save_result_to:
+            num_digits = int(np.log10(num_tasks)) + 1
+            fmt = f'%0{num_digits}d'
+            save_result_paths = list(os.path.join(save_result_to, fmt % i) for i in range(num_tasks))
+        else:
+            save_result_paths = [None] * num_tasks
+
+        args = sim_result
+
+        kwarg_keys = ('logger_name', 'save_result_to',)
+        kwarg_values = list(zip(logger_names, save_result_paths))
+
+        common_kwargs = {'comp_dim': comp_dim, 'time_range': time_range, 'init': init,
+                         'hstat': hstat, 'optimizer': optimizer,
+                         'optimizer_args': optimizer_args, 'max_updates': max_updates,
+                         'convergence': convergence, 'convergence_window': convergence_window,
+                         'min_fidelity': min_fidelity, 'zero_suppression': zero_suppression,
+                         'log_level': log_level}
+
+        components = parallel_map(heff_fit, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
+                                  common_kwargs=common_kwargs,
+                                  log_level=log_level, thread_based=True)
+
+    logger.setLevel(original_log_level)
+
+    return components
+
+
+def add_drive_for_heff(
+    hgen: HamiltonianBuilder,
+    qudit: QuditSpec,
+    frequency: Union[FrequencySpec, List[FrequencySpec], np.ndarray],
+    amplitude: Union[AmplitudeSpec, List[AmplitudeSpec], np.ndarray],
+    cycles: float = 1000.,
+    ramp_cycles: float = 100.
+):
     if isinstance(frequency, np.ndarray):
         frequency = list(frequency)
     if isinstance(amplitude, np.ndarray):
@@ -137,13 +197,7 @@ def find_heff(
         amplitude = [amplitude]
         frequency = [frequency]
 
-    hgen = hgen.copy(clear_drive=True)
-
-    # Will use no-drive (static) Hamiltonian to determine the initial point later
-    if isinstance(init, np.ndarray):
-        hstat = None
-    else:
-        hstat = hgen.build(frame='lab')[0]
+    hgen_drv = hgen.copy(clear_drive=True)
 
     if not isinstance(qudit, tuple):
         qudit = (qudit,)
@@ -158,8 +212,7 @@ def find_heff(
 
         tlist_args = {'points_per_cycle': 8, 'duration': duration, 'frame': 'lab'}
 
-        start_time = ramp
-        end_time = ramp + width
+        time_range = (ramp, duration - ramp)
 
         sigma = ramp / 4. # let the ramp correspond to four sigmas
 
@@ -175,84 +228,43 @@ def find_heff(
                 freq = frequency[0][iq]
 
             gs_pulse = GaussianSquare(duration, amp, sigma, width)
-            hgen.add_drive(qid, frequency=freq, amplitude=gs_pulse)
+            hgen_drv.add_drive(qid, frequency=freq, amplitude=gs_pulse)
+
+        if freq_scan:
+            tlist = list()
+            for freqs in frequency:
+                tlist_args['freq_args'] = {f'freq_{qid}': f for qid, f in zip(qudit, freqs)}
+                tlist.append(hgen_drv.make_tlist(**tlist_args))
+        else:
+            tlist = hgen_drv.make_tlist(**tlist_args)
 
     else:
         tlist_args = {'points_per_cycle': 8, 'num_cycles': int(cycles), 'frame': 'lab'}
-        start_time = 0.
-        end_time = hgen.make_tlist(**tlist_args)[-1]
+        tlist = hgen_drv.make_tlist(**tlist_args)
+        time_range = (0., tlist[-1])
 
     if num_tasks is None:
-        tlist = hgen.make_tlist(**tlist_args)
-
-        sim_result = pulse_sim(hgen, tlist, frame=frame, save_result_to=save_result_to, log_level=log_level)
-
-        components = heff_fit(sim_result, comp_dim=comp_dim, start_time=start_time, end_time=end_time,
-                              init=init, hstat=hstat, optimizer=optimizer, optimizer_args=optimizer_args,
-                              max_updates=max_updates, convergence=convergence,
-                              convergence_window=convergence_window, min_fidelity=min_fidelity,
-                              zero_suppression=zero_suppression,
-                              save_result_to=save_result_to, log_level=log_level)
-
+        drive_args = dict()
     else:
-        logger_names = list(f'{__name__}.{i}' for i in range(num_tasks))
-
         drive_args = list()
-        tlists = list()
-        for freq, amp in zip(frequency, amplitude):
-            if freq_scan:
-                task_freq_args = {f'freq_{qid}': f for qid, f in zip(qudit, freq)}
-                tlist_args['freq_args'] = task_freq_args
-            else:
-                task_freq_args = dict()
-
-            tlist = hgen.make_tlist(**tlist_args)
-            tlists.append(tlist)
-
+        for freqs, amps in zip(frequency, amplitude):
             if amp_scan:
-                task_drive_args = {f'amp_{qid}': a for qid, a in zip(qudit, amp)}
-                task_drive_args.update(task_freq_args)
+                task_drive_args = {f'amp_{qid}': a for qid, a in zip(qudit, amps)}
             else:
-                task_drive_args = None
+                task_drive_args = dict()
+
+            if freq_scan:
+                task_drive_args.update({f'freq_{qid}': f for qid, f in zip(qudit, freqs)})
 
             drive_args.append(task_drive_args)
 
-        sim_results = pulse_sim(hgen, tlists, drive_args=drive_args, frame=frame,
-                                save_result_to=save_result_to, log_level=log_level)
-
-        if save_result_to:
-            num_digits = int(np.log10(num_tasks)) + 1
-            fmt = f'%0{num_digits}d'
-            save_result_paths = list(os.path.join(save_result_to, fmt % i) for i in range(num_tasks))
-        else:
-            save_result_paths = [None] * num_tasks
-
-        args = sim_results
-
-        kwarg_keys = ('logger_name', 'save_result_to',)
-        kwarg_values = list(zip(logger_names, save_result_paths))
-
-        common_kwargs = {'comp_dim': comp_dim, 'start_time': start_time, 'end_time': end_time, 'init': init,
-                         'hstat': hstat, 'optimizer': optimizer,
-                         'optimizer_args': optimizer_args, 'max_updates': max_updates,
-                         'convergence': convergence, 'convergence_window': convergence_window,
-                         'min_fidelity': min_fidelity, 'zero_suppression': zero_suppression,
-                         'log_level': log_level}
-
-        components = parallel_map(heff_fit, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
-                                  common_kwargs=common_kwargs,
-                                  log_level=log_level, thread_based=True)
-
-    logger.setLevel(original_log_level)
-
-    return components
+    return hgen_drv, tlist, drive_args, time_range
 
 
 def heff_fit(
     sim_result: Union[PulseSimResult, str],
     comp_dim: Optional[int] = None,
-    start_time: Optional[float] = None,
-    end_time: Optional[float] = None,
+    time_range: Optional[Tuple[float, float]] = None,
     init: Optional[Union[np.ndarray, Dict[Tuple[int, ...], Union[float, Tuple[float, bool]]]]] = None,
     hstat: Optional[qtp.Qobj] = None,
     optimizer: str = 'adam',
@@ -274,7 +286,7 @@ def heff_fit(
     Args:
         sim_result: Simulation result object or the name of the file that contains one.
         comp_dim: Dimensionality of the computational space.
-        start_time: Time at which the drive pulses hit the plateau.
+        time_range: Time range when the drive pulses are on the plateau.
         optimizer: The name of the optax function to use as the optimizer.
         optimizer_args: Arguments to the optimizer.
         max_updates: Maximum number of optimization iterations.
@@ -301,10 +313,8 @@ def heff_fit(
         with h5py.File(filename, 'r') as source:
             if comp_dim is None:
                 comp_dim = source['comp_dim'][()]
-            if start_time is None:
-                start_time = sim_result.times[source['fit_range'][0]]
-            if end_time is None:
-                end_time = sim_result.times[source['fit_range'][1]]
+            if time_range is None:
+                time_range = tuple(sim_result.times[list(source['fit_range'][()])])
 
         if save_result_to:
             save_sim_result(f'{save_result_to}.h5', sim_result)
@@ -315,11 +325,14 @@ def heff_fit(
     if comp_dim is None:
         comp_dim = num_levels
 
+    if time_range is None:
+        time_range = (0., sim_result.times[-1])
+
     dim = (comp_dim,) * num_qudits
 
     ## Time bins for the GaussianSquare plateau
-    flat_start = np.searchsorted(sim_result.times, start_time, 'right') - 1
-    flat_end = np.searchsorted(sim_result.times, end_time, 'right') - 1
+    flat_start = np.searchsorted(sim_result.times, time_range[0], 'right') - 1
+    flat_end = np.searchsorted(sim_result.times, time_range[1], 'right') - 1
 
     ## Truncate the unitaries if comp_dim is less than the system dimension
     time_evolution = truncate_matrix(sim_result.states, num_qudits, num_levels, comp_dim)
@@ -458,15 +471,14 @@ def _find_init(
 
         ## 2. Find off-diagonals with finite values under no drive -> static terms; zero slope
 
-        num_qudits = sim_frame.num_qudits
-        num_sim_levels = sim_frame.num_levels
-        psi0 = qtp.tensor([qtp.qeye(num_sim_levels)] * num_qudits)
+        psi0 = qtp.qeye(hstat.dims[0])
 
-        calculator = StatesAndExpectations(sim_frame, psi0, tlist)
+        parameters = PulseSimParameters(sim_frame, tlist, psi0)
 
-        states, _ = exponentiate_hstat(hstat, calculator, False, logger)
+        states, _ = exponentiate_hstat(hstat, parameters, logger.name)
 
-        time_evolution_nodrv = truncate_matrix(states, num_qudits, num_sim_levels, dim[0])
+        time_evolution_nodrv = truncate_matrix(states, sim_frame.num_qudits, sim_frame.num_levels,
+                                               dim[0])
         unitaries_nodrv = closest_unitary(time_evolution_nodrv)
         generator_nodrv = matrix_angle(unitaries_nodrv)
         nodrv_compos = paulis.components(-generator_nodrv, dim=dim).real
@@ -475,7 +487,8 @@ def _find_init(
         symmetry = paulis.symmetry(dim)
         finite_offdiag = is_finite & np.asarray(symmetry, dtype=bool)
 
-        logger.debug('Off-diagonals with finite values under no drive: %s', list(zip(*np.nonzero(finite_offdiag))))
+        logger.debug('Off-diagonals with finite values under no drive: %s',
+                     list(zip(*np.nonzero(finite_offdiag))))
 
         heff_init[finite_offdiag] = 0.
 
@@ -496,7 +509,7 @@ def _find_init(
 
         if isinstance(init, dict):
             for key, value in init.items():
-                if not isinstance(key, tuple) or len(key) != num_qudits:
+                if not isinstance(key, tuple) or len(key) != sim_frame.num_qudits:
                     raise ValueError(f'Invalid init key {key}')
 
                 if isinstance(value, tuple):

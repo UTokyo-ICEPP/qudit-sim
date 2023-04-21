@@ -105,9 +105,11 @@ def pulse_sim(
             implies ``unitarize_evolution=True``.
         reunitarize: Whether to reunitarize the time evolution matrices. Note that SVD can be very slow for large system
             sizes and ``final_only=False``.
-        interval_len: When integrating with QuTiP ``sesolve``, the number of time steps to run ``sesolve`` uninterrupted.
-            In this case the parameter is ignored unless ``reunitarize=True`` and ``psi0`` is a unitary. When integrating
-            with JAX ``odeint``,
+        interval_len: When integrating with QuTiP ``sesolve``, the number of time steps to run ``sesolve``
+            uninterrupted. In this case the parameter is ignored unless ``reunitarize=True`` and ``psi0``
+            is a unitary. When integrating with JAX ``odeint``, this parameter determines the size of
+            tlist batches. If set to ``'auto'``, an appropriate value is automatically assigned. If the
+            value is less than 2, simulation will be run in a single batch uninterrupted.
         sesolve_options: QuTiP solver options.
         save_result_to: File name (without the extension) to save the simulation result to.
         log_level: Log level.
@@ -239,10 +241,10 @@ class PulseSimParameters:
     frame: SystemFrame
     tlist: np.ndarray
     psi0: Qobj
-    e_ops: Union[Sequence[Qobj], None]
-    final_only: bool
-    reunitarize: bool
-    interval_len: int
+    e_ops: Union[Sequence[Qobj], None] = None
+    final_only: bool = False
+    reunitarize: bool = True
+    interval_len: int = 1
     sesolve_options: Options = Options()
 
     def transform_evolution(
@@ -348,12 +350,15 @@ def compose_parameters(
         if interval_len == 'auto':
             # Best determined by the representative frequency and simulation duration
             if config.pulse_sim_solver == 'jax':
-                interval_len = 41
+                interval_len = 101
             else:
                 if reunitarize:
                     interval_len = 501
                 else:
                     interval_len = tlist.shape[0]
+
+        if interval_len <= 1:
+            interval_len = tlist.shape[0]
 
         parameters = PulseSimParameters(frame, tlist, psi0, e_ops, final_only, reunitarize, interval_len,
                                         sesolve_options=sesolve_options)

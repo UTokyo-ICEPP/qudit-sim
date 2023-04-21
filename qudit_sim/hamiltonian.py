@@ -420,6 +420,29 @@ class HamiltonianBuilder:
 
         return hamiltonian
 
+    def build_hstatic(
+        self,
+        frame: FrameSpec = 'dressed',
+    ) -> qtp.Qobj:
+        """Build only the static Hamiltonian term in the given frame.
+
+        Args:
+            frame: System frame to build the Hamiltonian in.
+
+        Returns:
+            A Qobj representing Hstat.
+        """
+        if not isinstance(frame, SystemFrame):
+            frame = SystemFrame(frame, self)
+
+        hstatic = self.build_hdiag(frame=frame)
+        hint = self.build_hint(frame=frame)
+
+        if hint and isinstance(hint[0], qtp.Qobj):
+            hstatic += hint[0]
+
+        return hstatic
+
     def build_hdiag(
         self,
         frame: FrameSpec = 'dressed'
