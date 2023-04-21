@@ -8,7 +8,7 @@ Pulse sequence (:mod:`qudit_sim.pulse_sequence`)
 Implementation of pulse sequence.
 """
 
-from typing import Union, Any
+from typing import Union, Any, Dict
 import copy
 import numpy as np
 
@@ -32,7 +32,7 @@ class PulseSequence(list):
     def __str__(self):
         return f'PulseSequence([{", ".join(str(inst) for inst in self)}])'
 
-    def envelope(self, t: Union[float, np.ndarray], args: Any = None) -> np.ndarray:
+    def envelope(self, t: Union[float, np.ndarray], args: Dict[str, Any] = dict()) -> np.ndarray:
         """Return the envelope of the sequence as a function of time.
 
         This function is mostly for visualization purposes. Phase and frequency information is lost in the
@@ -52,10 +52,10 @@ class PulseSequence(list):
             if isinstance(inst, Delay):
                 funclist.append((time, 0.))
                 time += inst.value
-            elif isinstance(inst, Pulse):
-                pulse = copy.copy(inst)
-                pulse.tzero = time
-                funclist.append((time, pulse))
+            elif isinstance(inst, TimeFunction):
+                fn = copy.copy(inst)
+                fn.tzero = time
+                funclist.append((time, fn))
                 time += inst.duration
 
         funclist.append((time, None))
