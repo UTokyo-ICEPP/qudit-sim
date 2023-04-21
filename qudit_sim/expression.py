@@ -238,13 +238,13 @@ class TimeFunction(Expression):
         # to create a zero tensor and subtract it each time - better to
         # check the value here
         if self.tzero:
-            t -= self.tzero
+            t = t - self.tzero
 
         return self.fn(t, args)
 
     def evaluate(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
         if self.tzero:
-            t -= self.tzero
+            t = t - self.tzero
 
         return self.fn(t, args)
 
@@ -262,7 +262,7 @@ class _TimeFunctionUnaryOp(TimeFunction):
 
     def _fn(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
         if self.expr.tzero:
-            t -= self.expr.tzero
+            t = t - self.expr.tzero
 
         return self.op(self.expr.fn(t, args))
 
@@ -315,7 +315,7 @@ class _TimeFunctionBinaryOp(TimeFunction):
         l_num_params = len(self.lexpr.parameters)
 
         if self.lexpr.tzero:
-            t -= self.lexpr.tzero
+            t = t - self.lexpr.tzero
 
         return self.op(
             self.lexpr.fn(t, args[:l_num_params]),
@@ -324,7 +324,7 @@ class _TimeFunctionBinaryOp(TimeFunction):
 
     def _fn_array_like(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
         if self.lexpr.tzero:
-            t -= self.lexpr.tzero
+            t = t - self.lexpr.tzero
 
         return self.op(
             self.lexpr.fn(t, args),
