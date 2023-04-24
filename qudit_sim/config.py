@@ -14,16 +14,15 @@ class Config:
     """
     def __init__(self):
         self.num_cpus = 0
-        self.pulse_sim_solver = 'qutip'
 
         self._local = threading.local()
         self._local.jax_devices = list(range(jax.local_device_count()))
 
         # Check 64-bit float support
         if jnp.array([0.], dtype=jnp.float64).dtype is not jnp.dtype('float64'):
-            warnings.warn('The current device backend does not support 64-bit arithmetic, '
+            warnings.warn('The current JAX device backend does not support 64-bit arithmetic, '
                           'or JAX was already configured in 32 bits. It is advised not to '
-                          'set config.pulse_sim_solver to "jax".')
+                          'use "jax" for pulse simulation.')
 
     @property
     def jax_devices(self):
@@ -36,13 +35,5 @@ class Config:
     def jax_devices(self, value):
         self._local.jax_devices = value
 
-    @property
-    def npmod(self):
-        if self.pulse_sim_solver == 'qutip':
-            return np
-        elif self.pulse_sim_solver == 'jax':
-            return jnp
-        else:
-            raise ValueError(f'Invalid value for config.pulse_sim_solver: {self.pulse_sim_solver}')
 
 config = Config()

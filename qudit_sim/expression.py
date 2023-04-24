@@ -12,6 +12,7 @@ be pure to be compatible with JAX odeint.
 """
 
 from typing import Callable, Optional, Union, Tuple, Dict, Any, Sequence
+from types import ModuleType
 from numbers import Number
 from abc import ABC
 
@@ -246,7 +247,7 @@ class _ParameterBinaryOp(ParameterFunction):
         args: Tuple[Any, ...] = (),
         npmod: ModuleType = np
     ) -> ReturnType:
-        return self.op(self.lexpr.evaluate(args, mpmod), self.rexpr, npmod)
+        return self.op(self.lexpr.evaluate(args, npmod), self.rexpr, npmod)
 
 ParameterExpression._binary_op = _ParameterBinaryOp
 
@@ -289,7 +290,7 @@ class TimeFunction(Expression):
         if self.tzero:
             t = t - self.tzero
 
-        return self.fn(t, args, mpmod)
+        return self.fn(t, args, npmod)
 
     def evaluate(
         self,
@@ -490,7 +491,7 @@ class PiecewiseFunction(TimeFunction):
 
             timelist = list(self.timelist)
             timelist.append(jnp.inf)
-            funclist = list(make_shifted_fun(ifun) for ifun in range(len(self.timelist))
+            funclist = list(make_shifted_fun(ifun) for ifun in range(len(self.timelist)))
 
             ifun = jax.lax.while_loop(
                 lambda ifun: t > timelist[ifun],

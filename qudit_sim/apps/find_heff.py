@@ -46,6 +46,7 @@ def find_heff(
     frame: FrameSpec = 'dressed',
     cycles: float = 1000.,
     ramp_cycles: float = 100.,
+    pulse_sim_solver: str = 'qutip',
     init: Optional[Union[np.ndarray, Dict[Tuple[int, ...], Union[float, Tuple[float, bool]]]]] = None,
     optimizer: str = 'adam',
     optimizer_args: Any = default_optimizer_args,
@@ -105,7 +106,7 @@ def find_heff(
     hgen_drv, tlist, drive_args, time_range = add_drive_for_heff(hgen, qudit, frequency, amplitude,
                                                                  cycles, ramp_cycles)
 
-    sim_result = pulse_sim(hgen_drv, tlist, drive_args=drive_args, frame=frame,
+    sim_result = pulse_sim(hgen_drv, tlist, drive_args=drive_args, frame=frame, solver=pulse_sim_solver,
                            save_result_to=save_result_to, log_level=log_level)
 
     if isinstance(init, np.ndarray):

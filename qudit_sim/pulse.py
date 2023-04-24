@@ -11,12 +11,12 @@ class (``sequence`` parameter).
 """
 
 from typing import Union, Optional, Any, Callable, Tuple
+from types import ModuleType
 from numbers import Number
 import numpy as np
 
 from .expression import (ParameterExpression, Constant, TimeFunction,
                          TimeType, ReturnType)
-from .config import config
 
 class Pulse(TimeFunction):
     """Base class for all pulse shapes.
@@ -28,7 +28,7 @@ class Pulse(TimeFunction):
     def __init__(
         self,
         duration: float,
-        fn: Callable[[Tuple[Any, ...]], ReturnType],
+        fn: Callable[[TimeType, Tuple[Any, ...], ModuleType], ReturnType],
         parameters: Optional[Tuple[str, ...]] = None,
         tzero: float = 0.
     ):
@@ -87,12 +87,15 @@ class Gaussian(Pulse):
         return (f'Gaussian(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, center={self.center},'
                 f' zero_ends={self._pedestal != 0.}, tzero={self.tzero})')
 
-    def _fn(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
-        npmod = config.npmod
-
+    def _fn(
+        self,
+        t: TimeType,
+        args: Tuple[Any, ...] = (),
+        npmod: ModuleType = np
+    ) -> ReturnType:
         x_over_sqrt2 = (t - self.center) / self.sigma * np.sqrt(0.5)
         v = npmod.exp(-npmod.square(x_over_sqrt2))
-        amp = self.amp.evaluate(args)
+        amp = self.amp.evaluate(args, npmod)
         return npmod.asarray(amp / (1. - self._pedestal) * (v - self._pedestal),
                              dtype='complex128')
 
@@ -173,30 +176,42 @@ class GaussianSquare(Pulse):
         return (f'GaussianSquare(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, width={self.width}, '
                 f' zero_ends={zero_ends}, rise={rise}, fall={fall})')
 
-    def _fn_full(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
-        npmod = config.npmod
+    def _fn_full(
+        self,
+        t: TimeType,
+        args: Tuple[Any, ...] = (),
+        npmod: ModuleType = np
+    ) -> ReturnType:
         t = npmod.asarray(t)
 
-        value_left = npmod.asarray(t <= self.t_plateau) * (self.gauss_rise(t) - 1.)
-        value_right = npmod.asarray(t > self.t_plateau + self.width) * (self.gauss_fall(t) - 1.)
+        value_left = npmod.asarray(t <= self.t_plateau) * (self.gauss_rise(t, npmod=npmod) - 1.)
+        value_right = npmod.asarray(t > self.t_plateau + self.width) * (self.gauss_fall(t, npmod=npmod) - 1.)
 
-        return (value_left + value_right + 1.) * self.amp.evaluate(args)
+        return (value_left + value_right + 1.) * self.amp.evaluate(args, npmod)
 
-    def _fn_left(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
-        npmod = config.npmod
+    def _fn_left(
+        self,
+        t: TimeType,
+        args: Tuple[Any, ...] = (),
+        npmod: ModuleType = np
+    ) -> ReturnType:
         t = npmod.asarray(t)
 
-        value_left = npmod.asarray(t <= self.t_plateau) * (self.gauss_rise(t) - 1.)
+        value_left = npmod.asarray(t <= self.t_plateau) * (self.gauss_rise(t, npmod=npmod) - 1.)
 
-        return (value_left + 1.) * self.amp.evaluate(args)
+        return (value_left + 1.) * self.amp.evaluate(args, npmod)
 
-    def _fn_right(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
-        npmod = config.npmod
+    def _fn_right(
+        self,
+        t: TimeType,
+        args: Tuple[Any, ...] = (),
+        npmod: ModuleType = np
+    ) -> ReturnType:
         t = npmod.asarray(t)
 
-        value_right = npmod.asarray(t > self.t_plateau + self.width) * (self.gauss_fall(t) - 1.)
+        value_right = npmod.asarray(t > self.t_plateau + self.width) * (self.gauss_fall(t, npmod=npmod) - 1.)
 
-        return (value_right + 1.) * self.amp.evaluate(args)
+        return (value_right + 1.) * self.amp.evaluate(args, npmod)
 
 
 class Drag(Gaussian):
@@ -241,14 +256,18 @@ class Drag(Gaussian):
         return (f'Drag(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, beta={self.beta}, '
                 f'center={self.center}, zero_ends={self._pedestal != 0.})')
 
-    def _fn(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
-        npmod = config.npmod
+    def _fn(
+        self,
+        t: TimeType,
+        args: Tuple[Any, ...] = (),
+        npmod: ModuleType = np
+    ) -> ReturnType:
         t = npmod.asarray(t)
 
-        gauss = super()._fn(t, args)
+        gauss = super()._fn(t, args, npmod)
         dgauss = -(t - self.center) / npmod.square(self.sigma) * gauss
 
-        beta = self.beta.evaluate(args[-len(self.beta.parameters):])
+        beta = self.beta.evaluate(args[-len(self.beta.parameters):], npmod)
 
         return gauss + 1.j * beta * dgauss
 
@@ -276,5 +295,10 @@ class Square(Pulse):
     def __str__(self) -> str:
         return f'Square(duration={self.duration}, amp={self.amp})'
 
-    def _fn(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
-        return config.npmod.full_like(t, self.amp.evaluate(args))
+    def _fn(
+        self,
+        t: TimeType,
+        args: Tuple[Any, ...] = (),
+        npmod: ModuleType = np
+    ) -> ReturnType:
+        return npmod.full_like(t, self.amp.evaluate(args, npmod))

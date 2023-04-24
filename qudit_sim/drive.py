@@ -9,16 +9,18 @@ See :ref:`drive-hamiltonian` for theoretical background.
 """
 
 from typing import Callable, Optional, Union, Tuple, List, Any
+from types import ModuleType
 from numbers import Number
+import re
 import copy
 from dataclasses import dataclass
 import warnings
 import numpy as np
+import jax.numpy as jnp
 
 from .expression import (Expression, ParameterExpression, Parameter, TimeFunction, ConstantFunction,
-                         PiecewiseFunction, TimeType, ArrayType, ReturnType)
+                         PiecewiseFunction, TimeType, array_like, ArrayType, ReturnType)
 from .pulse import Pulse
-from .config import config
 
 HamiltonianCoefficient = Union[str, ArrayType, TimeFunction]
 
@@ -116,7 +118,7 @@ class DriveTerm:
                 if frequency is None:
                     raise RuntimeError('Pulse called before SetFrequency')
 
-                envelope = _make_envelope(inst, drive_base, phase_offset, time, as_timefn)
+                envelope = _make_envelope(inst, drive_base, phase_offset, as_timefn)
 
                 fn_x, fn_y = _generate_single(envelope, frequency, frame_frequency)
 
@@ -125,6 +127,10 @@ class DriveTerm:
                 if isinstance(inst, Pulse):
                     time += inst.duration
                 else:
+                    if time != 0. and re.search('[^a-zA-Z_]t[^a-zA-Z0-9_]', inst):
+                        warnings.warn('Possibly time-dependent string amplitude in a sequence'
+                                      ' detected; this is not supported.', UserWarning)
+
                     # Indefinite drive
                     time = np.inf
                     break
@@ -157,7 +163,7 @@ class DriveTerm:
         return fn_x, fn_y
 
 
-def _make_envelope(inst, drive_base, phase_offset, time, as_timefn):
+def _make_envelope(inst, drive_base, phase_offset, as_timefn):
     phase_factor = None
     if isinstance(phase_offset, Number):
         if phase_offset != 0.:
@@ -183,10 +189,6 @@ def _make_envelope(inst, drive_base, phase_offset, time, as_timefn):
             envelope = ConstantFunction(envelope)
 
     elif isinstance(inst, str):
-        if time != 0. and 't' in inst:
-            warnings.warn('Possibly time-dependent string amplitude in a sequence'
-                          ' detected; this is not supported.', UserWarning)
-
         envelope = f'({drive_base}) * ({inst})'
 
         if isinstance(phase_factor, ParameterExpression):
@@ -213,7 +215,6 @@ def _make_envelope(inst, drive_base, phase_offset, time, as_timefn):
             inst = TimeFunction(inst)
 
         envelope = inst * drive_base
-        envelope.tzero = time
 
         if phase_factor is not None:
             envelope *= phase_factor
@@ -302,7 +303,7 @@ def _generate_single_full(envelope, frequency, frame_frequency):
 class OscillationFunction(TimeFunction):
     def __init__(
         self,
-        op: Callable,
+        op: Callable[[array_like, ModuleType], ReturnType],
         frequency: Union[float, ParameterExpression],
         phase: Union[float, ParameterExpression] = 0.
     ):
@@ -327,19 +328,40 @@ class OscillationFunction(TimeFunction):
 
         super().__init__(fn, parameters)
 
-    def _fn_PE_PE(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
+    def _fn_PE_PE(
+        self,
+        t: TimeType,
+        args: Tuple[Any, ...] = (),
+        npmod: ModuleType = np
+    ) -> ReturnType:
         freq_n_params = len(self.frequency.parameters)
-        return self.op(self.frequency.evaluate(args[:freq_n_params]) * t
-                       + self.phase.evaluate(args[freq_n_params:]))
+        return self.op(self.frequency.evaluate(args[:freq_n_params], npmod) * t
+                       + self.phase.evaluate(args[freq_n_params:], npmod),
+                       npmod)
 
-    def _fn_PE_float(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
-        return self.op(self.frequency.evaluate(args) * t + self.phase)
+    def _fn_PE_float(
+        self,
+        t: TimeType,
+        args: Tuple[Any, ...] = (),
+        npmod: ModuleType = np
+    ) -> ReturnType:
+        return self.op(self.frequency.evaluate(args, npmod) * t + self.phase, npmod)
 
-    def _fn_float_PE(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
-        return self.op(self.frequency * t + self.phase.evaluate(args))
+    def _fn_float_PE(
+        self,
+        t: TimeType,
+        args: Tuple[Any, ...] = (),
+        npmod: ModuleType = np
+    ) -> ReturnType:
+        return self.op(self.frequency * t + self.phase.evaluate(args, npmod), npmod)
 
-    def _fn_float_float(self, t: TimeType, args: Tuple[Any, ...] = ()) -> ReturnType:
-        return self.op(self.frequency * t + self.phase)
+    def _fn_float_float(
+        self,
+        t: TimeType,
+        args: Tuple[Any, ...] = (),
+        npmod: ModuleType = np
+    ) -> ReturnType:
+        return self.op(self.frequency * t + self.phase, npmod)
 
 
 class CosFunction(OscillationFunction):
@@ -348,7 +370,7 @@ class CosFunction(OscillationFunction):
         frequency: Union[float, ParameterExpression],
         phase: Union[float, ParameterExpression] = 0.
     ):
-        super().__init__(config.npmod.cos, frequency, phase)
+        super().__init__(lambda x, npmod: npmod.cos(x), frequency, phase)
 
 class SinFunction(OscillationFunction):
     def __init__(
@@ -356,19 +378,15 @@ class SinFunction(OscillationFunction):
         frequency: Union[float, ParameterExpression],
         phase: Union[float, ParameterExpression] = 0.
     ):
-        super().__init__(config.npmod.sin, frequency, phase)
+        super().__init__(lambda x, npmod: npmod.sin(x), frequency, phase)
 
 class ExpFunction(OscillationFunction):
-    @staticmethod
-    def _op(x):
-        return config.npmod.cos(x) + 1.j * config.npmod.sin(x)
-
     def __init__(
         self,
         frequency: Union[float, ParameterExpression],
         phase: Union[float, ParameterExpression] = 0.
     ):
-        super().__init__(ExpFunction._op, frequency, phase)
+        super().__init__(lambda x, npmod: npmod.cos(x) + 1.j * npmod.sin(x), frequency, phase)
 
 @dataclass(frozen=True)
 class ShiftFrequency:

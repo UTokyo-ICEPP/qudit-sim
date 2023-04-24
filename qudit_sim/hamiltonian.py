@@ -9,6 +9,7 @@ See :doc:`/hamiltonian` for theoretical background.
 """
 
 from typing import Any, Dict, Sequence, List, Callable, Optional, Union, Hashable
+from types import ModuleType
 from numbers import Number
 from dataclasses import dataclass
 import copy
@@ -35,7 +36,8 @@ class Hamiltonian(list):
     def evaluate_coeffs(
         self,
         tlist: np.ndarray,
-        args: Optional[Dict[str, Any]] = None
+        args: Optional[Dict[str, Any]] = None,
+        npmod: ModuleType = np
     ) -> List[Union[qtp.Qobj, QobjCoeffPair]]:
         """
         Evaluate functional Hamiltonian coefficients at given time points.
@@ -53,9 +55,9 @@ class Hamiltonian(list):
         for term in self:
             if isinstance(term, list):
                 if isinstance(term[1], ConstantFunction):
-                    hstatic += term[0] * term[1](0., args)
+                    hstatic += term[0] * term[1](0., args, npmod)
                 elif isinstance(term[1], TimeFunction):
-                    evaluated.append([term[0], term[1](tlist, args)])
+                    evaluated.append([term[0], term[1](tlist, args, npmod)])
                 else:
                     evaluated.append(list(term))
             else:

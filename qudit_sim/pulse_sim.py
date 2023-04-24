@@ -25,11 +25,11 @@ from .frame import FrameSpec, SystemFrame, QuditFrame
 from .sim_result import PulseSimResult, save_sim_result
 from .unitary import closest_unitary
 from .parallel import parallel_map
-from .config import config
 
 logger = logging.getLogger(__name__)
 
 TList = Union[np.ndarray, Tuple[int, int], Dict[str, Union[int, float]]]
+SolverOptions = Union[Options, Tuple[float, float, float, float]]
 
 def pulse_sim(
     hgen: HamiltonianBuilder,
@@ -41,7 +41,8 @@ def pulse_sim(
     final_only: Union[bool, List[bool]] = False,
     reunitarize: Union[bool, List[bool]] = True,
     interval_len: Union[int, str, List[Union[int, str]]] = 'auto',
-    sesolve_options: Union[Options, List[Options]] = Options(),
+    solver: str = 'qutip',
+    solver_options: Optional[Union[SolverOptions, List[SolverOptions]]] = None,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING
 ) -> Union['PulseSimResult', List['PulseSimResult']]:
@@ -110,7 +111,8 @@ def pulse_sim(
             is a unitary. When integrating with JAX ``odeint``, this parameter determines the size of
             tlist batches. If set to ``'auto'``, an appropriate value is automatically assigned. If the
             value is less than 2, simulation will be run in a single batch uninterrupted.
-        sesolve_options: QuTiP solver options.
+        solver_options: If solver is qutip, QuTiP solver options. If solver is jax, a tuple representing
+            ``(rtol, atol, mxstep, hmax)`` parameters of ``odeint``.
         save_result_to: File name (without the extension) to save the simulation result to.
         log_level: Log level.
 
@@ -128,42 +130,46 @@ def pulse_sim(
     # Put inputs to PulseSimParameters in a zipped list
     zip_list = list()
 
-    parallel_params = [
-        (tlist, (np.ndarray, tuple, dict)),
-        (psi0, Qobj),
-        (e_ops, Sequence),
-        (frame, (str, dict, Sequence)),
-        (final_only, bool),
-        (reunitarize, bool),
-        (interval_len, (int, str)),
-        (sesolve_options, Options)
-    ]
+    parallel_params = {
+        'tlist': (tlist, (np.ndarray, tuple, dict)),
+        'psi0': (psi0, Qobj),
+        'e_ops': (e_ops, Sequence),
+        'frame': (frame, (str, dict, Sequence)),
+        'final_only': (final_only, bool),
+        'reunitarize': (reunitarize, bool),
+        'interval_len': (interval_len, (int, str)),
+        'solver_options': (solver_options, (Options, tuple))
+    }
 
-    # Pack parallelizable arguments into per-job tuples
-    for param, typ in parallel_params:
-        if isinstance(param, list) and (typ is None or all(isinstance(elem, typ) for elem in param)):
+    # Pack parallelizable arguments into per-job dicts
+    singleton_params = list()
+    for key, (value, typ) in parallel_params.items():
+        if isinstance(value, list) and (typ is None or all(isinstance(elem, typ) for elem in value)):
             if num_tasks is None:
-                num_tasks = len(param)
-            elif num_tasks != len(param):
+                num_tasks = len(value)
+            elif num_tasks != len(value):
                 raise ValueError('Lists with inconsistent lengths passed as arguments')
-
-            zip_list.append(param)
-
         else:
-            zip_list.append(None)
+            singleton_params.append(key)
 
     if num_tasks is None:
-        hamiltonian = build_hamiltonian(hgen, drive_args)
+        hamiltonian = build_hamiltonian(hgen, solver, drive_args)
 
-        raw_args = tuple(param for param, _ in parallel_params)
-        parameters = compose_parameters(hgen, *raw_args)
+        raw_args = {key: value for key, (value, typ) in parallel_params.items()}
+        parameters = compose_parameters(hgen, solver=solver, **raw_args)
 
-        result = _run_single(hamiltonian, parameters, drive_args=drive_args, save_result_to=save_result_to)
+        result = _run_single(hamiltonian, parameters, drive_args=drive_args, solver=solver,
+                             save_result_to=save_result_to)
 
     else:
-        for iparam, (param, _) in enumerate(parallel_params):
-            if zip_list[iparam] is None:
-                zip_list[iparam] = [param] * num_tasks
+        raw_args_list = list(dict() for _ in range(num_tasks))
+        for key in singleton_params:
+            for itask in range(num_tasks):
+                raw_args_list[itask][key] = parallel_params[key][0]
+
+        for key in set(parallel_params.keys()) - set(singleton_params):
+            for itask in range(num_tasks):
+                raw_args_list[itask][key] = parallel_params[key][0][itask]
 
         if not isinstance(drive_args, list):
             drive_args = [drive_args] * num_tasks
@@ -178,16 +184,16 @@ def pulse_sim(
         else:
             save_result_path = lambda itask: None
 
-        hamiltonian = build_hamiltonian(hgen, drive_args[0])
+        hamiltonian = build_hamiltonian(hgen, solver, drive_args[0])
 
-        raw_args_list = list(zip(*zip_list))
-        parameters_list = list(compose_parameters(hgen, *raw_args) for raw_args in raw_args_list)
+        parameters_list = list(compose_parameters(hgen, solver=solver, **raw_args)
+                               for raw_args in raw_args_list)
 
-        if config.pulse_sim_solver == 'jax':
+        if solver == 'jax':
             thread_based = True
 
             # Precompile the hamiltonian function for all unique tlist-stack shapes
-            tlist_shape_params = set((p.tlist.shape[0], p.interval_len, p.final_only)
+            tlist_shape_params = set((p.tlist.shape[0], p.interval_len, p.solver_options)
                                      for p in parameters_list)
 
             y0 = hgen.identity_op().full()
@@ -195,18 +201,15 @@ def pulse_sim(
             # Compile in threads
             with futures.ThreadPoolExecutor() as pool:
                 thread_jobs = dict()
-                for tlist_len, interval_len, final_only in tlist_shape_params:
+                for tlist_len, interval_len, solver_options in tlist_shape_params:
                     num_intervals = int(np.ceil((tlist_len - 1) / (interval_len - 1)))
 
-                    if final_only:
-                        dummy_tlists = np.empty((num_intervals, 2))
-                    else:
-                        dummy_tlists = np.empty((num_intervals, interval_len))
+                    dummy_tlists = np.empty((num_intervals, interval_len))
 
-                    lowered = vodeint.lower(hamiltonian, y0, dummy_tlists, drive_args[0])
-                    thread_jobs[dummy_tlists.shape] = pool.submit(lowered.compile)
+                    lowered = vodeint.lower(hamiltonian, y0, dummy_tlists, drive_args[0], solver_options)
+                    thread_jobs[(dummy_tlists.shape, solver_options)] = pool.submit(lowered.compile)
 
-            hamiltonian.compiled_vodeint = {shape: job.result() for shape, job in thread_jobs.items()}
+            hamiltonian.compiled_vodeint = {key: job.result() for key, job in thread_jobs.items()}
 
             common_args = (hamiltonian,)
             args = parameters_list
@@ -221,7 +224,7 @@ def pulse_sim(
             # Convert the functional Hamiltonian coefficients to arrays before passing them to parallel_map
             hamiltonians = list()
             for params, dargs in zip(parameters_list, drive_args):
-                hamiltonians.append(hamiltonian.evaluate_coeffs(params.tlist, dargs))
+                hamiltonians.append(hamiltonian.evaluate_coeffs(params.tlist, dargs, npmod=np))
 
             common_args = None
             args = list(zip(hamiltonians, parameters_list))
@@ -231,8 +234,8 @@ def pulse_sim(
                                 for itask in range(num_tasks))
 
         result = parallel_map(_run_single, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
-                              arg_position=arg_position, common_args=common_args, log_level=log_level,
-                              thread_based=thread_based)
+                              arg_position=arg_position, common_args=common_args, common_kwargs={'solver': solver},
+                              log_level=log_level, thread_based=thread_based)
 
     logger.setLevel(original_log_level)
 
@@ -248,7 +251,7 @@ class PulseSimParameters:
     final_only: bool = False
     reunitarize: bool = True
     interval_len: int = 1
-    sesolve_options: Options = Options()
+    solver_options: SolverOptions = Options()
 
     def transform_evolution(
         self,
@@ -293,10 +296,18 @@ class PulseSimParameters:
 
 def build_hamiltonian(
     hgen: HamiltonianBuilder,
+    solver: str = 'qutip',
     sample_drive_args: Optional[Dict[str, Any]] = None
 ) -> Any:
-    """Build the Hamiltonian according to the pulse_sim_solver option."""
-    if config.pulse_sim_solver == 'jax':
+    """Build the Hamiltonian according to the pulse_sim_solver option.
+
+    Args:
+        hgen: A HamiltonianBuilder instance.
+        solver: ``'qutip'`` or ``'jax'``
+        sample_drive_args: For ``solver='jax'``, an example argument dictionary (with valid keys and
+            value types) to be used for compiling the pulse functions.
+    """
+    if solver == 'jax':
         h_terms = hgen.build(frame='lab', as_timefn=True)
 
         if len(h_terms) == 1 and isinstance(h_terms[0], Qobj):
@@ -307,7 +318,7 @@ def build_hamiltonian(
             def du_dt(u_t, t, drive_args):
                 h_t = h_terms[0].full()
                 for qobj, fn in h_terms[1:]:
-                    h_t += qobj.full() * fn(t, drive_args)
+                    h_t += qobj.full() * fn(t, drive_args, npmod=jnp)
 
                 return -1.j * jnp.matmul(h_t, u_t)
 
@@ -332,16 +343,15 @@ def compose_parameters(
     final_only: bool = False,
     reunitarize: bool = True,
     interval_len: Union[int, str] = 'auto',
-    sesolve_options: Options = Options()
+    solver: str = 'qutip',
+    solver_options: Optional[SolverOptions] = None
 ) -> PulseSimParameters:
     """Generate the arguments for parallel jobs using the HamiltonianBuilder."""
     ## Time points
     if isinstance(tlist, tuple):
         tlist = {'points_per_cycle': tlist[0], 'num_cycles': tlist[1]}
     if isinstance(tlist, dict):
-        tlist = dict(tlist)
-        tlist['frame'] = 'lab'
-        tlist = hgen.make_tlist(**tlist)
+        tlist = hgen.make_tlist(frame='lab', **tlist)
 
     if psi0 is None:
         psi0 = hgen.identity_op()
@@ -351,7 +361,7 @@ def compose_parameters(
 
     if interval_len == 'auto':
         # Best determined by the representative frequency and simulation duration
-        if config.pulse_sim_solver == 'jax':
+        if solver == 'jax':
             interval_len = 101
         else:
             if reunitarize:
@@ -362,14 +372,21 @@ def compose_parameters(
     if interval_len <= 1:
         interval_len = tlist.shape[0]
 
+    if solver_options is None:
+        if solver == 'jax':
+            solver_options = (1.e-8, 1.e-8, jnp.inf, jnp.inf)
+        else:
+            solver_options = Options()
+
     return PulseSimParameters(frame, tlist, psi0, e_ops, final_only, reunitarize, interval_len,
-                              sesolve_options=sesolve_options)
+                              solver_options=solver_options)
 
 
 def _run_single(
     hamiltonian: Any,
     parameters: PulseSimParameters,
     drive_args: Optional[Dict[str, Any]] = None,
+    solver: str = 'str',
     save_result_to: Optional[str] = None,
     logger_name: str = __name__
 ) -> PulseSimResult:
@@ -385,7 +402,7 @@ def _run_single(
 
         states, expect = exponentiate_hstat(hamiltonian[0], parameters, logger_name)
 
-    elif config.pulse_sim_solver == 'jax':
+    elif solver == 'jax':
         logger.info('XLA-compiled Hamiltonian built. Starting simulation..')
 
         states, expect = simulate_drive_odeint(hamiltonian, parameters, drive_args, logger_name)
@@ -400,9 +417,6 @@ def _run_single(
         tlist = parameters.tlist[-1:]
     else:
         tlist = parameters.tlist
-
-    if parameters.e_ops and not parameters.sesolve_options.store_states:
-        states = None
 
     result = PulseSimResult(times=tlist, expect=expect, states=states, frame=parameters.frame)
 
@@ -430,7 +444,7 @@ def simulate_drive_sesolve(
 
     # Take a copy of options because we change its values
 
-    sesolve_options = copy.deepcopy(parameters.sesolve_options)
+    solver_options = copy.deepcopy(parameters.solver_options)
 
     # Reunitarization and interval running setting
 
@@ -454,11 +468,11 @@ def simulate_drive_sesolve(
     if not any(isarray):
         # No interval dependency in the Hamiltonian (all constants or string expressions)
         # -> Can reuse the compiled objects
-        sesolve_options.rhs_reuse = True
+        solver_options.rhs_reuse = True
 
     # Arrays to store the unitaries and expectation values
 
-    if not parameters.e_ops or sesolve_options.store_states:
+    if not parameters.e_ops or solver_options.store_states:
         # squeezed shape
         state_shape = tuple(s for s in parameters.psi0.shape if s != 1)
         if parameters.final_only:
@@ -480,7 +494,7 @@ def simulate_drive_sesolve(
     ## Run sesolve in a temporary directory
 
     # We'll always need the states
-    sesolve_options.store_states = True
+    solver_options.store_states = True
 
     sim_start = time.time()
 
@@ -510,7 +524,7 @@ def simulate_drive_sesolve(
 
                 tlist = parameters.tlist[start:end]
 
-                qtp_result = sesolve(local_hamiltonian, psi0, tlist, options=sesolve_options)
+                qtp_result = sesolve(local_hamiltonian, psi0, tlist, options=solver_options)
 
                 # Array of lab-frame evolution ops
                 if parameters.final_only:
@@ -593,15 +607,17 @@ def simulate_drive_odeint(
     if hamiltonian.__name__ == 'du_dt':
         hamiltonian, _ = jax.custom_derivatives.closure_convert(hamiltonian, y0, 0., drive_args)
 
+    h_key = (tlists.shape, parameters.solver_options)
+
     with odeint_lock:
         if not hasattr(hamiltonian, 'compiled_vodeint'):
             hamiltonian.compiled_vodeint = dict()
 
         try:
-            integrator = hamiltonian.compiled_vodeint[tlists.shape]
+            integrator = hamiltonian.compiled_vodeint[h_key]
         except KeyError:
-            integrator = vodeint.lower(hamiltonian, y0, tlists, drive_args).compile()
-            hamiltonian.compiled_vodeint[tlists.shape] = integrator
+            integrator = vodeint.lower(hamiltonian, y0, tlists, drive_args, parameters.solver_options).compile()
+            hamiltonian.compiled_vodeint[h_key] = integrator
 
     evolution = np.asarray(integrator(y0, tlists, drive_args))
 
@@ -629,12 +645,11 @@ def simulate_drive_odeint(
 
     return states, expect
 
-@partial(jax.jit, static_argnums=0)
-def vodeint(hamiltonian, y0, tlists, drive_args):
+@partial(jax.jit, static_argnums=(0, 4))
+def vodeint(hamiltonian, y0, tlists, drive_args, opt):
     vwrapper = jax.vmap(_odeint_wrapper, in_axes=(None, None, None, None, None, None, 0, None))
 
-    rtol, atol, mxstep, hmax = 1.e-8, 1.e-8, jnp.inf, jnp.inf
-    stacked_u = vwrapper(hamiltonian, rtol, atol, mxstep, hmax, y0, tlists, drive_args)
+    stacked_u = vwrapper(hamiltonian, opt[0], opt[1], opt[2], opt[3], y0, tlists, drive_args)
 
     dot_last = lambda ip, matrices: matrices.at[ip].set(stacked_u[ip - 1, -1] @ matrices[ip - 1])
 

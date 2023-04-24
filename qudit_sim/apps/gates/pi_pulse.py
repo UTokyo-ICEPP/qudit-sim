@@ -14,7 +14,6 @@ from ...pulse import Drag
 from ...expression import Parameter
 from ...pulse_sim import build_hamiltonian, compose_parameters, simulate_drive_odeint, simulate_drive_sesolve
 from ...basis import change_basis
-from ...config import config
 from .components import gate_components
 
 logger = logging.getLogger(__name__)
@@ -28,6 +27,7 @@ def pi_pulse(
     angle: float = np.pi,
     duration: float = unit_time * 160,
     sigma: int = unit_time * 40,
+    pulse_sim_solver: str = 'qutip',
     log_level: int = logging.WARNING
 ) -> Tuple[float, Drag]:
     r"""Find the :math:`\pi` pulse for the given level of the given qudit by numerical optimization.
@@ -105,11 +105,11 @@ def pi_pulse(
     tlist = hgen.make_tlist(points_per_cycle=10, duration=duration)
     interval_len = (tlist.shape[0] - 1) // 64 + 1
 
-    hamiltonian = build_hamiltonian(hgen, {'amp': 0., 'beta': 0.})
+    hamiltonian = build_hamiltonian(hgen, pulse_sim_solver, {'amp': 0., 'beta': 0.})
     parameters = compose_parameters(hgen, tlist, final_only=True, reunitarize=False,
-                                    interval_len=interval_len)
+                                    interval_len=interval_len, solver=pulse_sim_solver)
 
-    if config.pulse_sim_solver == 'jax':
+    if pulse_sim_solver == 'jax':
         simulate_drive = simulate_drive_odeint
     else:
         simulate_drive = simulate_drive_sesolve
