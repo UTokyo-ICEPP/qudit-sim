@@ -21,7 +21,7 @@ class QuditFrame:
 
     @property
     def num_levels(self) -> int:
-        return frequency.shape[0] + 1
+        return self.frequency.shape[0] + 1
 
 FrameSpec = Union[str, Dict[str, QuditFrame], Sequence[QuditFrame]]
 
@@ -107,7 +107,7 @@ class SystemFrame(dict):
                     raise RuntimeError(f'Qudit {qid} has more than one drive terms')
 
         return {qid: QuditFrame(frequencies[qid], np.zeros(hgen.qudit_params(qid).num_levels - 1))
-                for qudit_id in qudit_ids}
+                for qid in qudit_ids}
 
     def set_frequency(
         self,
@@ -164,15 +164,14 @@ class SystemFrame(dict):
         if not isinstance(from_frame, SystemFrame):
             from_frame = SystemFrame(from_frame)
 
-        frequencies = self.frequencies - from_frame.frequencies
-        phases = self.phases - from_frame.phases
+        energies = []
+        offsets = []
+        for qudit_id in self.keys():
+            frequencies = self[qudit_id].frequency - from_frame[qudit_id].frequency
+            energies.append(np.concatenate(([0.], np.cumsum(frequencies))))
 
-        energies = np.concatenate((np.zeros(self.num_qudits)[:, None],
-                                   np.cumsum(frequencies, axis=1)),
-                                  axis=1)
-        offsets = np.concatenate((np.zeros(self.num_qudits)[:, None],
-                                  np.cumsum(phases, axis=1)),
-                                 axis=1)
+            phases = self[qudit_id].phase - from_frame[qudit_id].phase
+            offsets.append(np.concatenate(([0.], np.cumsum(phases))))
 
         en_diagonal = add_outer_multi(energies)
         offset_diagonal = add_outer_multi(offsets)
