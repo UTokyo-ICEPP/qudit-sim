@@ -4,7 +4,6 @@ from typing import Hashable, Tuple
 import logging
 import numpy as np
 import scipy.optimize as sciopt
-import qutip as qtp
 
 import rqutils.paulis as paulis
 from rqutils.math import matrix_exp, matrix_angle
@@ -28,6 +27,7 @@ def pi_pulse(
     duration: float = unit_time * 160,
     sigma: int = unit_time * 40,
     pulse_sim_solver: str = 'qutip',
+    fit_tol: float = 1.e-5,
     log_level: int = logging.WARNING
 ) -> Tuple[float, Drag]:
     r"""Find the :math:`\pi` pulse for the given level of the given qudit by numerical optimization.
@@ -141,7 +141,7 @@ def pi_pulse(
 
     logger.info('Starting pi pulse identification..')
 
-    optres = sciopt.minimize(fun, (1., 1.), method='COBYLA', tol=5.e-5, options={'rhobeg': 0.5})
+    optres = sciopt.minimize(fun, (1., 1.), method='COBYLA', tol=fit_tol, options={'rhobeg': 0.5})
 
     logger.info('Done after %d function calls. Final fidelity %f.', icall, -optres.fun)
 
