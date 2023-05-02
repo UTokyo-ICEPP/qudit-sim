@@ -1,42 +1,44 @@
 """Pulse simulation frontend."""
 
-from typing import Any, Dict, List, Tuple, Sequence, Iterable, Optional, Union, Callable
+import copy
+import logging
 import os
 import tempfile
-import logging
 import time
-import copy
 from concurrent import futures
 from dataclasses import dataclass
-from threading import Lock
 from functools import partial
-
-import numpy as np
-from qutip import Qobj, qeye, sesolve, rhs_clear
-from qutip.solver import Options
+from threading import Lock
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 import jax
 import jax.numpy as jnp
 from jax.experimental.ode import _odeint_wrapper
+import numpy as np
+from scipy.sparse import csr_array
+from qutip import Qobj, sesolve, rhs_clear
+from qutip.solver import Options
 
 from rqutils.math import matrix_exp
-
+from .config import config
+from .frame import FrameSpec, QuditFrame, SystemFrame
 from .hamiltonian import Hamiltonian, HamiltonianBuilder
-from .frame import FrameSpec, SystemFrame, QuditFrame
+from .parallel import parallel_map
 from .sim_result import PulseSimResult, save_sim_result
 from .unitary import closest_unitary
-from .parallel import parallel_map
 
 logger = logging.getLogger(__name__)
 
 TList = Union[np.ndarray, Tuple[int, int], Dict[str, Union[int, float]]]
+QObject = Union[qtp.Qobj, np.ndarray, csr_array]
 SolverOptions = Union[Options, Tuple[float, float, float, float]]
+
 
 def pulse_sim(
     hgen: HamiltonianBuilder,
     tlist: Union[TList, List[TList]] = (10, 100),
-    psi0: Optional[Union[Qobj, List[Qobj]]] = None,
-    drive_args: Union[Dict[str, Any], List[Dict[str, Any]]] = dict(),
-    e_ops: Optional[Union[Sequence[Qobj], List[Sequence[Qobj]]]] = None,
+    psi0: Optional[Union[QObject, List[QObject]]] = None,
+    drive_args: Union[Dict[str, Any], List[Dict[str, Any]]] = {},
+    e_ops: Optional[Union[Sequence[QObject], List[Sequence[QObject]]]] = None,
     frame: Union[FrameSpec, List[FrameSpec]] = 'dressed',
     final_only: Union[bool, List[bool]] = False,
     reunitarize: Union[bool, List[bool]] = True,
@@ -48,71 +50,77 @@ def pulse_sim(
 ) -> Union['PulseSimResult', List['PulseSimResult']]:
     r"""Run a pulse simulation.
 
-    Build the Hamiltonian terms from the HamiltonianBuilder, determine the time points for the simulation if necessary,
-    and run ``qutip.sesolve``.
+    Build the Hamiltonian terms from the HamiltonianBuilder, determine the time points for the
+    simulation if necessary, and run ``qutip.sesolve``.
 
-    Regardless of the setup of the input (initial state and expectation ops), the simulation is run in
-    the lab frame with the identity operator as the initial state to obtain the time evolution operator for each time point.
-    The evolution operators are then transformed into the specified frame, if any, or the default frame of the
-    HamiltonianBuilder, before being applied to
-    the initial state (or initial unitary). If expectation ops are given, their expectation values are computed from the
-    resulting evolved states.
+    Regardless of the setup of the input (initial state and expectation ops), the simulation is run
+    in the lab frame with the identity operator as the initial state to obtain the time evolution
+    operator for each time point. The evolution operators are then transformed into the specified
+    frame, if any, or the default frame of the HamiltonianBuilder, before being applied to the
+    initial state (or initial unitary). If expectation ops are given, their expectation values are
+    computed from the resulting evolved states.
 
-    All parameters except ``hgen``, ``save_result_to``, and ``log_level`` can be given as lists to trigger a
-    parallel execution of ``sesolve``. If more than one parameter is a list, their lengths must be identical, and all
-    parameters are "zipped" together to form the argument lists of individual single simulation jobs. Parallel jobs
-    are run as separate processes if QuTiP (internally scipy)-based integrator is used, and as threads if JAX integrator
-    is used.
+    All parameters except ``hgen``, ``save_result_to``, and ``log_level`` can be given as lists to
+    trigger a parallel execution of ``sesolve``. If more than one parameter is a list, their lengths
+    must be identical, and all parameters are "zipped" together to form the argument lists of
+    individual single simulation jobs. Parallel jobs are run as separate processes if QuTiP (internally scipy)-based integrator is used, and as threads if JAX integrator is used.
 
     .. rubric:: Reunitarization of time evolution
 
-    Due to the finite numerical precision in solving the Schrodinger equation, the computed time evolution matrices will stop
-    being unitary at some point, with the rate of divergence dependent on the complexity of the Hamiltonian. In general, the
-    closest unitary :math:`U`, i.e., one with the smallest 2-norm :math:`\lVert U-A \rVert`, to an operator :math:`A` can be
-    calculated via a singular value decomposition:
+    Due to the finite numerical precision in solving the Schrodinger equation, the computed time
+    evolution matrices will stop being unitary at some point, with the rate of divergence dependent
+    on the complexity of the Hamiltonian. In general, the closest unitary :math:`U`, i.e., one with
+    the smallest 2-norm :math:`\lVert U-A \rVert`, to an operator :math:`A` can be calculated via a
+    singular value decomposition:
 
     .. math::
 
         A & = V \Sigma W^{\dagger}, \\
         U & = V W^{\dagger}.
 
-    This function has an option ``reunitarize`` to apply the above decomposition and recompute the time evolution matrices.
-    Because reunitarizing at each time step can be rather slow (mostly because of the overhead in calling ``sesolve``), when
-    this option is turned on (default), ``sesolve`` is called in time intervals of length ``interval_len``, and the entire
-    array of evolution matrices from each interval is reunitarized (longer interval lengths result in larger reunitarization
-    corrections).
+    This function has an option ``reunitarize`` to apply the above decomposition and recompute the
+    time evolution matrices. Because reunitarizing at each time step can be rather slow (mostly
+    because of the overhead in calling ``sesolve``), when this option is turned on (default),
+    ``sesolve`` is called in time intervals of length ``interval_len``, and the entire array of
+    evolution matrices from each interval is reunitarized (longer interval lengths result in larger
+    reunitarization corrections).
 
     .. rubric:: Implementation notes (why we return an original object instead of the QuTiP result)
 
-    When the coefficients of the time-dependent Hamiltonian are compiled (preferred
-    method), QuTiP creates a transient python module with file name generated from the code hash, PID, and the current time.
-    When running multiple simulations in parallel this is not strictly safe, and so we enclose ``sesolve`` in a context with
-    a temporary directory in this function. The transient module is then deleted at the end of execution, but that in turn
-    causes an error when this function is called in a subprocess and if we try to return the QuTiP result object directly
-    through e.g. multiprocessing.Pipe. Somehow the result object tries to carry with it something defined in the transient
-    module, which would therefore need to be pickled together with the returned object. But the transient module file is
-    gone by the time the parent process receives the result from the pipe.
-    So, the solution was to just return a "sanitized" object, consisting of plain ndarrays.
+    When the coefficients of the time-dependent Hamiltonian are compiled (preferred method), QuTiP
+    creates a transient python module with file name generated from the code hash, PID, and the
+    current time. When running multiple simulations in parallel this is not strictly safe, and so we
+    enclose ``sesolve`` in a context with a temporary directory in this function. The transient
+    module is then deleted at the end of execution, but that in turn causes an error when this
+    function is called in a subprocess and if we try to return the QuTiP result object directly
+    through e.g. multiprocessing.Pipe. Somehow the result object tries to carry with it something
+    defined in the transient module, which would therefore need to be pickled together with the
+    returned object. But the transient module file is gone by the time the parent process receives
+    the result from the pipe. So, the solution was to just return a "sanitized" object, consisting
+    of plain ndarrays.
 
     Args:
         hgen: A HamiltonianBuilder.
-        tlist: Time points to use in the simulation or a pair ``(points_per_cycle, num_cycles)`` where in the latter
-            case the cycle of the fastest oscillating term in the Hamiltonian will be used.
-        psi0: Initial state Qobj. Defaults to the identity operator appropriate for the given Hamiltonian.
+        tlist: Time points to use in the simulation or a pair ``(points_per_cycle, num_cycles)``
+            where in the latter case the cycle of the fastest oscillating term in the Hamiltonian
+            will be used.
+        psi0: Initial state Qobj or array. Defaults to the identity operator appropriate for the
+            given Hamiltonian.
         drive_args: Second parameter passed to drive amplitude functions (if callable).
         e_ops: List of observables passed to the QuTiP solver.
         frame: System frame to represent the simulation results in.
-        final_only: Throw away intermediate states and expectation values to save memory. Due to implementation details,
-            implies ``unitarize_evolution=True``.
-        reunitarize: Whether to reunitarize the time evolution matrices. Note that SVD can be very slow for large system
-            sizes and ``final_only=False``.
-        interval_len: When integrating with QuTiP ``sesolve``, the number of time steps to run ``sesolve``
-            uninterrupted. In this case the parameter is ignored unless ``reunitarize=True`` and ``psi0``
-            is a unitary. When integrating with JAX ``odeint``, this parameter determines the size of
-            tlist batches. If set to ``'auto'``, an appropriate value is automatically assigned. If the
-            value is less than 2, simulation will be run in a single batch uninterrupted.
-        solver_options: If solver is qutip, QuTiP solver options. If solver is jax, a tuple representing
-            ``(rtol, atol, mxstep, hmax)`` parameters of ``odeint``.
+        final_only: Throw away intermediate states and expectation values to save memory. Due to
+            implementation details, implies ``reunitarize=True``.
+        reunitarize: Whether to reunitarize the time evolution matrices. Note that SVD can be very
+            slow for large system sizes and ``final_only=False``.
+        interval_len: When integrating with QuTiP ``sesolve``, the number of time steps to run
+            ``sesolve`` uninterrupted. In this case the parameter is ignored unless
+            ``reunitarize=True`` and ``psi0`` is a unitary. When integrating with JAX ``odeint``,
+            this parameter determines the size of tlist batches. If set to ``'auto'``, an
+            appropriate value is automatically assigned. If the value is less than 2, simulation
+            will be run in a single batch uninterrupted.
+        solver_options: If solver is qutip, QuTiP solver options. If solver is jax, a tuple
+            representing ``(rtol, atol, mxstep, hmax)`` parameters of ``odeint``.
         save_result_to: File name (without the extension) to save the simulation result to.
         log_level: Log level.
 
@@ -132,7 +140,7 @@ def pulse_sim(
 
     parallel_params = {
         'tlist': (tlist, (np.ndarray, tuple, dict)),
-        'psi0': (psi0, Qobj),
+        'psi0': (psi0, (Qobj, np.ndarray, csr_array)),
         'e_ops': (e_ops, Sequence),
         'frame': (frame, (str, dict, Sequence)),
         'final_only': (final_only, bool),
@@ -246,8 +254,8 @@ def pulse_sim(
 class PulseSimParameters:
     frame: SystemFrame
     tlist: np.ndarray
-    psi0: Qobj
-    e_ops: Union[Sequence[Qobj], None] = None
+    psi0: np.ndarray
+    e_ops: Union[List[np.ndarray], None] = None
     final_only: bool = False
     reunitarize: bool = True
     interval_len: int = 1
@@ -269,7 +277,7 @@ class PulseSimParameters:
                                             objtype='evolution', t0=self.tlist[0])
 
         # State evolution in the original frame
-        states = evolution @ np.squeeze(self.psi0.full())
+        states = evolution @ self.psi0
 
         if not self.e_ops:
             return states, None
@@ -277,17 +285,10 @@ class PulseSimParameters:
         # Fill the expectation values
         expect = list()
         for observable in self.e_ops:
-            if isinstance(observable, Qobj):
-                op = observable.full()
-                if len(states.shape) == 3:
-                    out = np.einsum('ij,tij->t', op.conjugate(), states)
-                else:
-                    out = np.einsum('ti,ij,tj->t', states.conjugate(), op, states).real
-
+            if len(states.shape) == 3:
+                out = np.einsum('ij,tij->t', observable.conjugate(), states)
             else:
-                out = np.empty_like(tlist)
-                for it, state in enumerate(states):
-                    out[it] = observable(tlist[it], state)
+                out = np.einsum('ti,ij,tj->t', states.conjugate(), observable, states).real
 
             expect.append(out)
 
@@ -337,8 +338,8 @@ def build_hamiltonian(
 def compose_parameters(
     hgen: HamiltonianBuilder,
     tlist: TList = (10, 100),
-    psi0: Optional[Qobj] = None,
-    e_ops: Optional[Sequence[Qobj]] = None,
+    psi0: Optional[QObject] = None,
+    e_ops: Optional[Sequence[QObject]] = None,
     frame: FrameSpec = 'dressed',
     final_only: bool = False,
     reunitarize: bool = True,
@@ -354,7 +355,23 @@ def compose_parameters(
         tlist = hgen.make_tlist(frame='lab', **tlist)
 
     if psi0 is None:
-        psi0 = hgen.identity_op()
+        psi0 = hgen.identity_op().full()
+    elif isinstance(psi0, Qobj):
+        psi0 = np.squeeze(psi0.full())
+    elif isinstance(psi0, csr_array):
+        psi0 = psi0.todense()
+
+    if e_ops is not None:
+        new_e_ops = []
+        for qobj in e_ops:
+            if isinstance(qobj, Qobj):
+                new_e_ops.append(qobj.full())
+            elif isinstance(qobj, csr_array):
+                new_e_ops.append(qobj.todense())
+            else:
+                new_e_ops.append(qobj)
+
+        e_ops = new_e_ops
 
     if not isinstance(frame, SystemFrame):
         frame = SystemFrame(frame, hgen)
@@ -393,8 +410,8 @@ def _run_single(
     """Run one pulse simulation."""
     logger = logging.getLogger(logger_name)
 
-    logger.info('Using %d time points from %.3e to %.3e', parameters.tlist.shape[0], parameters.tlist[0],
-                parameters.tlist[-1])
+    logger.info('Using %d time points from %.3e to %.3e', parameters.tlist.shape[0],
+                parameters.tlist[0], parameters.tlist[-1])
 
     ## Run the simulation or exponentiate the static Hamiltonian
     if isinstance(hamiltonian, list) and len(hamiltonian) == 1 and isinstance(hamiltonian[0], Qobj):
@@ -464,7 +481,8 @@ def simulate_drive_sesolve(
     global_phase = np.trace(hdiag.full()).real / hdiag.shape[0]
     hamiltonian[0] = hdiag - global_phase
 
-    isarray = list(isinstance(term, list) and isinstance(term[1], np.ndarray) for term in hamiltonian)
+    isarray = list(isinstance(term, list) and isinstance(term[1], np.ndarray)
+                   for term in hamiltonian)
     if not any(isarray):
         # No interval dependency in the Hamiltonian (all constants or string expressions)
         # -> Can reuse the compiled objects
@@ -474,7 +492,7 @@ def simulate_drive_sesolve(
 
     if not parameters.e_ops or solver_options.store_states:
         # squeezed shape
-        state_shape = tuple(s for s in parameters.psi0.shape if s != 1)
+        state_shape = parameters.psi0.shape
         if parameters.final_only:
             states = np.empty((1,) + state_shape, dtype=np.complex128)
         else:
@@ -602,7 +620,7 @@ def simulate_drive_odeint(
 
     sim_start = time.time()
 
-    y0 = qeye(parameters.psi0.dims[0]).full()
+    y0 = np.eye(parameters.psi0.shape[0])
 
     if hamiltonian.__name__ == 'du_dt':
         hamiltonian, _ = jax.custom_derivatives.closure_convert(hamiltonian, y0, 0., drive_args)
@@ -618,6 +636,13 @@ def simulate_drive_odeint(
         except KeyError:
             integrator = vodeint.lower(hamiltonian, y0, tlists, drive_args, parameters.solver_options).compile()
             hamiltonian.compiled_vodeint[h_key] = integrator
+
+    ## Run the evolution on a given device
+    # parallel.parallel_map sets jax_devices[0] to the ID of the GPU to be used in this thread
+    jax_device = jax.devices()[config.jax_devices[0]]
+
+    y0 = jax.device_put(y0, device=jax_device)
+    tlists = jax.device_put(tlists, device=jax_device)
 
     evolution = np.asarray(integrator(y0, tlists, drive_args))
 

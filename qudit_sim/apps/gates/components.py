@@ -1,27 +1,29 @@
-from typing import Union, List, Tuple, Optional, Any
-import numpy as np
+"""Gate component extraction functions."""
+
+from typing import Any, List, Optional, Tuple, Union
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 
 from rqutils.math import matrix_angle
 import rqutils.paulis as paulis
 
-from ...sim_result import PulseSimResult
-from ...unitary import truncate_matrix, closest_unitary
 from ...config import config
+from ...sim_result import PulseSimResult
+from ...unitary import closest_unitary, truncate_matrix
 
 
 def gate_and_fidelity(
     sim_result: PulseSimResult,
-    comp_dim: Optional[int] = None
+    comp_dim: Optional[Union[int, Tuple[int, ...]]] = None
 ) -> Tuple[np.ndarray, float]:
     r"""Get the gate unitary from the final state of a simulation result.
 
     Args:
         sim_result: Pulse simulation result.
-        comp_dim: Interpret the result in the given matrix dimension. If None, dimension in
-            the simulation is used.
+        comp_dim: Interpret the result in the given matrix dimension. If None, dimension in the
+            simulation is used.
 
     Returns:
         Array of Pauli components of the generator of the gate (:math:`i \mathrm{log} U`) and
@@ -30,16 +32,19 @@ def gate_and_fidelity(
     gate = sim_result.states[-1]
     frame = sim_result.frame
 
-    if comp_dim is not None and frame.num_levels != comp_dim:
-        truncated = truncate_matrix(gate, frame.num_qudits, frame.num_levels, comp_dim)
-        return closest_unitary(truncated, with_fidelity=True)
-    else:
+    if isinstance(comp_dim, int):
+        comp_dim = (comp_dim,) * frame.num_qudits
+
+    if comp_dim is None:
         return gate, 1.
+
+    truncated = truncate_matrix(gate, frame.dim, comp_dim)
+    return closest_unitary(truncated, with_fidelity=True)
 
 
 def gate_components_from_log(
     sim_result: PulseSimResult,
-    comp_dim: Optional[int] = None
+    comp_dim: Optional[Union[int, Tuple[int, ...]]] = None
 ) -> np.ndarray:
     r"""Compute the Pauli components of the generator of the unitary obtained from the simulation.
 
@@ -53,10 +58,12 @@ def gate_components_from_log(
     """
     gate, _ = gate_and_fidelity(sim_result, comp_dim)
 
+    frame = sim_result.frame
+
     if comp_dim is None:
-        components_dim = sim_result.frame.dim
-    else:
-        components_dim = (comp_dim,) * len(sim_result.frame.dim)
+        components_dim = frame.dim
+    elif isinstance(comp_dim, int):
+        components_dim = (comp_dim,) * frame.num_qudits
 
     components = paulis.components(-matrix_angle(gate), components_dim).real
 
@@ -66,6 +73,7 @@ def gate_components_from_log(
 def gate_components(
     sim_result: PulseSimResult,
     initial_guess: np.ndarray,
+    comp_dim: Optional[Union[int, Tuple[int, ...]]] = None,
     optimizer: str = 'adam',
     optimizer_args: Optional[Any] = 0.005,
     max_update: int = 1000,
@@ -75,15 +83,19 @@ def gate_components(
 ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
     jax_device = jax.devices()[config.jax_devices[0]]
 
-    num_qudits = sim_result.frame.num_qudits
-    comp_dim = np.sqrt(initial_guess.shape[0]).astype(int)
-    dim = (comp_dim,) * num_qudits
+    gate = sim_result.states[-1]
+    frame = sim_result.frame
 
-    trunc_gate = truncate_matrix(sim_result.states[-1], num_qudits, sim_result.frame.num_levels, comp_dim)
+    if comp_dim is None:
+        comp_dim = frame.dim
+    elif isinstance(comp_dim, int):
+        comp_dim = (comp_dim,) * frame.num_qudits
+
+    trunc_gate = truncate_matrix(gate, frame.dim, comp_dim)
     trunc_gate = jax.device_put(trunc_gate, device=jax_device)
 
     def loss_fn(params):
-        hermitian = paulis.compose(params['components'], dim, npmod=jnp)
+        hermitian = paulis.compose(params['components'], comp_dim, npmod=jnp)
         ansatz = jax.scipy.linalg.expm(1.j * hermitian)
         trace = jnp.trace(trunc_gate @ ansatz)
         return -(jnp.square(trace.real) + jnp.square(trace.imag))
@@ -133,5 +145,5 @@ def gate_components(
 
     if with_loss:
         return components, losses
-    else:
-        return components
+
+    return components

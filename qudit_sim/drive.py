@@ -7,22 +7,22 @@ Drive Hamiltonian (:mod:`qudit_sim.drive`)
 
 See :ref:`drive-hamiltonian` for theoretical background.
 """
-
-from typing import Callable, Optional, Union, Tuple, List, Any
-from types import ModuleType
-from numbers import Number
-import re
 import copy
-from dataclasses import dataclass
+import re
 import warnings
-import numpy as np
+from dataclasses import dataclass
+from numbers import Number
+from types import ModuleType
+from typing import Callable, Optional, Union, Tuple, List, Any
 import jax.numpy as jnp
+import numpy as np
 
-from .expression import (Expression, ParameterExpression, Parameter, TimeFunction, ConstantFunction,
-                         PiecewiseFunction, TimeType, array_like, ArrayType, ReturnType)
+from .expression import (ArrayType, ConstantFunction, Expression, ParameterExpression, Parameter,
+                         PiecewiseFunction, ReturnType, TimeFunction, TimeType, array_like)
 from .pulse import Pulse
 
 HamiltonianCoefficient = Union[str, ArrayType, TimeFunction]
+
 
 class DriveTerm:
     r"""Data class representing a drive.

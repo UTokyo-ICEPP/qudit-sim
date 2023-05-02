@@ -1,37 +1,37 @@
 """Effective Hamiltonian extraction frontend."""
 
-from typing import Any, List, Tuple, Dict, Optional, Hashable, Union, Callable
+import logging
 import os
 from functools import partial
-import logging
-logging.basicConfig(level=logging.INFO)
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-import numpy as np
 import h5py
 import jax
 import jax.numpy as jnp
 from jaxlib.xla_extension import Device
+import numpy as np
 import optax
 import qutip as qtp
 
-import rqutils.paulis as paulis
 from rqutils.math import matrix_exp, matrix_angle
+import rqutils.paulis as paulis
 
+from .gates.components import gate_components
+from .heff_tools import unitary_subtraction, trace_norm_squared, heff_fidelity
 from ..config import config
-from ..parallel import parallel_map
 from ..expression import Parameter
-from ..hamiltonian import HamiltonianBuilder
 from ..frame import FrameSpec, SystemFrame
+from ..hamiltonian import HamiltonianBuilder
+from ..parallel import parallel_map
 from ..pulse import GaussianSquare
 from ..pulse_sim import pulse_sim, PulseSimParameters, exponentiate_hstat
 from ..sim_result import PulseSimResult, save_sim_result, load_sim_result
 from ..unitary import truncate_matrix, closest_unitary
-from .heff_tools import unitary_subtraction, trace_norm_squared, heff_fidelity
-from .gates.components import gate_components
 
-QuditSpec = Union[Hashable, Tuple[Hashable, ...]]
+QuditSpec = Union[str, Tuple[str, ...]]
 FrequencySpec = Union[float, Tuple[float, ...]]
 AmplitudeSpec = Union[float, complex, Tuple[Union[float, complex], ...]]
+InitSpec = Union[np.ndarray, Dict[Tuple[int, ...], Union[float, Tuple[float, bool]]]]
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +42,12 @@ def find_heff(
     qudit: QuditSpec,
     frequency: Union[FrequencySpec, List[FrequencySpec], np.ndarray],
     amplitude: Union[AmplitudeSpec, List[AmplitudeSpec], np.ndarray],
-    comp_dim: Optional[int] = None,
+    comp_dim: Optional[Union[int, Tuple[int, ...]]] = None,
     frame: FrameSpec = 'dressed',
     cycles: float = 1000.,
     ramp_cycles: float = 100.,
     pulse_sim_solver: str = 'qutip',
-    init: Optional[Union[np.ndarray, Dict[Tuple[int, ...], Union[float, Tuple[float, bool]]]]] = None,
+    init: Optional[InitSpec] = None,
     optimizer: str = 'adam',
     optimizer_args: Any = default_optimizer_args,
     max_updates: int = 10000,
@@ -60,45 +60,50 @@ def find_heff(
 ) -> Union[np.ndarray, List[np.ndarray]]:
     r"""Determine the effective Hamiltonian from the result of constant-drive simulations.
 
-    The function first sets up one-sided GuassianSquare pulses according to the ``cycles`` and ``ramp_cycles``
-    parameters and runs the pulse simulation. The resulting time evolution operator in the plateau region
-    of the pulse is then used to extract the effective Hamiltonian through the maximization of the unitary
-    fidelity.
+    The function first sets up one-sided GuassianSquare pulses according to the ``cycles`` and
+    ``ramp_cycles`` parameters and runs the pulse simulation. The resulting time evolution operator
+    in the plateau region of the pulse is then used to extract the effective Hamiltonian through the
+    maximization of the unitary fidelity.
 
-    Multiple qudits can be driven simultaneously by passing tuples to ``qudit``, ``frequency``, and ``amplitude``
-    parameters.
+    Multiple qudits can be driven simultaneously by passing tuples to ``qudit``, ``frequency``, and
+    ``amplitude`` parameters.
 
-    To evaluate multiple drive specifications in parallel (e.g. when performing an amplitude scan), pass a
-    list to either of ``frequency`` or ``amplitude``. When both are lists, their lengths must match.
+    To evaluate multiple drive specifications in parallel (e.g. when performing an amplitude scan),
+    pass a list to either of ``frequency`` or ``amplitude``. When both are lists, their lengths must
+    match.
 
     Args:
         hgen: Qudits and couplings specification.
         qudit: The qudit(s) to apply the drive to.
         frequency: Drive frequency(ies).
         amplitude: Drive amplitude(s).
-        comp_dim: Dimensionality of the computational space. If not set, number of levels in the Hamiltonian is used.
+        comp_dim: Dimensionality of the computational space. If not set, number of levels in the
+            Hamiltonian is used.
         frame: System frame.
         cycles: Number of drive signal cycles in the plateau of the GaussianSquare pulse.
         ramp_cycles: Number of drive signal cycles to use for ramp-up.
-        init: Initial values of the effective Hamiltonian components. An array specifies all initial values.
-            If a dict is passed, the format is ``{index: value or (value, fixed)}`` where ``index`` is the component
-            index (tuple of ints), ``value`` is the value to set the component to, and ``fixed`` specifies whether
-            the component remains fixed in the fit (default False). Initial values for the unmentioned components
-            are set from a crude slope estimate.
+        init: Initial values of the effective Hamiltonian components. An array specifies all initial
+            values. If a dict is passed, the format is ``{index: value or (value, fixed)}`` where
+            ``index`` is the component index (tuple of ints), ``value`` is the value to set the
+            component to, and ``fixed`` specifies whether the component remains fixed in the fit
+            (default False). Initial values for the unmentioned components are set from a crude
+            slope estimate.
         optimizer: The name of the optax function to use as the optimizer.
         optimizer_args: Arguments to the optimizer.
         max_updates: Maximum number of optimization iterations.
-        convergence: The cutoff value for the change of fidelity within the last ``convergence_window`` iterations.
+        convergence: The cutoff value for the change of fidelity within the last
+            ``convergence_window`` iterations.
         convergence_window: The number of updates to use to compute the mean of change of fidelity.
-        min_fidelity: Final fidelity threshold. If the unitary fidelity of the fit result goes below this
-            value, the fit is repeated over a shortened interval.
-        zero_suppression: Zero-fix the effective Hamiltonian components that appear to vanish at the end of a
-            Gaussian(Square) pulse.
+        min_fidelity: Final fidelity threshold. If the unitary fidelity of the fit result goes below
+            this value, the fit is repeated over a shortened interval.
+        zero_suppression: Zero-fix the effective Hamiltonian components that appear to vanish at the
+            end of a Gaussian(Square) pulse.
         save_result_to: File name (without the extension) to save the extraction results to.
         log_level: Log level.
 
     Returns:
-        An array of Pauli components or a list thereof (if a list is passed to ``frequency`` and/or ``amplitude``).
+        An array of Pauli components or a list thereof (if a list is passed to ``frequency`` and/or
+        ``amplitude``).
     """
     original_log_level = logger.level
     logger.setLevel(log_level)
@@ -106,8 +111,9 @@ def find_heff(
     hgen_drv, tlist, drive_args, time_range = add_drive_for_heff(hgen, qudit, frequency, amplitude,
                                                                  cycles, ramp_cycles)
 
-    sim_result = pulse_sim(hgen_drv, tlist, drive_args=drive_args, frame=frame, solver=pulse_sim_solver,
-                           save_result_to=save_result_to, log_level=log_level)
+    sim_result = pulse_sim(hgen_drv, tlist, drive_args=drive_args, frame=frame,
+                           solver=pulse_sim_solver, save_result_to=save_result_to,
+                           log_level=log_level)
 
     if isinstance(init, np.ndarray):
         hstat = None
@@ -116,10 +122,10 @@ def find_heff(
 
     if isinstance(drive_args, dict):
         components = heff_fit(sim_result, comp_dim=comp_dim, time_range=time_range,
-                              init=init, hstat=hstat, optimizer=optimizer, optimizer_args=optimizer_args,
-                              max_updates=max_updates, convergence=convergence,
-                              convergence_window=convergence_window, min_fidelity=min_fidelity,
-                              zero_suppression=zero_suppression,
+                              init=init, hstat=hstat, optimizer=optimizer,
+                              optimizer_args=optimizer_args, max_updates=max_updates,
+                              convergence=convergence, convergence_window=convergence_window,
+                              min_fidelity=min_fidelity, zero_suppression=zero_suppression,
                               save_result_to=save_result_to, log_level=log_level)
 
     else:
@@ -130,7 +136,8 @@ def find_heff(
         if save_result_to:
             num_digits = int(np.log10(num_tasks)) + 1
             fmt = f'%0{num_digits}d'
-            save_result_paths = list(os.path.join(save_result_to, fmt % i) for i in range(num_tasks))
+            save_result_paths = list(os.path.join(save_result_to, fmt % i)
+                                     for i in range(num_tasks))
         else:
             save_result_paths = [None] * num_tasks
 
@@ -140,14 +147,14 @@ def find_heff(
         kwarg_values = list(zip(logger_names, save_result_paths))
 
         common_kwargs = {'comp_dim': comp_dim, 'time_range': time_range, 'init': init,
-                         'hstat': hstat, 'optimizer': optimizer,
-                         'optimizer_args': optimizer_args, 'max_updates': max_updates,
+                         'hstat': hstat, 'optimizer': optimizer, 'optimizer_args': optimizer_args,
+                         'max_updates': max_updates,
                          'convergence': convergence, 'convergence_window': convergence_window,
                          'min_fidelity': min_fidelity, 'zero_suppression': zero_suppression,
                          'log_level': log_level}
 
-        components = parallel_map(heff_fit, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
-                                  common_kwargs=common_kwargs,
+        components = parallel_map(heff_fit, args=args, kwarg_keys=kwarg_keys,
+                                  kwarg_values=kwarg_values, common_kwargs=common_kwargs,
                                   log_level=log_level, thread_based=True)
 
     logger.setLevel(original_log_level)
@@ -264,9 +271,9 @@ def add_drive_for_heff(
 
 def heff_fit(
     sim_result: Union[PulseSimResult, str],
-    comp_dim: Optional[int] = None,
+    comp_dim: Optional[Union[int, Tuple[int, ...]]] = None,
     time_range: Optional[Tuple[float, float]] = None,
-    init: Optional[Union[np.ndarray, Dict[Tuple[int, ...], Union[float, Tuple[float, bool]]]]] = None,
+    init: Optional[InitSpec] = None,
     hstat: Optional[qtp.Qobj] = None,
     optimizer: str = 'adam',
     optimizer_args: Any = 0.05,
@@ -291,12 +298,13 @@ def heff_fit(
         optimizer: The name of the optax function to use as the optimizer.
         optimizer_args: Arguments to the optimizer.
         max_updates: Maximum number of optimization iterations.
-        convergence: The cutoff value for the change of fidelity within the last ``convergence_window`` iterations.
+        convergence: The cutoff value for the change of fidelity within the last
+            ``convergence_window`` iterations.
         convergence_window: The number of updates to use to compute the mean of change of fidelity.
-        min_fidelity: Final fidelity threshold. If the unitary fidelity of the fit result goes below this
-            value, the fit is repeated over a shortened interval.
-        zero_suppression: Zero-fix the effective Hamiltonian components that appear to vanish at the end of a
-            Gaussian(Square) pulse.
+        min_fidelity: Final fidelity threshold. If the unitary fidelity of the fit result goes below
+            this value, the fit is repeated over a shortened interval.
+        zero_suppression: Zero-fix the effective Hamiltonian components that appear to vanish at the
+            end of a Gaussian(Square) pulse.
         save_result_to: File name (without the extension) to save the extraction results to.
         log_level: Log level.
 
@@ -313,35 +321,36 @@ def heff_fit(
 
         with h5py.File(filename, 'r') as source:
             if comp_dim is None:
-                comp_dim = source['comp_dim'][()]
+                comp_dim = tuple(source['comp_dim'][()])
             if time_range is None:
                 time_range = tuple(sim_result.times[list(source['fit_range'][()])])
 
         if save_result_to:
             save_sim_result(f'{save_result_to}.h5', sim_result)
 
-    num_levels = sim_result.frame.num_levels
-    num_qudits = sim_result.frame.num_qudits
+    frame = sim_result.frame
+
+    num_qudits = frame.num_qudits
 
     if comp_dim is None:
-        comp_dim = num_levels
+        comp_dim = frame.dim
+    elif isinstance(comp_dim, int):
+        comp_dim = (comp_dim,) * num_qudits
 
     if time_range is None:
         time_range = (0., sim_result.times[-1])
-
-    dim = (comp_dim,) * num_qudits
 
     ## Time bins for the GaussianSquare plateau
     flat_start = np.searchsorted(sim_result.times, time_range[0], 'right') - 1
     flat_end = np.searchsorted(sim_result.times, time_range[1], 'right') - 1
 
     ## Truncate the unitaries if comp_dim is less than the system dimension
-    time_evolution = truncate_matrix(sim_result.states, num_qudits, num_levels, comp_dim)
+    time_evolution = truncate_matrix(sim_result.states, frame.dim, comp_dim)
 
     ## Find the initial values for the fit
     logger.info('Determining the initial values for Heff and offset..')
 
-    heff_init, fixed, offset_init = _find_init(time_evolution, sim_result.times, dim,
+    heff_init, fixed, offset_init = _find_init(time_evolution, sim_result.times, comp_dim,
                                                init, hstat, sim_result.frame, zero_suppression,
                                                flat_start, flat_end, logger)
     # Fix the identity component because its gradient is identically zero
@@ -368,7 +377,7 @@ def heff_fit(
         tlist = tlist_full[fit_start:fit_end + 1] - tlist_full[fit_start]
 
         logger.info('Maximizing mean fidelity..')
-        result = _maximize_fidelity(time_evolution_in_range, tlist, dim,
+        result = _maximize_fidelity(time_evolution_in_range, tlist, comp_dim,
                                     heff_init, fixed, offset_init,
                                     optimizer, optimizer_args, max_updates,
                                     convergence, convergence_window,
@@ -389,7 +398,8 @@ def heff_fit(
             break
         else:
             logger.info('Minimum fidelity value: %f', minf)
-            logger.info('Fit attempt %d (fit_end=%d) did not produce a valid result.', attempt, fit_end)
+            logger.info('Fit attempt %d (fit_end=%d) did not produce a valid result.',
+                        attempt, fit_end)
 
             fit_end = int(fit_end / 1.5)
 
@@ -428,7 +438,7 @@ def _find_init(
     time_evolution: np.ndarray,
     tlist: np.ndarray,
     dim: Tuple[int, ...],
-    init: Union[np.ndarray, Dict[Tuple[int, ...], Union[float, Tuple[float, bool]]], None],
+    init: Union[InitSpec, None],
     hstat: Union[qtp.Qobj, None],
     sim_frame: SystemFrame,
     zero_suppression: bool,
@@ -462,7 +472,8 @@ def _find_init(
             # S = sum_{i=0}^{L} C_i = a t_L / L * 1/2 * L * (L + 1) + b (L + 1)
             # => a = (S / (L + 1) - b) * 2/t_L
 
-            heff_init = np.sum(generator_compos[flat_start:last_valid_tidx + 1], axis=0) / (last_valid_tidx - flat_start + 1)
+            heff_init = np.sum(generator_compos[flat_start:last_valid_tidx + 1], axis=0)
+            heff_init /= last_valid_tidx - flat_start + 1
             heff_init -= generator_compos[flat_start]
             heff_init *= 2. / (tlist[last_valid_tidx] - tlist[flat_start])
 
@@ -478,8 +489,7 @@ def _find_init(
 
         states, _ = exponentiate_hstat(hstat, parameters, logger.name)
 
-        time_evolution_nodrv = truncate_matrix(states, sim_frame.num_qudits, sim_frame.num_levels,
-                                               dim[0])
+        time_evolution_nodrv = truncate_matrix(states, sim_frame.dim, dim)
         unitaries_nodrv = closest_unitary(time_evolution_nodrv)
         generator_nodrv = matrix_angle(unitaries_nodrv)
         nodrv_compos = paulis.components(-generator_nodrv, dim=dim).real

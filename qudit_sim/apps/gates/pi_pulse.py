@@ -1,19 +1,20 @@
-"""Calibrate a π pulse."""
+"""Calibration of a π pulse."""
 
-from typing import Hashable, Tuple
 import logging
+from typing import Tuple
 import numpy as np
 import scipy.optimize as sciopt
 
-import rqutils.paulis as paulis
 from rqutils.math import matrix_exp, matrix_angle
+import rqutils.paulis as paulis
 
+from .components import gate_components
+from ...basis import change_basis
+from ...expression import Parameter
 from ...hamiltonian import HamiltonianBuilder
 from ...pulse import Drag
-from ...expression import Parameter
-from ...pulse_sim import build_hamiltonian, compose_parameters, simulate_drive_odeint, simulate_drive_sesolve
-from ...basis import change_basis
-from .components import gate_components
+from ...pulse_sim import (build_hamiltonian, compose_parameters, simulate_drive_odeint,
+                          simulate_drive_sesolve)
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ unit_time = 0.2e-9
 
 def pi_pulse(
     hgen: HamiltonianBuilder,
-    qudit_id: Hashable,
+    qudit_id: str,
     level: int,
     angle: float = np.pi,
     duration: float = unit_time * 160,
@@ -63,9 +64,12 @@ def pi_pulse(
     hgen = hgen.copy(clear_drive=True)
 
     qudit_index = hgen.qudit_index(qudit_id)
-    spectator_indices = tuple(iq for iq in range(hgen.num_qudits) if iq != qudit_index)
+    target_params = hgen.qudit_params(qudit_id)
 
-    target_single = np.eye(hgen.num_levels, dtype=complex)
+    spectator_indices = tuple(iq for iq in range(hgen.num_qudits) if iq != qudit_index)
+    spectator_size = np.prod(np.array(hgen.system_dim())[list(spectator_indices)])
+
+    target_single = np.eye(target_params.num_levels, dtype=complex)
     pauli_x = paulis.paulis(2)[1]
     target_single[level:level + 2, level:level + 2] = matrix_exp(0.5j * angle * pauli_x, hermitian=-1)
     target = 1.
@@ -73,9 +77,10 @@ def pi_pulse(
         if iq == qudit_index:
             target = np.kron(target, target_single)
         else:
-            target = np.kron(target, np.eye(hgen.num_levels))
+            num_levels = hgen.qudit_params(hgen.qudit_id(iq)).num_levels
+            target = np.kron(target, np.eye(num_levels))
 
-    free_diags = list(iq for iq in range(hgen.num_levels) if iq not in (level, level + 1))
+    free_diags = list(range(level)) + list(range(level + 2, target_params.num_levels))
 
     # Pulse frequency
     drive_frequency = hgen.dressed_frequencies(qudit_id)[level]
@@ -86,15 +91,17 @@ def pi_pulse(
     # ∫H(t)dt = A * duration/2 * X
     # For a resonant drive, A = drive_base * amplitude * drive_weight / 2
     # Therefore amplitude = 2pi / (duration * drive_base * drive_weight)
-    params = hgen.qudit_params(qudit_id)
-    amp_estimate = 2. * angle / duration / params.drive_amplitude / params.drive_weight[level]
+    amp_estimate = 2. * angle / duration / target_params.drive_amplitude
+    amp_estimate /= target_params.drive_weight[level]
 
     # Initial beta estimate (ref. Gambetta et al. PRA 83 012308 eqn. 5.12 & text after 5.13)
     beta_estimate = 0.
-    if level < hgen.num_levels - 1:
-        beta_estimate += (params.drive_weight[level + 1] / params.drive_weight[level]) ** 2 / params.anharmonicity
+    if level < target_params.num_levels - 1:
+        weight_ratio = target_params.drive_weight[level + 1] / target_params.drive_weight[level]
+        beta_estimate += weight_ratio ** 2 / target_params.anharmonicity
     if level > 0:
-        beta_estimate -= (params.drive_weight[level - 1] / params.drive_weight[level]) ** 2 / params.anharmonicity
+        weight_ratio = target_params.drive_weight[level - 1] / target_params.drive_weight[level]
+        beta_estimate -= weight_ratio ** 2 / target_params.anharmonicity
     beta_estimate *= -1. / 4.
 
     amp = Parameter('amp')
@@ -128,10 +135,11 @@ def pi_pulse(
         states, _ = simulate_drive(hamiltonian, parameters, drive_args)
 
         # Take the prod with the target and extract the diagonals
-        diag_prod = np.diag(states[-1] @ target).reshape((hgen.num_levels,) * hgen.num_qudits)
+        diag_prod = np.diag(states[-1] @ target).reshape(hgen.system_dim())
         # Integrate out the non-participating qudits
-        norm_ptr = np.sum(diag_prod, axis=spectator_indices) / (hgen.num_levels ** (hgen.num_qudits - 1))
-        # Compute the fidelity (sum of abs-squared of commuting diagonals + abs-square of the trace of target levels)
+        norm_ptr = np.sum(diag_prod, axis=spectator_indices) / spectator_size
+        # Compute the fidelity (sum of abs-squared of commuting diagonals + abs-square of the trace
+        # of target levels)
         fidelity = np.sum(np.square(np.abs(norm_ptr[free_diags])))
         fidelity += np.square(np.abs(np.sum(norm_ptr[level:level + 2]))) / 2.
 

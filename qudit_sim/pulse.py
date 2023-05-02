@@ -10,13 +10,12 @@ Classes in this module represent pulse envelopes. Subclasses of Pulse can be pas
 class (``sequence`` parameter).
 """
 
-from typing import Union, Optional, Any, Callable, Tuple
-from types import ModuleType
 from numbers import Number
+from types import ModuleType
+from typing import Any, Callable, Optional, Tuple, Union
 import numpy as np
 
-from .expression import (ParameterExpression, Constant, TimeFunction,
-                         TimeType, ReturnType)
+from .expression import Constant, ParameterExpression, ReturnType, TimeFunction, TimeType
 
 class Pulse(TimeFunction):
     """Base class for all pulse shapes.

@@ -7,14 +7,14 @@ Pulse sequence (:mod:`qudit_sim.pulse_sequence`)
 
 Implementation of pulse sequence.
 """
-
-from typing import Union, Any, Dict
 import copy
+from typing import Any, Dict, Union
 import numpy as np
 
-from .expression import TimeFunction
 from .drive import Delay
+from .expression import TimeFunction
 from .pulse import Pulse
+
 
 class PulseSequence(list):
     """Pulse sequence.

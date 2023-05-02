@@ -1,10 +1,13 @@
+"""Utility functions used in find_heff."""
+
 from typing import Optional
 from types import ModuleType
 import numpy as np
 
 from rqutils import ArrayType
-import rqutils.paulis as paulis
 from rqutils.math import matrix_exp
+import rqutils.paulis as paulis
+
 
 def unitary_subtraction(
     time_evolution: ArrayType,

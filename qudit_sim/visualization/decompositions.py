@@ -1,27 +1,31 @@
 """Visualizations of Pauli decompositions of Hamiltonians and gates."""
 
-from typing import Union, List, Optional, Tuple
-import numpy as np
+from typing import List, Optional, Tuple, Union
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-
+import jax
+import jax.numpy as jnp
+import optax
+import numpy as np
 try:
     get_ipython()
 except NameError:
-    has_ipython = False
+    HAS_IPYTHON = False
     PrintReturnType = str
 else:
-    has_ipython = True
+    HAS_IPYTHON = True
     from IPython.display import Latex
     PrintReturnType = Latex
 
 from rqutils.math import matrix_angle
-from rqutils.qprint import QPrintPauli
 import rqutils.paulis as paulis
+from rqutils.qprint import QPrintPauli
 
-from ..sim_result import PulseSimResult
-from ..scale import FrequencyScale
 from ..basis import change_basis, matrix_labels
+from ..config import config
+from ..scale import FrequencyScale
+from ..sim_result import PulseSimResult
+
 
 def print_components(
     components: np.ndarray,
@@ -40,8 +44,8 @@ def print_components(
         uncertainties: Array of component uncertainties.
         symbol: Symbol to use instead of :math:`\lambda` for the matrices.
         precision: Number of digits below the decimal point to show.
-        threshold: Ignore terms with absolute components below this value relative to the given scale
-            (if >0) or to the maximum absolute component (if <0).
+        threshold: Ignore terms with absolute components below this value relative to the given
+            scale (if >0) or to the maximum absolute component (if <0).
         lhs_label: Left-hand-side label.
         scale: Normalize the components with the frequency scale. If None, components are taken
             to be dimensionless. If `FrequencyScale.auto`, scale is found from the maximum absolute
@@ -50,7 +54,8 @@ def print_components(
         basis: Represent the components in the given matrix basis.
 
     Returns:
-        A representation object for a LaTeX expression or an expression string for the effective Hamiltonian.
+        A representation object for a LaTeX expression or an expression string for the effective
+        Hamiltonian.
     """
     if basis is not None:
         components = change_basis(components, to_basis=basis)
@@ -105,7 +110,7 @@ def print_components(
         uncert = QPrintPauli(unc, amp_format=f'.{precision}f',
                              amp_cutoff=0., symbol=symbol)
 
-        if has_ipython:
+        if HAS_IPYTHON:
             return Latex(fr'\begin{{split}} {lhs_label} & = {central.latex(env=None)} \\'
                          + fr' & \pm {uncert.latex(env=None)} \end{{split}}')
         else:
@@ -115,7 +120,7 @@ def print_components(
         pobj = QPrintPauli(components, amp_format=f'.{precision}f', amp_cutoff=amp_cutoff,
                            lhs_label=lhs_label, symbol=symbol)
 
-        if has_ipython:
+        if HAS_IPYTHON:
             return Latex(pobj.latex())
         else:
             return str(pobj)
@@ -136,8 +141,8 @@ def plot_components(
         components: Array of Pauli components returned by find_heff.
         uncertainties: Array of component uncertainties.
         symbol: Symbol to use instead of the numeric indices for the matrices.
-        threshold: Ignore terms with absolute components below this value relative to the given scale
-            (if >0) or to the maximum absolute component (if <0).
+        threshold: Ignore terms with absolute components below this value relative to the given
+            scale (if >0) or to the maximum absolute component (if <0).
         scale: Normalize the components with the frequency scale. If None, components are taken
             to be dimensionless. If `FrequencyScale.auto`, scale is found from the maximum absolute
             value of the components. String `'pi'` is also allowed, in which case the components are
@@ -255,8 +260,8 @@ def plot_evolution(
     result object or individually.
 
     Args:
-        sim_result: Simulation result object. If not None, ``time_evolution``, ``tlist``, and ``dim``
-            are ignored.
+        sim_result: Simulation result object. If not None, ``time_evolution``, ``tlist``, and
+            ``dim`` are ignored.
         time_evolution: Time evolution unitaries.
         tlist: Time points.
         dim: Operator dimension.
@@ -387,13 +392,6 @@ def plot_evolution(
 
     return select_components, fig
 
-
-
-import jax
-import jax.numpy as jnp
-import optax
-
-from ..config import config
 
 def smooth_components(
     time_evolution: np.ndarray,

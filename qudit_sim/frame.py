@@ -8,8 +8,8 @@ Frame (:mod:`qudit_sim.frame`)
 See :doc:`/hamiltonian` for theoretical background.
 """
 
-from typing import Union, Dict, Hashable, Sequence, Tuple, Optional
 from dataclasses import dataclass
+from typing import Dict, Optional, Sequence, Tuple, Union
 import numpy as np
 import qutip as qtp
 
@@ -19,7 +19,11 @@ class QuditFrame:
     frequency: np.ndarray
     phase: np.ndarray
 
-FrameSpec = Union[str, Dict[Hashable, QuditFrame], Sequence[QuditFrame]]
+    @property
+    def num_levels(self) -> int:
+        return frequency.shape[0] + 1
+
+FrameSpec = Union[str, Dict[str, QuditFrame], Sequence[QuditFrame]]
 
 class SystemFrame(dict):
     """Frame specification of a multi-qudit system."""
@@ -46,12 +50,8 @@ class SystemFrame(dict):
         return len(self)
 
     @property
-    def num_levels(self) -> int:
-        return list(self.values())[0].frequency.shape[0] + 1
-
-    @property
     def dim(self) -> Tuple[int, ...]:
-        return (self.num_levels,) * self.num_qudits
+        return tuple(qudit_frame.num_levels for qudit_frame in self.values())
 
     @property
     def frequencies(self) -> np.ndarray:
@@ -62,7 +62,7 @@ class SystemFrame(dict):
         return np.array(list(qudit_frame.phase for qudit_frame in self.values()))
 
     @staticmethod
-    def compute_frame(frame_name: str, hgen: 'HamiltonianBuilder') -> Dict[Hashable, QuditFrame]:
+    def compute_frame(frame_name: str, hgen: 'HamiltonianBuilder') -> Dict[str, QuditFrame]:
         """Compute the frequencies of a named frame."""
         drive_frame = False
 
@@ -84,7 +84,8 @@ class SystemFrame(dict):
         if frame_name == 'qudit':
             frequencies = hgen.free_frequencies()
         elif frame_name == 'lab':
-            frequencies = {qudit_id: np.zeros(hgen.num_levels - 1) for qudit_id in qudit_ids}
+            frequencies = {qid: np.zeros(hgen.qudit_params(qid).num_levels - 1)
+                           for qid in qudit_ids}
         elif frame_name == 'dressed':
             frequencies = hgen.dressed_frequencies()
         elif frame_name.startswith('noiz'):
@@ -100,16 +101,17 @@ class SystemFrame(dict):
         if drive_frame:
             for qid, drives in hgen.drive().items():
                 if len(drives) == 1:
-                    frequencies[qid] = np.full(hgen.num_levels - 1, drives[0].frequency)
+                    frequencies[qid] = np.full(hgen.qudit_params(qid).num_levels - 1,
+                                               drives[0].frequency)
                 elif len(drives) != 0:
                     raise RuntimeError(f'Qudit {qid} has more than one drive terms')
 
-        return {qudit_id: QuditFrame(frequencies[qudit_id], np.zeros(hgen.num_levels - 1))
+        return {qid: QuditFrame(frequencies[qid], np.zeros(hgen.qudit_params(qid).num_levels - 1))
                 for qudit_id in qudit_ids}
 
     def set_frequency(
         self,
-        qudit_id: Hashable,
+        qudit_id: str,
         frequency: np.ndarray
     ):
         current = self[qudit_id]
@@ -117,7 +119,7 @@ class SystemFrame(dict):
 
     def set_phase(
         self,
-        qudit_id: Hashable,
+        qudit_id: str,
         phase: np.ndarray
     ):
         current = self[qudit_id]
@@ -133,25 +135,31 @@ class SystemFrame(dict):
 
         .. math::
 
-            U_{f}(t) = \bigotimes_j \exp \left[ i \sum_l \left( \Xi_j^l t + \Phi_j^l \right) | l \rangle_j \langle l |_j \right]
+            U_{f}(t) = \bigotimes_j \exp \left[ i \sum_l \left( \Xi_j^l t + \Phi_j^l \right)
+                                                         | l \rangle_j \langle l |_j \right]
 
         to
 
         .. math::
 
-            U_{g}(t) = \bigotimes_j \exp \left[ i \sum_l \left( \Eta_j^l t + \Psi_j^l \right) | l \rangle_j \langle l |_j \right]
+            U_{g}(t) = \bigotimes_j \exp \left[ i \sum_l \left( \Eta_j^l t + \Psi_j^l \right)
+                                                         | l \rangle_j \langle l |_j \right]
 
         is effected by
 
         .. math::
 
-            V_{gf}(t) = U_g(t) U_f^{\dagger}(t) = \bigotimes_j \exp \left[ i \sum_l \left\{ (\Eta_j^l - \Xi_j^l) t + (\Psi_j^l - \Phi_j^l) \right\} | l \rangle_j \langle l |_j \right].
+            V_{gf}(t) = U_g(t) U_f^{\dagger}(t) = \bigotimes_j \exp \left[
+                                                  i \sum_l \left\{ (\Eta_j^l - \Xi_j^l) t
+                                                  + (\Psi_j^l - \Phi_j^l) \right\}
+                                                  | l \rangle_j \langle l |_j \right].
 
         Args:
             from_frame: Frame to change from.
 
         Returns:
-            Flattened arrays corresponding to :math:`[\sum_{j} \Xi_j^{l_j}]_{\{l_j\}}` and :math:`[\sum_{j} \Phi_j^{l_j}]_{\{l_j\}}`.
+            Flattened arrays corresponding to :math:`[\sum_{j} \Xi_j^{l_j}]_{\{l_j\}}` and
+            :math:`[\sum_{j} \Phi_j^{l_j}]_{\{l_j\}}`.
         """
         if not isinstance(from_frame, SystemFrame):
             from_frame = SystemFrame(from_frame)
@@ -159,8 +167,12 @@ class SystemFrame(dict):
         frequencies = self.frequencies - from_frame.frequencies
         phases = self.phases - from_frame.phases
 
-        energies = np.concatenate((np.zeros(self.num_qudits)[:, None], np.cumsum(frequencies, axis=1)), axis=1)
-        offsets = np.concatenate((np.zeros(self.num_qudits)[:, None], np.cumsum(phases, axis=1)), axis=1)
+        energies = np.concatenate((np.zeros(self.num_qudits)[:, None],
+                                   np.cumsum(frequencies, axis=1)),
+                                  axis=1)
+        offsets = np.concatenate((np.zeros(self.num_qudits)[:, None],
+                                  np.cumsum(phases, axis=1)),
+                                 axis=1)
 
         en_diagonal = add_outer_multi(energies)
         offset_diagonal = add_outer_multi(offsets)
@@ -179,16 +191,17 @@ class SystemFrame(dict):
 
         Args:
             tlist: 1D array of shape ``(T,)`` representing the time points.
-            obj: Qobj or an array of shape either ``(D)`` (state), ``(T, D)`` (state evolution), ``(T, D, D)``
-                (evolution operator, time-dependent Hamiltonian, or an observable), ``(D, D)``
-                (evolution operator for a single time point, Hamiltonian, or an observable), ``(N, D, D)``
-                (multiple observables), or ``(N, T, D, D)`` (multiple time-dependent observables), where ``D``
-                is the dimension of the quantum system (``num_levels ** num_qudits``) and ``N`` is the number
-                of observables.
+            obj: Qobj or an array of shape either ``(D)`` (state), ``(T, D)`` (state evolution),
+                ``(T, D, D)`` (evolution operator, time-dependent Hamiltonian, or an observable),
+                ``(D, D)`` (evolution operator for a single time point, Hamiltonian, or an
+                observable), ``(N, D, D)`` (multiple observables), or ``(N, T, D, D)``
+                (multiple time-dependent observables), where ``D`` is the dimension of the quantum
+                system (``prod(system_dim)``) and ``N`` is the number of observables.
             from_frame: Frame to change from.
-            objtype: ``'state'``, ``'evolution'``, ``'hamiltonian'``, or ``'observable'``. Ignored when
-                the type can be unambiguously inferred from the shape of ``obj``.
-            t0: Initial time for the frame change of the evolution operator. If None, ``tlist[0]`` is used.
+            objtype: ``'state'``, ``'evolution'``, ``'hamiltonian'``, or ``'observable'``. Ignored
+                when the type can be unambiguously inferred from the shape of ``obj``.
+            t0: Initial time for the frame change of the evolution operator. If None, ``tlist[0]``
+                is used.
 
         Returns:
             An array representing the frame-changed object.
@@ -200,7 +213,7 @@ class SystemFrame(dict):
                 obj = obj.full()
 
         ## Validate and determine the object shape & type
-        state_dim = self.num_levels ** self.num_qudits
+        state_dim = np.prod(list(qudit_frame.num_levels for qudit_frame in self.values()))
         shape_consistent = True
         type_valid = True
 
@@ -249,7 +262,7 @@ class SystemFrame(dict):
                     shape_consistent = False
 
                 if obj.shape[0] != tlist.shape[0]:
-                    # Ambiguity - we may be talking about T observables, but that's rather unprobable
+                    # Ambiguity - we may be talking about T observables, but that's rather improbable
                     obj = obj[:, None, ...]
                     final_shape = (obj.shape[0], tlist.shape[0]) + obj.shape[1:]
 
@@ -269,7 +282,8 @@ class SystemFrame(dict):
         if not type_valid:
             raise ValueError(f'Invalid objtype {objtype} for an obj of shape {obj.shape}')
         if not shape_consistent:
-            raise ValueError(f'Inconsistent obj shape {obj.shape} for objtype {objtype} and tlist length {tlist.shape[0]}')
+            raise ValueError(f'Inconsistent obj shape {obj.shape} for objtype {objtype} and tlist'
+                             f' length {tlist.shape[0]}')
 
         if not isinstance(from_frame, SystemFrame):
             from_frame = SystemFrame(from_frame)
@@ -292,7 +306,8 @@ class SystemFrame(dict):
             obj = cof_op_diag[:, :, None] * obj * cof_op_diag_t0_conj
 
         elif objtype == 'hamiltonian':
-            obj = cof_op_diag[:, :, None] * obj * cof_op_diag[:, None, :].conjugate() - np.diag(en_diagonal)
+            obj = cof_op_diag[:, :, None] * obj * cof_op_diag[:, None, :].conjugate()
+            obj -= np.diag(en_diagonal)
 
         elif objtype == 'observable':
             obj = cof_op_diag[:, :, None] * obj * cof_op_diag[:, None, :].conjugate()

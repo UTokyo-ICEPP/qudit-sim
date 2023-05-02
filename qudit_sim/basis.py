@@ -1,8 +1,11 @@
-from typing import List, Union, Optional
+"""Functions to manipulate Pauli matrix bases."""
+
 from collections import defaultdict
+from typing import List, Union, Optional
 import numpy as np
 
 import rqutils.paulis as paulis
+
 
 def change_basis(
     components: np.ndarray,
@@ -66,11 +69,11 @@ def change_basis(
     Returns:
         Basis-converted Pauli components.
     """
-    if isinstance(to_basis, np.ndarray):
-        conversion = to_basis
-
-    elif to_basis == from_basis:
+    if to_basis == from_basis:
         return components
+
+    if isinstance(to_basis, (np.ndarray, list)):
+        conversions = to_basis
 
     else:
         if to_basis != 'gell-mann' and from_basis != 'gell-mann':
@@ -82,8 +85,7 @@ def change_basis(
 
         # Input sanity check
         dim = np.around(np.sqrt(components.shape[-num_qudits:])).astype(int)
-        nlevels = int(dim[0])
-        if np.any(dim != nlevels) or not np.allclose(np.square(dim), components.shape[-num_qudits:]):
+        if not np.allclose(np.square(dim), components.shape[-num_qudits:]):
             raise ValueError(f'Invalid shape of components array {components.shape}')
 
         if to_basis == 'gell-mann':
@@ -93,27 +95,26 @@ def change_basis(
             conversion_id = f'to_{to_basis}'
             basis = to_basis
 
-        repository = _conversion_matrices[conversion_id]
+        conversions = list()
+        for nlevels in dim:
+            try:
+                conversion = _conversion_matrices[conversion_id][nlevels]
+            except KeyError:
+                conversion = _make_conversion_matrix(basis, nlevels)
 
-        try:
-            conversion = repository[nlevels]
-        except KeyError:
-            conversion = _make_conversion_matrix(basis, nlevels)
+                _conversion_matrices[f'to_{basis}'][nlevels] = conversion
+                _conversion_matrices[f'from_{basis}'][nlevels] = np.linalg.inv(conversion)
 
-            _conversion_matrices[f'to_{basis}'][nlevels] = conversion
-            _conversion_matrices[f'from_{basis}'][nlevels] = np.linalg.inv(conversion)
-
-            conversion = repository[nlevels]
+            conversions.append(conversion)
 
     converted = components
     for iq in range(-num_qudits, 0):
-        converted = np.moveaxis(np.tensordot(conversion, converted, (1, iq)), 0, iq)
+        converted = np.moveaxis(np.tensordot(conversions[iq], converted, (1, iq)), 0, iq)
 
     if components.dtype.kind == 'f':
         return converted.real
-    else:
-        return converted
 
+    return converted
 
 _conversion_matrices = defaultdict(dict)
 

@@ -1,26 +1,25 @@
-from typing import Tuple, Union
 from types import ModuleType
+from typing import Tuple, Union
 import numpy as np
 
 from rqutils import ArrayType
 
 def truncate_matrix(
     matrix: np.ndarray,
-    num_qudits: int,
-    original_dim: int,
-    reduced_dim: int,
+    original_dim: Union[int, Tuple[int, ...]],
+    reduced_dim: Union[int, Tuple[int, ...]]
 ) -> np.ndarray:
     """Truncate a multi-qudit operator matrix.
 
-    The input matrix can have extra dimensions in front. The last two dimensions must have dimensions
-    ``(original_dim ** num_qudits, original_dim ** num_qudits)``, and it will be truncated to
-    ``(reduced_dim ** num_qudits, reduced_dim ** num_qudits)`` taking the first ``reduced_dim`` levels
-    in each qudit space.
+    The input matrix can have extra dimensions in front. The last two dimensions must have
+    dimensions ``(prod(original_dim), prod(original_dim))``, and it will be truncated to
+    ``(prod(reduced_dim), prod(reduced_dim))`` taking the first ``reduced_dim`` levels in each qudit
+    space.
 
     Args:
         matrix: The input matrix or an array of matrices.
-        original_dim: Original number of levels of each single-qudit space.
-        reduced_dim: Truncated number of levels.
+        original_dim: Original numbers of levels of each single-qudit space.
+        reduced_dim: Truncated numbers of levels.
 
     Returns:
         A truncated ndarray.
@@ -28,19 +27,23 @@ def truncate_matrix(
     if original_dim == reduced_dim:
         return matrix
 
-    elif original_dim < reduced_dim:
-        raise ValueError(f'Cannot expand matrix dimension from {original_dim} to {reduced_dim}')
+    if isinstance(original_dim, int):
+        original_dim = (original_dim,)
+    if isinstance(reduced_dim, int):
+        reduced_dim = (reduced_dim,)
 
-    if matrix.shape[-2:] != (original_dim ** num_qudits,) * 2:
+    if any(orig < reduc for orig, reduc in zip(original_dim, reduced_dim)):
+        raise ValueError(f'Cannot expand matrix dimension from {original_dim} to {reduced_dim}')
+    if matrix.shape[-2:] != (np.prod(original_dim),) * 2:
         raise ValueError('Matrix shape is inconsistent')
 
     extra_dims = matrix.shape[:-2]
 
-    truncation = (slice(0, reduced_dim),) * (num_qudits * 2)
+    matrix = matrix.reshape((-1,) + original_dim + original_dim)
 
-    matrix = matrix.reshape((-1,) + (original_dim,) * (num_qudits * 2))
+    truncation = tuple(slice(0, dim) for dim in reduced_dim) * 2
     trunc_matrix = matrix[(slice(None),) + truncation]
-    trunc_matrix = trunc_matrix.reshape(extra_dims + (reduced_dim ** num_qudits,) * 2)
+    trunc_matrix = trunc_matrix.reshape(extra_dims + reduced_dim + reduced_dim)
 
     return trunc_matrix
 
@@ -79,5 +82,5 @@ def closest_unitary(
         norm_tr = npmod.trace(matrix @ conjugate_unitary, axis1=-2, axis2=-1) / unitary.shape[-1]
         fidelity = npmod.square(norm_tr.real) + npmod.square(norm_tr.imag)
         return unitary, fidelity
-    else:
-        return unitary
+
+    return unitary

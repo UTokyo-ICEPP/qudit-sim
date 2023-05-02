@@ -1,30 +1,31 @@
 """Effective Hamiltonian visualization."""
 
-from typing import Tuple, List, Sequence, Optional, Dict, Hashable, Union, Any
 import logging
-import numpy as np
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import h5py
-import scipy.optimize as sciopt
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+import numpy as np
+import scipy.optimize as sciopt
 from matplotlib.markers import MarkerStyle
-
 try:
     get_ipython()
 except NameError:
-    has_ipython = False
+    HAS_IPYTHON = False
 else:
-    has_ipython = True
+    HAS_IPYTHON = True
     from IPython.display import Latex
 
-import rqutils.paulis as paulis
 from rqutils.math import matrix_angle
+import rqutils.paulis as paulis
 
-from ..apps.heff_tools import unitary_subtraction, heff_fidelity
-from ..scale import FrequencyScale
-from ..basis import change_basis, diagonals, matrix_labels
-from ..unitary import truncate_matrix, closest_unitary
 from .decompositions import print_components, plot_evolution
+from ..apps.heff_tools import unitary_subtraction, heff_fidelity
+from ..basis import change_basis, diagonals, matrix_labels
+from ..scale import FrequencyScale
+from ..sim_result import load_sim_result
+from ..unitary import truncate_matrix, closest_unitary
+
 
 def inspect_heff_fit(
     filename: str,
@@ -50,11 +51,9 @@ def inspect_heff_fit(
     Returns:
         A list of two (three if metrics=True) figures.
     """
+    sim_result = load_sim_result(filename)
     with h5py.File(filename, 'r') as source:
-        frame = source['frame'][()]
-        time_evolution = source['states'][()]
-        tlist = source['times'][()]
-        comp_dim = int(source['comp_dim'][()])
+        comp_dim = tuple(source['comp_dim'][()])
         fit_start, fit_end = source['fit_range'][()]
         components = source['components'][()]
         offset_components = source['offset_components'][()]
@@ -68,28 +67,31 @@ def inspect_heff_fit(
             heff_grads = None
             offset_grads = None
 
+    tlist = sim_result.times
+    time_evolution = sim_result.states
+    frame = sim_result.frame
+
     num_qudits = frame.shape[0]
     num_sim_levels = frame.shape[-1] + 1
-    dim = (comp_dim,) * num_qudits
 
     tlist_fit = tlist[fit_start:fit_end + 1] - tlist[fit_start]
 
     if tscale is FrequencyScale.auto:
         tscale = FrequencyScale.find_time_scale(tlist[-1])
 
-    time_evolution_trunc = truncate_matrix(time_evolution, num_qudits, num_sim_levels, comp_dim)
-
-    if comp_dim != num_sim_levels:
+    if comp_dim != frame.dim:
+        time_evolution_trunc = truncate_matrix(time_evolution, frame.dim, comp_dim)
         time_evolution, trunc_fidelity = closest_unitary(time_evolution_trunc, with_fidelity=True)
     else:
-        trunc_fidelity = np.ones(time_evolution.shape[0])
+        time_evolution_trunc = time_evolution
+        trunc_fidelity = np.ones(tlist.shape[0])
 
     figures = []
 
     ## First figure: original time evolution and Heff
     indices, fig_generator = plot_evolution(time_evolution=time_evolution,
                                             tlist=tlist,
-                                            dim=dim,
+                                            dim=comp_dim,
                                             threshold=threshold,
                                             select_components=select_components,
                                             eigvals=True,
@@ -136,11 +138,12 @@ def inspect_heff_fit(
     fig_generator.legend(handles, labels, 'upper right')
 
     ## Second figure: subtracted unitaries
-    target = unitary_subtraction(time_evolution[fit_start:fit_end + 1], components_orig, offset_components_orig, tlist_fit)
+    target = unitary_subtraction(time_evolution[fit_start:fit_end + 1], components_orig,
+                                 offset_components_orig, tlist_fit)
 
     _, fig_target = plot_evolution(time_evolution=target,
                                    tlist=(tlist_fit + tlist[fit_start]),
-                                   dim=dim,
+                                   dim=comp_dim,
                                    threshold=threshold,
                                    select_components=select_components,
                                    align_ylim=align_ylim,
@@ -156,8 +159,8 @@ def inspect_heff_fit(
     fig_metrics.suptitle('Fit metrics', fontsize=16)
 
     # fidelity
-    full_fidelity = heff_fidelity(time_evolution_trunc[fit_start:fit_end + 1], components_orig, offset_components_orig,
-                                  tlist_fit)
+    full_fidelity = heff_fidelity(time_evolution_trunc[fit_start:fit_end + 1], components_orig,
+                                  offset_components_orig, tlist_fit)
     xval = (tlist_fit + tlist[fit_start]) * tscale.frequency_value
 
     ax = axes[0]
@@ -182,8 +185,10 @@ def inspect_heff_fit(
         ax.set_title('Gradient evolution')
         ax.set_xlabel('steps')
         ax.set_ylabel('max(abs(grad))')
-        ax.plot(np.amax(np.abs(heff_grads.reshape(heff_grads.shape[0], -1)), axis=1), label='$H_{eff}$')
-        ax.plot(np.amax(np.abs(offset_grads.reshape(offset_grads.shape[0], -1)), axis=1), label='Offset')
+        ax.plot(np.amax(np.abs(heff_grads.reshape(heff_grads.shape[0], -1)), axis=1),
+                label='$H_{eff}$')
+        ax.plot(np.amax(np.abs(offset_grads.reshape(offset_grads.shape[0], -1)), axis=1),
+                label='Offset')
         ax.axhline(0., color='black', linewidth=0.5)
         ax.legend()
 
@@ -206,12 +211,13 @@ def plot_amplitude_scan(
 ) -> Tuple[mpl.figure.Figure, np.ndarray, FrequencyScale, FrequencyScale]:
     """Plot the result of the amplitude scan.
 
-    See the last example in examples/validation/heff.ipynb for how to prepare the inputs to this function.
+    See the last example in examples/validation/heff.ipynb for how to prepare the inputs to this
+    function.
 
-    This function performs polynomial fits to the amplitude dependences of the Pauli components and returns
-    the best-fit parameters as well as adds the fit curves to the plots. Amplitude variable in the polynomials
-    are normalized to O(1) to avoid numerical errors. The third and fourth return values of this function
-    represent the amplitude and component scales used for the normalization.
+    This function performs polynomial fits to the amplitude dependences of the Pauli components and
+    returns the best-fit parameters as well as adds the fit curves to the plots. Amplitude variable
+    in the polynomials are normalized to O(1) to avoid numerical errors. The third and fourth return
+    values of this function represent the amplitude and component scales used for the normalization.
 
     Args:
         amplitudes: Array of drive amplitudes (assumed real)
@@ -220,7 +226,8 @@ def plot_amplitude_scan(
             `0.01 * compo_scale.pulsatance_value`.
         amp_scale: Scale of the drive amplitude.
         compo_scale: Scale of the components.
-        max_poly_order: Maximum polynomial order for fitting the amplitude dependencies of the components.
+        max_poly_order: Maximum polynomial order for fitting the amplitude dependencies of the
+            components.
         use_all_powers: If True, do not restrict polynomial fit to odd / even powers
             depending on the diagonality of the Hamiltonian component.
         select_components: List of Pauli components to plot.
@@ -368,7 +375,7 @@ def _poly_odd(x, *args):
 def _poly_all(x, *args):
     return np.polynomial.polynomial.polyval(x, args)
 
-if has_ipython:
+if HAS_IPYTHON:
     print_type = Latex
 else:
     print_type = str
@@ -402,7 +409,7 @@ def print_amplitude_scan(
         else:
             basis_label = ''.join(symbols[i] for i in index)
 
-        if has_ipython:
+        if HAS_IPYTHON:
             line = fr'\frac{{\nu_{{{basis_label}}}}}{{2\pi\,\mathrm{{{compo_scale.frequency_unit}}}}} &='
         else:
             line = f'nu[{basis_label}]/(2π {compo_scale.frequency_unit}) ='
@@ -413,7 +420,7 @@ def print_amplitude_scan(
 
             pstr = f'{abs(p):.2e}'
 
-            if has_ipython:
+            if HAS_IPYTHON:
                 epos = pstr.index('e')
                 power = int(pstr[epos + 1:])
                 if power == -1:
@@ -441,7 +448,7 @@ def print_amplitude_scan(
 
         lines.append(line)
 
-    if has_ipython:
+    if HAS_IPYTHON:
         linebreak = r' \\ '
         expr = Latex(fr'\begin{{align}}{linebreak.join(lines)}\end{{align}} A: amplitude in $2\pi\,\mathrm{{{amp_scale.frequency_unit}}}$')
     else:
