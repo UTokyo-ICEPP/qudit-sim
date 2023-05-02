@@ -35,8 +35,8 @@ def parallel_map(
         kwargs = list(dict(zip(kwarg_keys, values)) for values in kwarg_values)
         [target(*(a + common_args), **(k | common_kwargs)) for a, k in zip(args, kwargs)]
 
-    The order of the positional arguments can optionally be specified via the `arg_position` parameter. If this is
-    given, the positional arguments to the target function is
+    The order of the positional arguments can optionally be specified via the `arg_position`
+    parameter. If this is given, the positional arguments to the target function is
 
     .. code-block:: python
 
@@ -52,8 +52,8 @@ def parallel_map(
         common_args: Positional arguments common to all invocation of the function.
         common_kwargs: Keyword arguments common to all invocation of the function.
         arg_position: Positions of each element of args in the function call.
-        thread_based: Use threads instead of processes. As a debugging option, string ``serial`` can be
-            passed, in which case no parallelization is performed.
+        thread_based: Use threads instead of processes. As a debugging option, string ``serial``
+            can be passed, in which case no parallelization is performed.
         log_level: logger level.
 
     Returns:
@@ -83,7 +83,9 @@ def parallel_map(
             kwargs = list(dict(zip(kwarg_keys, values)) for values in kwarg_values)
 
         if arg_list is not None:
-            assert len(arg_list) == len(kwarg_values), f'Inconsistent argument lengths: {len(arg_list)} != {len(kwarg_values)}'
+            if len(arg_list) != len(kwarg_values):
+                raise ValueError(f'Inconsistent argument lengths: {len(arg_list)}'
+                                 f' != {len(kwarg_values)}')
 
             arg_list = list((a, k) for (a, _), k in zip(arg_list, kwargs))
 
@@ -92,7 +94,8 @@ def parallel_map(
 
     assert arg_list is not None, 'args or kwarg_keys must be set'
 
-    logger.info('Executing %s in %d parallel (max %d simultaneous) %s..', target.__name__, len(arg_list), num_cpus,
+    logger.info('Executing %s in %d parallel (max %d simultaneous) %s..',
+                target.__name__, len(arg_list), num_cpus,
                 'threads' if thread_based else 'processes')
 
     num_done = 0
@@ -113,7 +116,9 @@ def parallel_map(
             if arg_position is None:
                 a += common_args
             elif isinstance(arg_position, int):
-                assert len(a) == 1, 'arg_position is an integer but the number of positional arguments is not 1'
+                if len(a) != 1:
+                    raise ValueError('arg_position is an integer but the number of positional'
+                                     ' arguments is not 1')
                 a = common_args[:arg_position] + a + common_args[arg_position:]
             else:
                 newargs = []
@@ -159,7 +164,8 @@ def parallel_map(
             # JAX (or CUDA in general?) does not seem to work with multiprocessing
             proc_config = {'jax_devices': None}
             proc_args = (target, a, k, conn_send, proc_name, proc_config)
-            process = multiprocessing.Process(target=_process_wrapper, args=proc_args, name=proc_name)
+            process = multiprocessing.Process(target=_process_wrapper, args=proc_args,
+                                              name=proc_name)
 
         process.start()
         processes.append((process, itask, conn_recv))
@@ -207,7 +213,8 @@ def _wait_procs(processes, results, max_num, wait=2):
                 ip += 1
 
         if len(processes) > max_num:
-            logger.debug('More than %d processes are running. Waiting for %f seconds', max_num, wait)
+            logger.debug('More than %d processes are running. Waiting for %f seconds',
+                         max_num, wait)
             time.sleep(wait)
         else:
             break
