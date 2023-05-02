@@ -8,14 +8,14 @@ import time
 from concurrent import futures
 from dataclasses import dataclass
 from functools import partial
-from threading import Lock
+from threading import Condition
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 import jax
 import jax.numpy as jnp
 from jax.experimental.ode import _odeint_wrapper
 import numpy as np
 from scipy.sparse import csr_array
-from qutip import Qobj, sesolve, rhs_clear
+import qutip as qtp
 from qutip.solver import Options
 
 from rqutils.math import matrix_exp
@@ -29,7 +29,8 @@ from .unitary import closest_unitary
 logger = logging.getLogger(__name__)
 
 TList = Union[np.ndarray, Tuple[int, int], Dict[str, Union[int, float]]]
-QObject = Union[qtp.Qobj, np.ndarray, csr_array]
+Array = Union[np.ndarray, csr_array]
+QObject = Union[qtp.Qobj, Array, Tuple[Array, ...], Dict[str, Array]]
 SolverOptions = Union[Options, Tuple[float, float, float, float]]
 
 
@@ -140,7 +141,7 @@ def pulse_sim(
 
     parallel_params = {
         'tlist': (tlist, (np.ndarray, tuple, dict)),
-        'psi0': (psi0, (Qobj, np.ndarray, csr_array)),
+        'psi0': (psi0, (qtp.Qobj, np.ndarray, csr_array, tuple, dict)),
         'e_ops': (e_ops, Sequence),
         'frame': (frame, (str, dict, Sequence)),
         'final_only': (final_only, bool),
@@ -199,25 +200,6 @@ def pulse_sim(
 
         if solver == 'jax':
             thread_based = True
-
-            # Precompile the hamiltonian function for all unique tlist-stack shapes
-            tlist_shape_params = set((p.tlist.shape[0], p.interval_len, p.solver_options)
-                                     for p in parameters_list)
-
-            y0 = hgen.identity_op().full()
-
-            # Compile in threads
-            with futures.ThreadPoolExecutor() as pool:
-                thread_jobs = dict()
-                for tlist_len, interval_len, solver_options in tlist_shape_params:
-                    num_intervals = int(np.ceil((tlist_len - 1) / (interval_len - 1)))
-
-                    dummy_tlists = np.empty((num_intervals, interval_len))
-
-                    lowered = vodeint.lower(hamiltonian, y0, dummy_tlists, drive_args[0], solver_options)
-                    thread_jobs[(dummy_tlists.shape, solver_options)] = pool.submit(lowered.compile)
-
-            hamiltonian.compiled_vodeint = {key: job.result() for key, job in thread_jobs.items()}
 
             common_args = (hamiltonian,)
             args = parameters_list
@@ -305,30 +287,21 @@ def build_hamiltonian(
     Args:
         hgen: A HamiltonianBuilder instance.
         solver: ``'qutip'`` or ``'jax'``
-        sample_drive_args: For ``solver='jax'``, an example argument dictionary (with valid keys and
-            value types) to be used for compiling the pulse functions.
     """
     if solver == 'jax':
         h_terms = hgen.build(frame='lab', as_timefn=True)
 
-        if len(h_terms) == 1 and isinstance(h_terms[0], Qobj):
+        if len(h_terms) == 1 and isinstance(h_terms[0], qtp.Qobj):
             # Will just exponentiate
             hamiltonian = h_terms
         else:
             @jax.jit
-            def du_dt(u_t, t, drive_args):
+            def hamiltonian(u_t, t, drive_args):
                 h_t = h_terms[0].full()
                 for qobj, fn in h_terms[1:]:
                     h_t += qobj.full() * fn(t, drive_args, npmod=jnp)
 
                 return -1.j * jnp.matmul(h_t, u_t)
-
-            if sample_drive_args is None:
-                hamiltonian = du_dt
-            else:
-                hamiltonian, _ = jax.custom_derivatives.closure_convert(du_dt, hgen.identity_op().full(),
-                                                                        0., sample_drive_args)
-
     else:
         hamiltonian = hgen.build(frame='lab')
 
@@ -356,18 +329,38 @@ def compose_parameters(
 
     if psi0 is None:
         psi0 = hgen.identity_op().full()
-    elif isinstance(psi0, Qobj):
+    elif isinstance(psi0, qtp.Qobj):
         psi0 = np.squeeze(psi0.full())
     elif isinstance(psi0, csr_array):
         psi0 = psi0.todense()
+    elif isinstance(psi0, tuple):
+        qudit_psi0 = list(qtp.Qobj(inpt=state) for state in psi0)
+        psi0 = np.squeeze(qtp.tensor(qudit_psi0).full())
+    elif isinstance(psi0, dict):
+        qudit_psi0 = []
+        for qid in hgen.qudit_ids():
+            qudit_psi0.append(qtp.Qobj(inpt=psi0[qid]))
+        psi0 = np.squeeze(qtp.tensor(qudit_psi0).full())
 
     if e_ops is not None:
         new_e_ops = []
         for qobj in e_ops:
-            if isinstance(qobj, Qobj):
+            if isinstance(qobj, qtp.Qobj):
                 new_e_ops.append(qobj.full())
             elif isinstance(qobj, csr_array):
                 new_e_ops.append(qobj.todense())
+            elif isinstance(qobj, tuple):
+                qudit_obs = list(qtp.Qobj(inpt=obs) for obs in qobj)
+                new_e_ops.append(qtp.tensor(qudit_obs).full())
+            elif isinstance(qobj, dict):
+                qudit_obs = []
+                for qid in hgen.qudit_ids():
+                    try:
+                        qudit_obs.append(qtp.Qobj(inpt=qobj[qid]))
+                    except KeyError:
+                        qudit_obs.append(qtp.qeye(hgen.qudit_params(qid).num_levels))
+
+                new_e_ops.append(qtp.tensor(qudit_obs).full())
             else:
                 new_e_ops.append(qobj)
 
@@ -414,7 +407,7 @@ def _run_single(
                 parameters.tlist[0], parameters.tlist[-1])
 
     ## Run the simulation or exponentiate the static Hamiltonian
-    if isinstance(hamiltonian, list) and len(hamiltonian) == 1 and isinstance(hamiltonian[0], Qobj):
+    if isinstance(hamiltonian, list) and len(hamiltonian) == 1 and isinstance(hamiltonian[0], qtp.Qobj):
         logger.info('Static Hamiltonian built. Exponentiating..')
 
         states, expect = exponentiate_hstat(hamiltonian[0], parameters, logger_name)
@@ -445,7 +438,7 @@ def _run_single(
 
 
 def simulate_drive_sesolve(
-    hamiltonian: List[Union[Qobj, List]],
+    hamiltonian: List[Union[qtp.Qobj, List]],
     parameters: PulseSimParameters,
     drive_args: Optional[Dict[str, Any]] = None,
     logger_name: str = __name__
@@ -456,7 +449,7 @@ def simulate_drive_sesolve(
     if isinstance(hamiltonian, Hamiltonian):
         hamiltonian = hamiltonian.evaluate_coeffs(parameters.tlist, drive_args)
 
-    if len(hamiltonian) == 1 and isinstance(hamiltonian[0], Qobj):
+    if len(hamiltonian) == 1 and isinstance(hamiltonian[0], qtp.Qobj):
         return exponentiate_hstat(hamiltonian[0], parameters, logger_name)
 
     # Take a copy of options because we change its values
@@ -528,7 +521,7 @@ def simulate_drive_sesolve(
             last_unitary = np.eye(np.prod(hdiag.dims[0]))
 
             for interval in range(num_intervals):
-                psi0 = Qobj(inpt=last_unitary, dims=hdiag.dims)
+                psi0 = qtp.Qobj(inpt=last_unitary, dims=hdiag.dims)
 
                 start = interval * (parameters.interval_len - 1)
                 end = start + parameters.interval_len
@@ -542,7 +535,7 @@ def simulate_drive_sesolve(
 
                 tlist = parameters.tlist[start:end]
 
-                qtp_result = sesolve(local_hamiltonian, psi0, tlist, options=solver_options)
+                qtp_result = qtp.sesolve(local_hamiltonian, psi0, tlist, options=solver_options)
 
                 # Array of lab-frame evolution ops
                 if parameters.final_only:
@@ -585,22 +578,25 @@ def simulate_drive_sesolve(
         finally:
             os.chdir(cwd)
             # Clear the cached solver
-            rhs_clear()
+            qtp.rhs_clear()
 
     logger.info('Done in %f seconds.', time.time() - sim_start)
 
     return states, expect
 
 
-odeint_lock = Lock()
+odeint_cv = Condition()
 
 def simulate_drive_odeint(
     hamiltonian: Callable,
     parameters: PulseSimParameters,
-    drive_args: Dict[str, Any] = dict(),
+    drive_args: Dict[str, Any] = {},
     logger_name: str = __name__
 ):
     logger = logging.getLogger(logger_name)
+
+    # parallel.parallel_map sets jax_devices[0] to the ID of the GPU to be used in this thread
+    jax_device = jax.devices()[config.jax_devices[0]]
 
     tlist = parameters.tlist
 
@@ -618,33 +614,45 @@ def simulate_drive_odeint(
     starts = np.arange(num_intervals) * (interval_len - 1)
     tlists = np.array(list(tlist[start:start + interval_len] for start in starts))
 
-    sim_start = time.time()
+    compile_start = time.time()
 
-    y0 = np.eye(parameters.psi0.shape[0])
+    y0 = np.eye(parameters.psi0.shape[0], dtype=complex)
 
-    if hamiltonian.__name__ == 'du_dt':
-        hamiltonian, _ = jax.custom_derivatives.closure_convert(hamiltonian, y0, 0., drive_args)
+    # vodeint must be lowered on the specific device - key on arg shape + device ID
+    h_key = (tlists.shape, parameters.solver_options, config.jax_devices[0])
 
-    h_key = (tlists.shape, parameters.solver_options)
-
-    with odeint_lock:
+    with odeint_cv:
         if not hasattr(hamiltonian, 'compiled_vodeint'):
-            hamiltonian.compiled_vodeint = dict()
+            hamiltonian.compiled_vodeint = {}
 
         try:
             integrator = hamiltonian.compiled_vodeint[h_key]
         except KeyError:
-            integrator = vodeint.lower(hamiltonian, y0, tlists, drive_args, parameters.solver_options).compile()
+            hamiltonian.compiled_vodeint[h_key] = None
+            odeint_cv.release()
+
+            converted, _ = jax.custom_derivatives.closure_convert(hamiltonian, y0, 0., drive_args)
+            with jax.default_device(jax_device):
+                lowered = vodeint.lower(converted, y0, tlists, drive_args, parameters.solver_options)
+            integrator = lowered.compile()
+
+            odeint_cv.acquire()
             hamiltonian.compiled_vodeint[h_key] = integrator
+            odeint_cv.notify_all()
+        else:
+            if integrator is None:
+                odeint_cv.wait_for(lambda: hamiltonian.compiled_vodeint[h_key] is not None)
+                integrator = hamiltonian.compiled_vodeint[h_key]
 
     ## Run the evolution on a given device
-    # parallel.parallel_map sets jax_devices[0] to the ID of the GPU to be used in this thread
-    jax_device = jax.devices()[config.jax_devices[0]]
+    sim_start = time.time()
 
     y0 = jax.device_put(y0, device=jax_device)
     tlists = jax.device_put(tlists, device=jax_device)
 
-    evolution = np.asarray(integrator(y0, tlists, drive_args))
+    evolution = integrator(y0, tlists, drive_args)
+
+    evolution = np.asarray(evolution)
 
     if tlist.shape[0] - parameters.tlist.shape[0] != 0:
         # Truncate back to the original tlist
@@ -655,10 +663,14 @@ def simulate_drive_odeint(
         evolution = evolution[-1:]
         tlist = tlist[-1:]
 
-    # Apply reunitarization
+    ## Apply reunitarization
+    reunitarize_start = time.time()
+
     if parameters.reunitarize:
         # Note: Downloading the evolution matrices and using the numpy SVD because that seems faster
         evolution = closest_unitary(evolution, npmod=np)
+
+    transform_start = time.time()
 
     ## Restore the actual global phase
     #evolution *= np.exp(-1.j * global_phase * local_tlist[:, None, None])
@@ -666,7 +678,12 @@ def simulate_drive_odeint(
     # Compute the states and expectation values in the original frame
     states, expect = parameters.transform_evolution(evolution, tlist)
 
-    logger.info('Done in %f seconds.', time.time() - sim_start)
+    end = time.time()
+
+    logger.info('Done in %.2f seconds (compile: %.2f, sim: %.2f, reunitarize: %.2f, '
+                'transform: %.2f).',
+                end - compile_start, sim_start - compile_start, reunitarize_start - sim_start,
+                transform_start - reunitarize_start, end - transform_start)
 
     return states, expect
 
@@ -691,7 +708,7 @@ def vodeint(hamiltonian, y0, tlists, drive_args, opt):
 
 
 def exponentiate_hstat(
-    hamiltonian: Qobj,
+    hamiltonian: qtp.Qobj,
     parameters: PulseSimParameters,
     logger_name: str = __name__
 ):
