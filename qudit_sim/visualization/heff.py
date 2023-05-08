@@ -71,9 +71,6 @@ def inspect_heff_fit(
     time_evolution = sim_result.states
     frame = sim_result.frame
 
-    num_qudits = frame.shape[0]
-    num_sim_levels = frame.shape[-1] + 1
-
     tlist_fit = tlist[fit_start:fit_end + 1] - tlist[fit_start]
 
     if tscale is FrequencyScale.auto:

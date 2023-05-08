@@ -5,7 +5,7 @@ from typing import List, Tuple, Union
 import h5py
 import numpy as np
 
-from .frame import SystemFrame
+from .frame import QuditFrame, SystemFrame
 
 
 @dataclass(frozen=True)
@@ -47,8 +47,7 @@ def load_sim_result(filename: str) -> PulseSimResult:
         except KeyError:
             states = None
 
-        frame = SystemFrame()
-        for qudit_id, data in source['frame'].items():
-            frame[str(qudit_id)] = QuditFrame(data[0], data[1])
+        frame = SystemFrame({str(qudit_id): QuditFrame(data[0], data[1])
+                             for qudit_id, data in source['frame'].items()})
 
     return PulseSimResult(times, expect, states, frame)

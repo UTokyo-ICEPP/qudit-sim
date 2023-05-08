@@ -483,7 +483,7 @@ def _find_init(
 
         ## 2. Find off-diagonals with finite values under no drive -> static terms; zero slope
 
-        psi0 = qtp.qeye(hstat.dims[0])
+        psi0 = np.eye(np.prod(hstat.dims[0]))
 
         parameters = PulseSimParameters(sim_frame, tlist, psi0)
 
