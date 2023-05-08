@@ -109,12 +109,14 @@ def pi_pulse(
     x_pulse = Drag(duration=duration, amp=amp, sigma=sigma, beta=beta)
     hgen.add_drive(qudit_id, frequency=drive_frequency, amplitude=x_pulse)
 
-    tlist = hgen.make_tlist(points_per_cycle=10, duration=duration)
-    interval_len = (tlist.shape[0] - 1) // 64 + 1
+    if pulse_sim_solver == 'jax':
+        tlist = duration
+    else:
+        tlist = hgen.make_tlist(points_per_cycle=10, duration=duration)
 
     hamiltonian = build_hamiltonian(hgen, pulse_sim_solver, {'amp': 0., 'beta': 0.})
     parameters = compose_parameters(hgen, tlist, final_only=True, reunitarize=False,
-                                    interval_len=interval_len, solver=pulse_sim_solver)
+                                    solver=pulse_sim_solver)
 
     if pulse_sim_solver == 'jax':
         simulate_drive = simulate_drive_odeint

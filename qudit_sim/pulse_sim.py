@@ -5,8 +5,7 @@ import logging
 import os
 import tempfile
 import time
-from concurrent import futures
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from threading import Condition
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
@@ -16,7 +15,6 @@ from jax.experimental.ode import _odeint_wrapper
 import numpy as np
 from scipy.sparse import csr_array
 import qutip as qtp
-from qutip.solver import Options
 
 from rqutils.math import matrix_exp
 from .config import config
@@ -28,10 +26,9 @@ from .unitary import closest_unitary
 
 logger = logging.getLogger(__name__)
 
-TList = Union[np.ndarray, Tuple[int, int], Dict[str, Union[int, float]]]
+TList = Union[np.ndarray, Tuple[int, int], Dict[str, Union[int, float]], float]
 Array = Union[np.ndarray, csr_array]
 QObject = Union[qtp.Qobj, Array, Tuple[Array, ...], Dict[str, Array]]
-SolverOptions = Union[Options, Tuple[float, float, float, float]]
 
 
 def pulse_sim(
@@ -43,9 +40,8 @@ def pulse_sim(
     frame: Union[FrameSpec, List[FrameSpec]] = 'dressed',
     final_only: Union[bool, List[bool]] = False,
     reunitarize: Union[bool, List[bool]] = True,
-    interval_len: Union[int, str, List[Union[int, str]]] = 'auto',
     solver: str = 'qutip',
-    solver_options: Optional[Union[SolverOptions, List[SolverOptions]]] = None,
+    solver_options: Optional[Union[dict, List[dict]]] = None,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING
 ) -> Union['PulseSimResult', List['PulseSimResult']]:
@@ -82,7 +78,7 @@ def pulse_sim(
     This function has an option ``reunitarize`` to apply the above decomposition and recompute the
     time evolution matrices. Because reunitarizing at each time step can be rather slow (mostly
     because of the overhead in calling ``sesolve``), when this option is turned on (default),
-    ``sesolve`` is called in time intervals of length ``interval_len``, and the entire array of
+    ``sesolve`` is called in time intervals of 512 time steps, and the entire array of
     evolution matrices from each interval is reunitarized (longer interval lengths result in larger
     reunitarization corrections).
 
@@ -104,7 +100,10 @@ def pulse_sim(
         hgen: A HamiltonianBuilder.
         tlist: Time points to use in the simulation or a pair ``(points_per_cycle, num_cycles)``
             where in the latter case the cycle of the fastest oscillating term in the Hamiltonian
-            will be used.
+            will be used. A dict that can be unpacked as keyword arguments to the
+            ``make_tlist`` method of HamiltonianBuilder is also accepted. Additionally, for
+            ``solver='jax'``, a single float can be given, in which case the simulation will for
+            the time interval ``[0, tlist]``.
         psi0: Initial state Qobj or array. Defaults to the identity operator appropriate for the
             given Hamiltonian.
         drive_args: Second parameter passed to drive amplitude functions (if callable).
@@ -114,12 +113,6 @@ def pulse_sim(
             implementation details, implies ``reunitarize=True``.
         reunitarize: Whether to reunitarize the time evolution matrices. Note that SVD can be very
             slow for large system sizes and ``final_only=False``.
-        interval_len: When integrating with QuTiP ``sesolve``, the number of time steps to run
-            ``sesolve`` uninterrupted. In this case the parameter is ignored unless
-            ``reunitarize=True`` and ``psi0`` is a unitary. When integrating with JAX ``odeint``,
-            this parameter determines the size of tlist batches. If set to ``'auto'``, an
-            appropriate value is automatically assigned. If the value is less than 2, simulation
-            will be run in a single batch uninterrupted.
         solver_options: If solver is qutip, QuTiP solver options. If solver is jax, a tuple
             representing ``(rtol, atol, mxstep, hmax)`` parameters of ``odeint``.
         save_result_to: File name (without the extension) to save the simulation result to.
@@ -140,14 +133,13 @@ def pulse_sim(
     zip_list = list()
 
     parallel_params = {
-        'tlist': (tlist, (np.ndarray, tuple, dict)),
+        'tlist': (tlist, (np.ndarray, tuple, dict, float)),
         'psi0': (psi0, (qtp.Qobj, np.ndarray, csr_array, tuple, dict)),
         'e_ops': (e_ops, Sequence),
         'frame': (frame, (str, dict, Sequence)),
         'final_only': (final_only, bool),
         'reunitarize': (reunitarize, bool),
-        'interval_len': (interval_len, (int, str)),
-        'solver_options': (solver_options, (Options, tuple))
+        'solver_options': (solver_options, dict)
     }
 
     # Pack parallelizable arguments into per-job dicts
@@ -223,8 +215,9 @@ def pulse_sim(
             kwarg_values = list((f'{__name__}.{itask}', save_result_path(itask))
                                 for itask in range(num_tasks))
 
-        result = parallel_map(_run_single, args=args, kwarg_keys=kwarg_keys, kwarg_values=kwarg_values,
-                              arg_position=arg_position, common_args=common_args, common_kwargs={'solver': solver},
+        result = parallel_map(_run_single, args=args, kwarg_keys=kwarg_keys,
+                              kwarg_values=kwarg_values, arg_position=arg_position,
+                              common_args=common_args, common_kwargs={'solver': solver},
                               log_level=log_level, thread_based=thread_based)
 
     logger.setLevel(original_log_level)
@@ -240,41 +233,7 @@ class PulseSimParameters:
     e_ops: Union[List[np.ndarray], None] = None
     final_only: bool = False
     reunitarize: bool = True
-    interval_len: int = 1
-    solver_options: SolverOptions = Options()
-
-    def transform_evolution(
-        self,
-        evolution: np.ndarray,
-        tlist: Optional[np.ndarray] = None
-    ):
-        if tlist is None:
-            tlist = self.tlist
-
-        # Change the frame back to original
-        lab_frame = SystemFrame({qid: QuditFrame(np.zeros_like(qf.frequency), np.zeros_like(qf.phase))
-                                for qid, qf in self.frame.items()})
-
-        evolution = self.frame.change_frame(tlist, evolution, from_frame=lab_frame,
-                                            objtype='evolution', t0=self.tlist[0])
-
-        # State evolution in the original frame
-        states = evolution @ self.psi0
-
-        if not self.e_ops:
-            return states, None
-
-        # Fill the expectation values
-        expect = list()
-        for observable in self.e_ops:
-            if len(states.shape) == 3:
-                out = np.einsum('ij,tij->t', observable.conjugate(), states)
-            else:
-                out = np.einsum('ti,ij,tj->t', states.conjugate(), observable, states).real
-
-            expect.append(out)
-
-        return states, expect
+    solver_options: dict = field(default_factory=dict)
 
 
 def build_hamiltonian(
@@ -316,9 +275,8 @@ def compose_parameters(
     frame: FrameSpec = 'dressed',
     final_only: bool = False,
     reunitarize: bool = True,
-    interval_len: Union[int, str] = 'auto',
     solver: str = 'qutip',
-    solver_options: Optional[SolverOptions] = None
+    solver_options: Optional[dict] = None
 ) -> PulseSimParameters:
     """Generate the arguments for parallel jobs using the HamiltonianBuilder."""
     ## Time points
@@ -326,6 +284,8 @@ def compose_parameters(
         tlist = {'points_per_cycle': tlist[0], 'num_cycles': tlist[1]}
     if isinstance(tlist, dict):
         tlist = hgen.make_tlist(frame='lab', **tlist)
+    if isinstance(tlist, (float, int)):
+        tlist = np.array([0., tlist])
 
     if psi0 is None:
         psi0 = hgen.identity_op().full()
@@ -369,27 +329,14 @@ def compose_parameters(
     if not isinstance(frame, SystemFrame):
         frame = SystemFrame(frame, hgen)
 
-    if interval_len == 'auto':
-        # Best determined by the representative frequency and simulation duration
-        if solver == 'jax':
-            interval_len = 101
-        else:
-            if reunitarize:
-                interval_len = 501
-            else:
-                interval_len = tlist.shape[0]
-
-    if interval_len <= 1:
-        interval_len = tlist.shape[0]
-
     if solver_options is None:
         if solver == 'jax':
-            solver_options = (1.e-8, 1.e-8, jnp.inf, jnp.inf)
+            solver_options = {'rtol': 1.e-8, 'atol': 1.e-8, 'mxstep': jnp.inf, 'hmax': jnp.inf,
+                              'num_parallel': 64}
         else:
-            solver_options = Options()
+            solver_options = {'rtol': 1.e-6, 'atol': 1.e-8}
 
-    return PulseSimParameters(frame, tlist, psi0, e_ops, final_only, reunitarize, interval_len,
-                              solver_options=solver_options)
+    return PulseSimParameters(frame, tlist, psi0, e_ops, final_only, reunitarize, solver_options)
 
 
 def _run_single(
@@ -452,19 +399,33 @@ def simulate_drive_sesolve(
     if len(hamiltonian) == 1 and isinstance(hamiltonian[0], qtp.Qobj):
         return exponentiate_hstat(hamiltonian[0], parameters, logger_name)
 
-    # Take a copy of options because we change its values
+    ## Run sesolve in a temporary directory
 
-    solver_options = copy.deepcopy(parameters.solver_options)
+    sim_start = time.time()
 
-    # Reunitarization and interval running setting
+    cwd = os.getcwd()
+    with tempfile.TemporaryDirectory() as tempdir:
+        try:
+            os.chdir(tempdir)
+            states, expect = _run_sesolve(hamiltonian, parameters, logger)
+        finally:
+            os.chdir(cwd)
+            # Clear the cached solver
+            qtp.rhs_clear()
 
-    reunitarize = parameters.reunitarize
-    if parameters.final_only and parameters.interval_len < parameters.tlist.shape[0]:
-        # Final only option with a short interval len implies that we run sesolve in intervals.
-        # The evolution matrices must be reunitarized in this case because an op psi0 argument
-        # of sesolve must be unitary, but the evolution matrices diverge from unitary typically
-        # within a few hundred time steps.
-        reunitarize = True
+    logger.info('Done in %f seconds.', time.time() - sim_start)
+
+    return states, expect
+
+
+def _run_sesolve(hamiltonian, parameters, logger):
+    # Create a QuTiP solver options object from the options dict
+    solver_options = qtp.solver.Options()
+    for attr in solver_options.__dir__():
+        try:
+            setattr(solver_options, attr, parameters.solver_options[attr])
+        except KeyError:
+            pass
 
     # sesolve generates O(1e-6) error in the global phase when the Hamiltonian is not traceless.
     # Since we run the simulation in the lab frame, the only traceful term is hdiag.
@@ -481,8 +442,7 @@ def simulate_drive_sesolve(
         # -> Can reuse the compiled objects
         solver_options.rhs_reuse = True
 
-    # Arrays to store the unitaries and expectation values
-
+    # Array to store the unitaries
     if not parameters.e_ops or solver_options.store_states:
         # squeezed shape
         state_shape = parameters.psi0.shape
@@ -493,6 +453,7 @@ def simulate_drive_sesolve(
     else:
         states = None
 
+    # Arrays to store the expectation values
     if parameters.e_ops:
         num_e_ops = len(parameters.e_ops)
         if parameters.final_only:
@@ -502,85 +463,76 @@ def simulate_drive_sesolve(
     else:
         expect = None
 
-    ## Run sesolve in a temporary directory
-
     # We'll always need the states
     solver_options.store_states = True
 
-    sim_start = time.time()
+    # Simulation interval lengths for reunitarization (number of time points)
+    if parameters.reunitarize:
+        interval_len = parameters.solver_options.get('interval_len', 512)
+    else:
+        interval_len = parameters.tlist.shape[0]
 
-    cwd = os.getcwd()
-    with tempfile.TemporaryDirectory() as tempdir:
-        try:
-            os.chdir(tempdir)
+    num_intervals = int(np.ceil((parameters.tlist.shape[0] - 1) / (interval_len - 1)))
 
-            num_intervals = int(np.ceil((parameters.tlist.shape[0] - 1) / (parameters.interval_len - 1)))
+    # Initial unitary is the identity
+    last_unitary = np.eye(np.prod(hdiag.dims[0]))
 
-            # Compute the time evolution in the lab frame -> initial unitary is identity
+    for interval in range(num_intervals):
+        interval_start = time.time()
 
-            last_unitary = np.eye(np.prod(hdiag.dims[0]))
+        psi0 = qtp.Qobj(inpt=last_unitary, dims=hdiag.dims)
 
-            for interval in range(num_intervals):
-                psi0 = qtp.Qobj(inpt=last_unitary, dims=hdiag.dims)
+        start = interval * (interval_len - 1)
+        end = start + interval_len
 
-                start = interval * (parameters.interval_len - 1)
-                end = start + parameters.interval_len
+        local_hamiltonian = list()
+        for h_term, isa in zip(hamiltonian, isarray):
+            if isa:
+                local_hamiltonian.append([h_term[0], h_term[1][start:end]])
+            else:
+                local_hamiltonian.append(h_term)
 
-                local_hamiltonian = list()
-                for h_term, isa in zip(hamiltonian, isarray):
-                    if isa:
-                        local_hamiltonian.append([h_term[0], h_term[1][start:end]])
-                    else:
-                        local_hamiltonian.append(h_term)
+        tlist = parameters.tlist[start:end]
 
-                tlist = parameters.tlist[start:end]
+        qtp_result = qtp.sesolve(local_hamiltonian, psi0, tlist, options=solver_options)
 
-                qtp_result = qtp.sesolve(local_hamiltonian, psi0, tlist, options=solver_options)
+        # Array of lab-frame evolution ops
+        if parameters.final_only:
+            evolution = np.squeeze(qtp_result.states[-1].full())[None, ...]
+            tlist = tlist[-1:]
+        else:
+            evolution = np.stack(list(np.squeeze(state.full()) for state in qtp_result.states))
 
-                # Array of lab-frame evolution ops
-                if parameters.final_only:
-                    evolution = np.squeeze(qtp_result.states[-1].full())[None, ...]
-                    tlist = tlist[-1:]
-                else:
-                    evolution = np.stack(list(np.squeeze(state.full()) for state in qtp_result.states))
+        # Apply reunitarization
+        if parameters.reunitarize:
+            evolution = closest_unitary(evolution)
 
-                # Apply reunitarization
-                if reunitarize:
-                    evolution = closest_unitary(evolution)
+        # evolution[-1] is the lab-frame evolution operator
+        last_unitary = evolution[-1].copy()
 
-                # evolution[-1] is the lab-frame evolution operator
-                last_unitary = evolution[-1].copy()
+        # Restore the actual global phase
+        evolution *= np.exp(-1.j * global_phase * tlist[:, None, None])
 
-                # Restore the actual global phase
-                evolution *= np.exp(-1.j * global_phase * tlist[:, None, None])
+        # Compute the states and expectation values in the original frame
+        local_states, local_expect = transform_evolution(evolution, parameters, tlist)
 
-                # Compute the states and expectation values in the original frame
-                local_states, local_expect = parameters.transform_evolution(evolution, tlist)
+        # Indices for the output arrays
+        if parameters.final_only:
+            out_slice = slice(0, 1)
+        else:
+            out_slice = slice(start, end)
 
-                # Indices for the output arrays
-                if parameters.final_only:
-                    out_slice = slice(0, 1)
-                else:
-                    out_slice = slice(start, end)
+        # Fill the states
+        if states is not None:
+            states[out_slice] = local_states
 
-                # Fill the states
-                if states is not None:
-                    states[out_slice] = local_states
+        # Fill the expectation values
+        if expect is not None:
+            for out, local in zip(expect, local_expect):
+                out[out_slice] = local
 
-                # Fill the expectation values
-                if expect is not None:
-                    for out, local in zip(expect, local_expect):
-                        out[out_slice] = local
-
-                logger.debug('Processed interval %d/%d. Cumulative simulation time %f seconds.',
-                             interval, num_intervals, time.time() - sim_start)
-
-        finally:
-            os.chdir(cwd)
-            # Clear the cached solver
-            qtp.rhs_clear()
-
-    logger.info('Done in %f seconds.', time.time() - sim_start)
+        logger.debug('Processed interval %d/%d in %f seconds.',
+                     interval, num_intervals, time.time() - interval_start)
 
     return states, expect
 
@@ -593,33 +545,25 @@ def simulate_drive_odeint(
     drive_args: Dict[str, Any] = {},
     logger_name: str = __name__
 ):
+    """Use JAX odeint to integrate the time evolution operator."""
     logger = logging.getLogger(logger_name)
 
     # parallel.parallel_map sets jax_devices[0] to the ID of the GPU to be used in this thread
     jax_device = jax.devices()[config.jax_devices[0]]
 
-    tlist = parameters.tlist
-
-    interval_len = parameters.interval_len
-
-    num_intervals = int(np.ceil((tlist.shape[0] - 1) / (interval_len - 1)))
-
-    residual = (tlist.shape[0] - 1) % (interval_len - 1)
-    if residual != 0:
-        num_extra_points = interval_len - residual
-        dt = tlist[-1] - tlist[-2]
-        new_end = tlist[-1] + dt * num_extra_points
-        tlist = np.concatenate([tlist[:-1], np.linspace(tlist[-1], new_end, num_extra_points + 1)])
-
-    starts = np.arange(num_intervals) * (interval_len - 1)
-    tlists = np.array(list(tlist[start:start + interval_len] for start in starts))
+    tlists, tlist_indices = _stack_tlist(parameters.tlist,
+                                         parameters.solver_options.get('num_parallel', 64))
 
     compile_start = time.time()
 
-    y0 = np.eye(parameters.psi0.shape[0], dtype=complex)
+    y0 = jnp.eye(parameters.psi0.shape[0], dtype=complex)
+    tlists = jax.device_put(tlists, device=jax_device)
 
     # vodeint must be lowered on the specific device - key on arg shape + device ID
-    h_key = (tlists.shape, parameters.solver_options, config.jax_devices[0])
+    opt = parameters.solver_options
+    odeint_options = (opt.get('rtol', 1.e-8), opt.get('atol', 1.e-8),
+                      opt.get('mxstep', jnp.inf), opt.get('hmax', jnp.inf))
+    h_key = (tlists.shape, odeint_options, config.jax_devices[0])
 
     with odeint_cv:
         if not hasattr(hamiltonian, 'compiled_vodeint'):
@@ -633,7 +577,7 @@ def simulate_drive_odeint(
 
             converted, _ = jax.custom_derivatives.closure_convert(hamiltonian, y0, 0., drive_args)
             with jax.default_device(jax_device):
-                lowered = vodeint.lower(converted, y0, tlists, drive_args, parameters.solver_options)
+                lowered = vodeint.lower(converted, y0, tlists, drive_args, odeint_options)
             integrator = lowered.compile()
 
             odeint_cv.acquire()
@@ -647,17 +591,12 @@ def simulate_drive_odeint(
     ## Run the evolution on a given device
     sim_start = time.time()
 
-    y0 = jax.device_put(y0, device=jax_device)
-    tlists = jax.device_put(tlists, device=jax_device)
-
     evolution = integrator(y0, tlists, drive_args)
-
     evolution = np.asarray(evolution)
 
-    if tlist.shape[0] - parameters.tlist.shape[0] != 0:
-        # Truncate back to the original tlist
-        evolution = evolution[:parameters.tlist.shape[0]]
-        tlist = tlist[:parameters.tlist.shape[0]]
+    ## Recover the original tlist & pick the corresponding time points from evolution
+    tlist = np.concatenate([tlists[:, :-1].reshape(-1), tlists[-1, -1:]])[tlist_indices]
+    evolution = evolution[tlist_indices]
 
     if parameters.final_only:
         evolution = evolution[-1:]
@@ -672,11 +611,8 @@ def simulate_drive_odeint(
 
     transform_start = time.time()
 
-    ## Restore the actual global phase
-    #evolution *= np.exp(-1.j * global_phase * local_tlist[:, None, None])
-
     # Compute the states and expectation values in the original frame
-    states, expect = parameters.transform_evolution(evolution, tlist)
+    states, expect = transform_evolution(evolution, parameters, tlist)
 
     end = time.time()
 
@@ -686,6 +622,41 @@ def simulate_drive_odeint(
                 transform_start - reunitarize_start, end - transform_start)
 
     return states, expect
+
+
+def _stack_tlist(tlist: np.ndarray, num_parallel: int):
+    """Make an array of stacked tlists."""
+    tlist_indices = np.arange(tlist.shape[0])
+    # Add intermediate points until there are more tlist points than the vmap width
+    while tlist.shape[0] - 1 < num_parallel:
+        dt = np.diff(tlist)
+        if not np.allclose(dt, dt[0]):
+            raise ValueError('For JAX solver, tlist must be a uniformly increasing array')
+
+        tlist_low = tlist[0] + np.cumsum(dt) * 0.5
+        tlist_high = tlist_low[-1] + np.cumsum(dt) * 0.5
+        tlist = np.concatenate([tlist[:1], tlist_low, tlist_high])
+        tlist_indices *= 2
+
+    # Number of time points in each thread
+    interval_len = int(np.ceil((tlist.shape[0] - 1) / num_parallel)) + 1
+
+    # Recalculate num_parallel: when ceil((T-1)/(N-k)) = ceil((T-1)/N), we should use N-k threads
+    num_parallel = int(np.ceil((tlist.shape[0] - 1) / (interval_len - 1)))
+
+    # The last thread may have extra points to simulate
+    num_extra_points = (interval_len - 1) * num_parallel - (tlist.shape[0] - 1)
+    if num_extra_points > 0:
+        dt = tlist[-1] - tlist[-2]
+        new_end = tlist[-1] + dt * num_extra_points
+        tlist = np.concatenate([tlist[:-1], np.linspace(tlist[-1], new_end, num_extra_points + 1)])
+
+    # Stacked tlists
+    starts = np.arange(num_parallel) * (interval_len - 1)
+    tlists = np.array(list(tlist[start:start + interval_len] for start in starts))
+
+    return tlists, tlist_indices
+
 
 @partial(jax.jit, static_argnums=(0, 4))
 def vodeint(hamiltonian, y0, tlists, drive_args, opt):
@@ -724,6 +695,41 @@ def exponentiate_hstat(
 
     evolution = matrix_exp(-1.j * hamiltonian[None, ...] * tlist[:, None, None], hermitian=-1)
 
-    states, expect = parameters.transform_evolution(evolution, tlist)
+    states, expect = transform_evolution(evolution, parameters, tlist)
+
+    return states, expect
+
+
+def transform_evolution(
+    evolution: np.ndarray,
+    parameters: PulseSimParameters,
+    tlist: Optional[np.ndarray] = None
+):
+    """Compute the evolution operator and expectation values in the given frame."""
+    if tlist is None:
+        tlist = parameters.tlist
+
+    # Change the frame back to original
+    lab_frame = SystemFrame({qid: QuditFrame(np.zeros_like(qf.frequency), np.zeros_like(qf.phase))
+                            for qid, qf in parameters.frame.items()})
+
+    evolution = parameters.frame.change_frame(tlist, evolution, from_frame=lab_frame,
+                                              objtype='evolution', t0=parameters.tlist[0])
+
+    # State evolution in the original frame
+    states = evolution @ parameters.psi0
+
+    if not parameters.e_ops:
+        return states, None
+
+    # Fill the expectation values
+    expect = list()
+    for observable in parameters.e_ops:
+        if len(states.shape) == 3:
+            out = np.einsum('ij,tij->t', observable.conjugate(), states)
+        else:
+            out = np.einsum('ti,ij,tj->t', states.conjugate(), observable, states).real
+
+        expect.append(out)
 
     return states, expect

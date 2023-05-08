@@ -73,7 +73,6 @@ def gate_components_from_log(
 def gate_components(
     sim_result: PulseSimResult,
     initial_guess: np.ndarray,
-    comp_dim: Optional[Union[int, Tuple[int, ...]]] = None,
     optimizer: str = 'adam',
     optimizer_args: Optional[Any] = 0.005,
     max_update: int = 1000,
@@ -86,10 +85,7 @@ def gate_components(
     gate = sim_result.states[-1]
     frame = sim_result.frame
 
-    if comp_dim is None:
-        comp_dim = frame.dim
-    elif isinstance(comp_dim, int):
-        comp_dim = (comp_dim,) * frame.num_qudits
+    comp_dim = tuple(map(int, np.around(np.sqrt(initial_guess.shape))))
 
     trunc_gate = truncate_matrix(gate, frame.dim, comp_dim)
     trunc_gate = jax.device_put(trunc_gate, device=jax_device)
