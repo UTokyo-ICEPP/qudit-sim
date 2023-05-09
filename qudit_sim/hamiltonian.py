@@ -13,7 +13,7 @@ import warnings
 from dataclasses import dataclass
 from numbers import Number
 from types import ModuleType
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 import numpy as np
 import qutip as qtp
 
@@ -593,11 +593,13 @@ class HamiltonianBuilder:
         hstatic = qtp.tensor(list(qtp.qzero(dim) for dim in self.system_dim()))
 
         # Construct the Qobj for each qudit/level first
-        qops = []
+        creation_ops = {}
 
         identities = list(qtp.qeye(dim) for dim in self.system_dim())
 
         for iq, (qudit_id, params) in enumerate(self._qudit_params.items()):
+            qudit_creation_ops = []
+            frame_frequencies = []
             for level in range(params.num_levels - 1):
                 cre = qtp.basis(params.num_levels, level + 1) * qtp.basis(params.num_levels, level).dag()
                 cre *= params.drive_weight[level]
@@ -608,51 +610,63 @@ class HamiltonianBuilder:
                 op = qtp.tensor(ops)
                 op *= np.exp(1.j * frame[qudit_id].phase[level])
 
-                qops.append((qudit_id, op, frame[qudit_id].frequency[level]))
+                level_frequency = frame[qudit_id].frequency[level]
+
+                for iop, frequency in enumerate(frame_frequencies):
+                    # Consolidate the operators sharing a level frequency
+                    if np.isclose(frequency, level_frequency):
+                        qudit_creation_ops[iop] += op
+                        break
+                else:
+                    # No matching frequency
+                    frame_frequencies.append(level_frequency)
+                    qudit_creation_ops.append(op)
+
+            creation_ops[qudit_id] = list(zip(qudit_creation_ops, frame_frequencies))
 
         # Loop over the drive channels
         for channel, drives in self._drive.items():
-            ch_params = self._qudit_params[channel]
+            drive_amplitude = self._qudit_params[channel].drive_amplitude
 
+            # Crosstalk between a qudit and itself is set to 1 in add_qudit
+            driven_qudits = list(qid for qid in self.qudit_ids()
+                                 if (channel, qid) in self._crosstalk)
+
+            # Loop over drive terms
             for drive in drives:
                 # Loop over the driven operators
-                for qudit_id, creation_op, frame_frequency in qops:
-                    drive_base = ch_params.drive_amplitude / 2.
+                for qudit_id in driven_qudits:
+                    for creation_op, frame_frequency in creation_ops[qudit_id]:
+                        drive_base = drive_amplitude / 2. * self._crosstalk[(channel, qudit_id)]
 
-                    try:
-                        # Crosstalk between a qudit and itself is set to 1 in add_qudit
-                        drive_base *= self._crosstalk[(channel, qudit_id)]
-                    except KeyError:
-                        # This qudit gets no drive
-                        continue
+                        # Generate the potentially time-dependent Hamiltonian coefficients
+                        fn_x, fn_y = drive.generate_fn(frame_frequency, drive_base, self.use_rwa,
+                                                       as_timefn=as_timefn)
 
-                    # Generate the potentially time-dependent Hamiltonian coefficients
-                    fn_x, fn_y = drive.generate_fn(frame_frequency, drive_base, self.use_rwa, as_timefn=as_timefn)
+                        h_x = creation_op + creation_op.dag()
+                        h_y = 1.j * (creation_op - creation_op.dag())
 
-                    h_x = creation_op + creation_op.dag()
-                    h_y = 1.j * (creation_op - creation_op.dag())
+                        if isinstance(fn_x, Number):
+                            hstatic += fn_x * h_x
+                            hstatic += fn_y * h_y
 
-                    if isinstance(fn_x, Number):
-                        hstatic += fn_x * h_x
-                        hstatic += fn_y * h_y
-
-                    elif isinstance(fn_x, str):
-                        hdrive.append([h_x, fn_x])
-                        if fn_y:
-                            hdrive.append([h_y, fn_y])
-
-                    elif isinstance(fn_x, np.ndarray):
-                        if np.any(fn_x):
+                        elif isinstance(fn_x, str):
                             hdrive.append([h_x, fn_x])
-                        if np.any(fn_y):
-                            hdrive.append([h_y, fn_y])
+                            if fn_y:
+                                hdrive.append([h_y, fn_y])
 
-                    else:
-                        # TimeFunction
-                        if not (isinstance(fn_x, ConstantFunction) and fn_x.value == 0.):
-                            hdrive.append([h_x, fn_x])
-                        if not (isinstance(fn_y, ConstantFunction) and fn_y.value == 0.):
-                            hdrive.append([h_y, fn_y])
+                        elif isinstance(fn_x, np.ndarray):
+                            if np.any(fn_x):
+                                hdrive.append([h_x, fn_x])
+                            if np.any(fn_y):
+                                hdrive.append([h_y, fn_y])
+
+                        else:
+                            # TimeFunction
+                            if not (isinstance(fn_x, ConstantFunction) and fn_x.value == 0.):
+                                hdrive.append([h_x, fn_x])
+                            if not (isinstance(fn_y, ConstantFunction) and fn_y.value == 0.):
+                                hdrive.append([h_y, fn_y])
 
         if np.any(hstatic.data.data):
             hdrive.insert(0, hstatic)
@@ -661,7 +675,7 @@ class HamiltonianBuilder:
 
     def make_tlist(
         self,
-        points_per_cycle: int,
+        points_per_cycle: int = 8,
         num_cycles: Optional[int] = None,
         duration: Optional[float] = None,
         num_points: Optional[int] = None,
