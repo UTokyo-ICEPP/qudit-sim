@@ -154,7 +154,7 @@ def pulse_sim(
             singleton_params.append(key)
 
     if num_tasks is None:
-        hamiltonian = build_hamiltonian(hgen, solver, drive_args)
+        hamiltonian = build_hamiltonian(hgen, solver=solver)
 
         raw_args = {key: value for key, (value, typ) in parallel_params.items()}
         parameters = compose_parameters(hgen, solver=solver, **raw_args)
@@ -185,7 +185,7 @@ def pulse_sim(
         else:
             save_result_path = lambda itask: None
 
-        hamiltonian = build_hamiltonian(hgen, solver, drive_args[0])
+        hamiltonian = build_hamiltonian(hgen, solver=solver)
 
         parameters_list = list(compose_parameters(hgen, solver=solver, **raw_args)
                                for raw_args in raw_args_list)
@@ -238,8 +238,7 @@ class PulseSimParameters:
 
 def build_hamiltonian(
     hgen: HamiltonianBuilder,
-    solver: str = 'qutip',
-    sample_drive_args: Optional[Dict[str, Any]] = None
+    solver: str = 'qutip'
 ) -> Any:
     """Build the Hamiltonian according to the pulse_sim_solver option.
 
@@ -355,18 +354,10 @@ def _run_single(
 
     ## Run the simulation or exponentiate the static Hamiltonian
     if isinstance(hamiltonian, list) and len(hamiltonian) == 1 and isinstance(hamiltonian[0], qtp.Qobj):
-        logger.info('Static Hamiltonian built. Exponentiating..')
-
         states, expect = exponentiate_hstat(hamiltonian[0], parameters, logger_name)
-
     elif solver == 'jax':
-        logger.info('XLA-compiled Hamiltonian built. Starting simulation..')
-
         states, expect = simulate_drive_odeint(hamiltonian, parameters, drive_args, logger_name)
-
     else:
-        logger.info('Hamiltonian with %d terms built. Starting simulation..', len(hamiltonian))
-
         states, expect = simulate_drive_sesolve(hamiltonian, parameters, drive_args, logger_name)
 
     ## Compile the result and return
@@ -390,6 +381,7 @@ def simulate_drive_sesolve(
     drive_args: Optional[Dict[str, Any]] = None,
     logger_name: str = __name__
 ):
+    """Integrate the time evolution using QuTiP sesolve."""
     logger = logging.getLogger(logger_name)
 
     # Convert functional coefficients to arrays
@@ -399,10 +391,9 @@ def simulate_drive_sesolve(
     if len(hamiltonian) == 1 and isinstance(hamiltonian[0], qtp.Qobj):
         return exponentiate_hstat(hamiltonian[0], parameters, logger_name)
 
-    ## Run sesolve in a temporary directory
+    logger.info('Hamiltonian with %d terms built. Starting simulation..', len(hamiltonian))
 
-    sim_start = time.time()
-
+    # Run sesolve in a temporary directory
     cwd = os.getcwd()
     with tempfile.TemporaryDirectory() as tempdir:
         try:
@@ -412,8 +403,6 @@ def simulate_drive_sesolve(
             os.chdir(cwd)
             # Clear the cached solver
             qtp.rhs_clear()
-
-    logger.info('Done in %f seconds.', time.time() - sim_start)
 
     return states, expect
 
@@ -474,11 +463,16 @@ def _run_sesolve(hamiltonian, parameters, logger):
 
     num_intervals = int(np.ceil((parameters.tlist.shape[0] - 1) / (interval_len - 1)))
 
+    logger.debug('Integrating time evolution in %d intervals of %d steps.',
+                 num_intervals, interval_len)
+
+    sim_start = time.time()
+
     # Initial unitary is the identity
     last_unitary = np.eye(np.prod(hdiag.dims[0]))
 
     for interval in range(num_intervals):
-        interval_start = time.time()
+        interval_sim_start = time.time()
 
         psi0 = qtp.Qobj(inpt=last_unitary, dims=hdiag.dims)
 
@@ -503,9 +497,17 @@ def _run_sesolve(hamiltonian, parameters, logger):
         else:
             evolution = np.stack(list(np.squeeze(state.full()) for state in qtp_result.states))
 
+        interval_sim_end = time.time()
+        logger.debug('Integration of interval %d completed in %.2f seconds.',
+                     interval, interval_sim_end - interval_sim_start)
+
         # Apply reunitarization
         if parameters.reunitarize:
             evolution = closest_unitary(evolution)
+            logger.debug('Reunitarization of interval %d completed in %.2f seconds.',
+                         interval, time.time() - interval_sim_end)
+
+        transform_start = time.time()
 
         # evolution[-1] is the lab-frame evolution operator
         last_unitary = evolution[-1].copy()
@@ -515,6 +517,9 @@ def _run_sesolve(hamiltonian, parameters, logger):
 
         # Compute the states and expectation values in the original frame
         local_states, local_expect = transform_evolution(evolution, parameters, tlist)
+
+        logger.debug('Calculation of states and expectation values of interval %d completed in'
+                     ' %.2f seconds.', interval, time.time() - transform_start)
 
         # Indices for the output arrays
         if parameters.final_only:
@@ -531,13 +536,13 @@ def _run_sesolve(hamiltonian, parameters, logger):
             for out, local in zip(expect, local_expect):
                 out[out_slice] = local
 
-        logger.debug('Processed interval %d/%d in %f seconds.',
-                     interval, num_intervals, time.time() - interval_start)
+        logger.debug('Processed interval %d/%d in %.2f seconds.',
+                     interval, num_intervals, time.time() - interval_sim_start)
+
+    logger.info('Done in %.2f seconds.', time.time() - sim_start)
 
     return states, expect
 
-
-odeint_cv = Condition()
 
 def simulate_drive_odeint(
     hamiltonian: Callable,
@@ -551,46 +556,25 @@ def simulate_drive_odeint(
     # parallel.parallel_map sets jax_devices[0] to the ID of the GPU to be used in this thread
     jax_device = jax.devices()[config.jax_devices[0]]
 
+    logger.info('Starting simulation on JAX device %d.', jax_device.id)
+
     tlists, tlist_indices = _stack_tlist(parameters.tlist,
                                          parameters.solver_options.get('num_parallel', 64))
 
+    logger.debug('Shapes of tlists: original %s, stacked %s', parameters.tlist.shape, tlists.shape)
+
     compile_start = time.time()
 
-    y0 = jnp.eye(parameters.psi0.shape[0], dtype=complex)
-    tlists = jax.device_put(tlists, device=jax_device)
+    state_dim = parameters.psi0.shape[0]
+    integrator = _compile_vodeint(hamiltonian, parameters.solver_options, tlists.shape, state_dim,
+                                  drive_args)
 
-    # vodeint must be lowered on the specific device - key on arg shape + device ID
-    opt = parameters.solver_options
-    odeint_options = (opt.get('rtol', 1.e-8), opt.get('atol', 1.e-8),
-                      opt.get('mxstep', jnp.inf), opt.get('hmax', jnp.inf))
-    h_key = (tlists.shape, odeint_options, config.jax_devices[0])
-
-    with odeint_cv:
-        if not hasattr(hamiltonian, 'compiled_vodeint'):
-            hamiltonian.compiled_vodeint = {}
-
-        try:
-            integrator = hamiltonian.compiled_vodeint[h_key]
-        except KeyError:
-            hamiltonian.compiled_vodeint[h_key] = None
-            odeint_cv.release()
-
-            converted, _ = jax.custom_derivatives.closure_convert(hamiltonian, y0, 0., drive_args)
-            with jax.default_device(jax_device):
-                lowered = vodeint.lower(converted, y0, tlists, drive_args, odeint_options)
-            integrator = lowered.compile()
-
-            odeint_cv.acquire()
-            hamiltonian.compiled_vodeint[h_key] = integrator
-            odeint_cv.notify_all()
-        else:
-            if integrator is None:
-                odeint_cv.wait_for(lambda: hamiltonian.compiled_vodeint[h_key] is not None)
-                integrator = hamiltonian.compiled_vodeint[h_key]
+    compile_end = time.time()
+    logger.debug('Compilation of integrator completed in %.2f seconds.', compile_end - compile_start)
 
     ## Run the evolution on a given device
-    sim_start = time.time()
-
+    y0 = jax.device_put(np.eye(state_dim, dtype=complex), device=jax_device)
+    tlists = jax.device_put(tlists, device=jax_device)
     evolution = integrator(y0, tlists, drive_args)
     evolution = np.asarray(evolution)
 
@@ -602,24 +586,25 @@ def simulate_drive_odeint(
         evolution = evolution[-1:]
         tlist = tlist[-1:]
 
-    ## Apply reunitarization
-    reunitarize_start = time.time()
+    sim_end = time.time()
+    logger.debug('Integration completed in %.2f seconds.', sim_end - compile_end)
 
+    ## Apply reunitarization
     if parameters.reunitarize:
         # Note: Downloading the evolution matrices and using the numpy SVD because that seems faster
         evolution = closest_unitary(evolution, npmod=np)
+        logger.debug('Reunitarization completed in %.2f seconds.', time.time() - sim_end)
 
     transform_start = time.time()
 
     # Compute the states and expectation values in the original frame
     states, expect = transform_evolution(evolution, parameters, tlist)
 
-    end = time.time()
+    transform_end = time.time()
+    logger.debug('Calculation of states and expectation values completed in %.2f seconds.',
+                 transform_end - transform_start)
 
-    logger.info('Done in %.2f seconds (compile: %.2f, sim: %.2f, reunitarize: %.2f, '
-                'transform: %.2f).',
-                end - compile_start, sim_start - compile_start, reunitarize_start - sim_start,
-                transform_start - reunitarize_start, end - transform_start)
+    logger.info('Done in %.2f seconds.', transform_end - compile_start)
 
     return states, expect
 
@@ -658,6 +643,55 @@ def _stack_tlist(tlist: np.ndarray, num_parallel: int):
     return tlists, tlist_indices
 
 
+odeint_cv = Condition()
+
+def _compile_vodeint(
+    hamiltonian: Callable,
+    solver_options: Dict[str, Any],
+    tshape: Tuple[int, int],
+    ydim: int,
+    drive_args: Dict[str, Any],
+    _compile: bool = True
+):
+    # vodeint must be lowered on the specific device - key on arg shape + device ID
+    opt = (solver_options.get('rtol', 1.e-8), solver_options.get('atol', 1.e-8),
+           solver_options.get('mxstep', jnp.inf), solver_options.get('hmax', jnp.inf))
+    h_key = (tshape, opt, config.jax_devices[0])
+
+    with odeint_cv:
+        if not hasattr(hamiltonian, 'compiled_vodeint'):
+            hamiltonian.compiled_vodeint = {}
+
+        try:
+            integrator = hamiltonian.compiled_vodeint[h_key]
+        except KeyError:
+            hamiltonian.compiled_vodeint[h_key] = None
+            odeint_cv.release()
+
+            jax_device = jax.devices()[config.jax_devices[0]]
+            with jax.default_device(jax_device):
+                tlists = jnp.empty(tshape, dtype=float)
+                y0 = jnp.empty((ydim, ydim), dtype=complex)
+                converted, _ = jax.custom_derivatives.closure_convert(hamiltonian, y0, 0.,
+                                                                      drive_args)
+                lowered = vodeint.lower(converted, y0, tlists, drive_args, opt)
+
+            if _compile:
+                integrator = lowered.compile()
+            else:
+                integrator = lowered
+
+            odeint_cv.acquire()
+            hamiltonian.compiled_vodeint[h_key] = integrator
+            odeint_cv.notify_all()
+        else:
+            if integrator is None:
+                odeint_cv.wait_for(lambda: hamiltonian.compiled_vodeint[h_key] is not None)
+                integrator = hamiltonian.compiled_vodeint[h_key]
+
+    return integrator
+
+
 @partial(jax.jit, static_argnums=(0, 4))
 def vodeint(hamiltonian, y0, tlists, drive_args, opt):
     vwrapper = jax.vmap(_odeint_wrapper, in_axes=(None, None, None, None, None, None, 0, None))
@@ -686,6 +720,8 @@ def exponentiate_hstat(
     """Compute exp(-iHt)."""
     logger = logging.getLogger(__name__)
 
+    logger.info('Exponentiating hamiltonian with dimension %s.', hamiltonian.dims)
+
     hamiltonian = hamiltonian.full()
 
     if parameters.final_only:
@@ -693,9 +729,20 @@ def exponentiate_hstat(
     else:
         tlist = parameters.tlist
 
+    sim_start = time.time()
+
     evolution = matrix_exp(-1.j * hamiltonian[None, ...] * tlist[:, None, None], hermitian=-1)
 
+    sim_end = time.time()
+    logger.debug('Exponentiation completed in %.2f seconds.', sim_end - sim_start)
+
     states, expect = transform_evolution(evolution, parameters, tlist)
+
+    transform_end = time.time()
+    logger.debug('Calculation of states and expectation values completed in %.2f seconds.',
+                 transform_end - sim_end)
+
+    logger.info('Done in %.2f seconds.', transform_end - sim_start)
 
     return states, expect
 
