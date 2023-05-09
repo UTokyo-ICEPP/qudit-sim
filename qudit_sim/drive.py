@@ -164,10 +164,8 @@ class DriveTerm:
 
 
 def _make_envelope(inst, drive_base, phase_offset, as_timefn):
-    phase_factor = None
     if isinstance(phase_offset, Number):
-        if phase_offset != 0.:
-            phase_factor = np.exp(-1.j * phase_offset)
+        phase_factor = np.exp(-1.j * phase_offset)
     else:
         phase_factor = (phase_offset * (-1.j)).exp()
 
@@ -180,33 +178,22 @@ def _make_envelope(inst, drive_base, phase_offset, as_timefn):
 
     if isinstance(inst, (float, complex, Parameter)):
         # static envelope
-        envelope = inst * drive_base
-
-        if phase_factor is not None:
-            envelope = phase_factor * envelope
-
+        envelope = phase_factor * drive_base * inst
         if as_timefn:
             envelope = ConstantFunction(envelope)
 
     elif isinstance(inst, str):
-        envelope = f'({drive_base}) * ({inst})'
-
-        if isinstance(phase_factor, ParameterExpression):
-            raise TypeError(f'String amplitude expression {inst} not compatible with'
-                            ' parameterized phase offset')
-        elif phase_factor is not None:
-            envelope += f' * ({phase_factor})'
-
         if as_timefn:
             raise TypeError(f'String amplitude expression {inst} cannot be converted'
                             ' to a TimeFunction')
+        if isinstance(phase_factor, ParameterExpression):
+            raise TypeError(f'String amplitude expression {inst} not compatible with'
+                            ' parameterized phase offset')
+
+        envelope = f'({phase_factor * drive_base}) * ({inst})'
 
     elif isinstance(inst, np.ndarray):
-        envelope = inst * drive_base
-
-        if phase_factor is not None:
-            envelope = phase_factor * envelope
-
+        envelope = phase_factor * drive_base * inst
         if as_timefn:
             raise TypeError(f'Array amplitude cannot be converted to a TimeFunction')
 
@@ -214,10 +201,7 @@ def _make_envelope(inst, drive_base, phase_offset, as_timefn):
         if not isinstance(inst, TimeFunction):
             inst = TimeFunction(inst)
 
-        envelope = inst * drive_base
-
-        if phase_factor is not None:
-            envelope *= phase_factor
+        envelope = inst * (phase_factor * drive_base)
 
     else:
         raise TypeError(f'Unsupported amplitude type f{type(inst)}')
@@ -372,6 +356,12 @@ class CosFunction(OscillationFunction):
     ):
         super().__init__(lambda x, npmod: npmod.cos(x), frequency, phase)
 
+    def __str__(self) -> str:
+        return f'cos({self.frequency} * {self._targ()} + {self.phase})'
+
+    def __repr__(self) -> str:
+        return f'CosFunction({repr(self.frequency)}, {repr(self.phase)})'
+
 class SinFunction(OscillationFunction):
     def __init__(
         self,
@@ -380,6 +370,12 @@ class SinFunction(OscillationFunction):
     ):
         super().__init__(lambda x, npmod: npmod.sin(x), frequency, phase)
 
+    def __str__(self) -> str:
+        return f'sin({self.frequency} * {self._targ()} + {self.phase})'
+
+    def __repr__(self) -> str:
+        return f'SinFunction({repr(self.frequency)}, {repr(self.phase)})'
+
 class ExpFunction(OscillationFunction):
     def __init__(
         self,
@@ -387,6 +383,12 @@ class ExpFunction(OscillationFunction):
         phase: Union[float, ParameterExpression] = 0.
     ):
         super().__init__(lambda x, npmod: npmod.cos(x) + 1.j * npmod.sin(x), frequency, phase)
+
+    def __str__(self) -> str:
+        return f'exp(1j * ({self.frequency} * {self._targ()} + {self.phase}))'
+
+    def __repr__(self) -> str:
+        return f'ExpFunction({repr(self.frequency)}, {repr(self.phase)})'
 
 @dataclass(frozen=True)
 class ShiftFrequency:

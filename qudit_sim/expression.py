@@ -29,57 +29,71 @@ ReturnType = Union[float, complex, ArrayType]
 
 class Expression(ABC):
     def __add__(self, other: Union['Expression', array_like]) -> 'Expression':
-        return type(self)._binary_op(self, other, lambda a1, a2, npmod: npmod.add(a1, a2))
+        return type(self)._binary_op(self, other,
+                                     lambda a1, a2, npmod: npmod.add(a1, a2), 'add')
 
     def __sub__(self, other: Union['Expression', array_like]) -> 'Expression':
-        return type(self)._binary_op(self, other, lambda a1, a2, npmod: npmod.subtract(a1, a2))
+        return type(self)._binary_op(self, other,
+                                     lambda a1, a2, npmod: npmod.subtract(a1, a2), 'subtract')
 
     def __mul__(self, other: Union['Expression', array_like]) -> 'Expression':
-        return type(self)._binary_op(self, other, lambda a1, a2, npmod: npmod.multiply(a1, a2))
+        return type(self)._binary_op(self, other,
+                                     lambda a1, a2, npmod: npmod.multiply(a1, a2), 'multiply')
 
     def __radd__(self, other: Union['Expression', array_like]) -> 'Expression':
         if isinstance(other, Expression):
-            return type(self)._binary_op(other, self, lambda a1, a2, npmod: npmod.add(a1, a2))
+            return type(self)._binary_op(other, self,
+                                         lambda a1, a2, npmod: npmod.add(a1, a2), 'add')
         else:
             return self.__add__(other)
 
     def __rsub__(self, other: Union['Expression', array_like]) -> 'Expression':
         if isinstance(other, Expression):
-            type(self)._binary_op(other, self, lambda a1, a2, npmod: npmod.subtract(a1, a2))
+            type(self)._binary_op(other, self,
+                                  lambda a1, a2, npmod: npmod.subtract(a1, a2), 'subtract')
         else:
             return (-self).__add__(other)
 
     def __rmul__(self, other: Union['Expression', array_like]) -> 'Expression':
         if isinstance(other, Expression):
-            type(self)._binary_op(other, self, lambda a1, a2, npmod: npmod.multiply(a1, a2))
+            type(self)._binary_op(other, self,
+                                  lambda a1, a2, npmod: npmod.multiply(a1, a2), 'multiply')
         else:
             return self.__mul__(other)
 
     def __abs__(self) -> 'Expression':
-        return type(self)._unary_op(self, lambda a, npmod: npmod.abs(a))
+        return type(self)._unary_op(self,
+                                    lambda a, npmod: npmod.abs(a), 'abs')
 
     def __neg__(self) -> 'Expression':
-        return type(self)._unary_op(self, lambda a, npmod: npmod.negative(a))
+        return type(self)._unary_op(self,
+                                    lambda a, npmod: npmod.negative(a), 'negative')
 
     def conjugate(self) -> 'Expression':
-        return type(self)._unary_op(self, lambda a, npmod: npmod.conjugate(a))
+        return type(self)._unary_op(self,
+                                    lambda a, npmod: npmod.conjugate(a), 'conjugate')
 
     @property
     def real(self) -> 'Expression':
-        return type(self)._unary_op(self, lambda a, npmod: npmod.real(a))
+        return type(self)._unary_op(self,
+                                    lambda a, npmod: npmod.real(a), 'real')
 
     @property
     def imag(self) -> 'Expression':
-        return type(self)._unary_op(self, lambda a, npmod: npmod.imag(a))
+        return type(self)._unary_op(self,
+                                    lambda a, npmod: npmod.imag(a), 'imag')
 
     def cos(self) -> 'Expression':
-        return type(self)._unary_op(self, lambda a, npmod: npmod.cos(a))
+        return type(self)._unary_op(self,
+                                    lambda a, npmod: npmod.cos(a), 'cos')
 
     def sin(self) -> 'Expression':
-        return type(self)._unary_op(self, lambda a, npmod: npmod.sin(a))
+        return type(self)._unary_op(self,
+                                    lambda a, npmod: npmod.sin(a), 'sin')
 
     def exp(self) -> 'Expression':
-        return type(self)._unary_op(self, lambda a, npmod: npmod.exp(a))
+        return type(self)._unary_op(self,
+                                    lambda a, npmod: npmod.exp(a), 'exp')
 
 
 class ParameterExpression(Expression):
@@ -135,6 +149,9 @@ class Parameter(ParameterExpression):
     def __str__(self) -> str:
         return f'Parameter({self.name})'
 
+    def __repr__(self) -> str:
+        return f'Parameter("{self.name}")'
+
     def subs(
         self,
         npmod: ModuleType = np,
@@ -166,6 +183,10 @@ class ParameterFunction(ParameterExpression):
     def __str__(self) -> str:
         return f'ParameterFunction({", ".join(self._parameters)})'
 
+    def __repr__(self) -> str:
+        parameters = ', '.join(f'"{p}"' for p in self._parameters)
+        return f'ParameterFunction({fn.__name__}, ({parameters}))'
+
     def subs(
         self,
         npmod: ModuleType = np,
@@ -190,12 +211,20 @@ class _ParameterUnaryOp(ParameterFunction):
     def __init__(
         self,
         expr: ParameterExpression,
-        op: Callable[[array_like, ModuleType], ReturnType]
+        op: Callable[[array_like, ModuleType], ReturnType],
+        opname: Optional[str] = None
     ):
         self.expr = expr
         self.op = op
+        self.opname = opname or op.__name__
 
         super().__init__(self._fn, self.expr.parameters)
+
+    def __str__(self) -> str:
+        return f'{self.opname}({self.expr})'
+
+    def __repr__(self) -> str:
+        return f'_ParameterUnaryOp({repr(self.expr)}, {self.opname})'
 
     def _fn(
         self,
@@ -213,11 +242,13 @@ class _ParameterBinaryOp(ParameterFunction):
         self,
         lexpr: ParameterExpression,
         rexpr: Union[ParameterExpression, array_like],
-        op: Callable[[array_like, array_like, ModuleType], ReturnType]
+        op: Callable[[array_like, array_like, ModuleType], ReturnType],
+        opname: Optional[str] = None
     ):
         self.lexpr = lexpr
         self.rexpr = rexpr
         self.op = op
+        self.opname = opname or op.__name__
 
         if isinstance(rexpr, ParameterExpression):
             fn = self._fn_ParameterExpression
@@ -229,6 +260,12 @@ class _ParameterBinaryOp(ParameterFunction):
             raise TypeError(f'Cannot apply {op} to {type(lexpr)} and {type(rexpr)}')
 
         super().__init__(fn, parameters)
+
+    def __str__(self) -> str:
+        return f'{self.opname}({self.lexpr}, {self.rexpr})'
+
+    def __repr__(self) -> str:
+        return f'_ParameterBinaryOp({repr(self.lexpr)}, {repr(self.rexpr)}, {self.opname})'
 
     def _fn_ParameterExpression(
         self,
@@ -267,13 +304,18 @@ class TimeFunction(Expression):
         else:
             self.parameters = parameters
 
-    def __str__(self) -> str:
+    def _targ(self) -> str:
         if self.tzero == 0.:
-            targ = 't'
+            return 't'
         else:
-            targ = f't - {self.tzero}'
+            return f't - {self.tzero}'
 
-        return f'{self.fn.__name__}({targ}, ({", ".join(self.parameters)}))'
+    def __str__(self) -> str:
+        return f'{self.fn.__name__}({self._targ()}, ({", ".join(self.parameters)}))'
+
+    def __repr__(self) -> str:
+        parameters = ', '.join(f'"{p}"' for p in self.parameters)
+        return f'TimeFunction({self.fn.__name__}, ({parameters}), {self.tzero})'
 
     def __call__(
         self,
@@ -308,12 +350,20 @@ class _TimeFunctionUnaryOp(TimeFunction):
     def __init__(
         self,
         expr: TimeFunction,
-        op: Callable[[array_like, ModuleType], ReturnType]
+        op: Callable[[array_like, ModuleType], ReturnType],
+        opname: Optional[str] = None
     ):
         self.expr = expr
         self.op = op
+        self.opname = opname or op.__name__
 
         super().__init__(self._fn, self.expr.parameters)
+
+    def __str__(self) -> str:
+        return f'{self.opname}({self.expr})'
+
+    def __repr__(self) -> str:
+        return f'_TimeFunctionUnaryOp({repr(self.expr)}, {self.opname})'
 
     def _fn(
         self,
@@ -334,11 +384,13 @@ class _TimeFunctionBinaryOp(TimeFunction):
         self,
         lexpr: TimeFunction,
         rexpr: Union[TimeFunction, array_like],
-        op: Callable[[array_like, array_like, ModuleType], ReturnType]
+        op: Callable[[array_like, array_like, ModuleType], ReturnType],
+        opname: Optional[str] = None
     ):
         self.lexpr = lexpr
         self.rexpr = rexpr
         self.op = op
+        self.opname = opname or op.__name__
 
         if isinstance(rexpr, TimeFunction):
             fn = self._fn_TimeFunction
@@ -353,6 +405,12 @@ class _TimeFunctionBinaryOp(TimeFunction):
             raise TypeError(f'Cannot apply {op} to {type(lexpr)} and {type(rexpr)}')
 
         super().__init__(fn, parameters)
+
+    def __str__(self) -> str:
+        return f'{self.opname}({self.lexpr}, {self.rexpr})'
+
+    def __repr__(self) -> str:
+        return f'_TimeFunctionBinaryOp({repr(self.lexpr)}, {repr(self.rexpr)}, {self.opname})'
 
     def _fn_TimeFunction(
         self,
@@ -427,6 +485,12 @@ class ConstantFunction(TimeFunction):
 
         super().__init__(fn, parameters)
 
+    def __str__(self) -> str:
+        return f'({self._targ()})->{self.value}'
+
+    def __repr__(self) -> str:
+        return f'ConstantFunction({repr(self.value)})'
+
     def _fn_Number(
         self,
         t: TimeType,
@@ -464,6 +528,16 @@ class PiecewiseFunction(TimeFunction):
         parameters = sum((func.parameters for func in funclist), ())
         super().__init__(self._fn, parameters)
 
+    def __str__(self) -> str:
+        value = '{\n'
+        for ifunc, func in enumerate(self.funclist):
+            value += f'  {func}  ({self.timelist[ifunc]} <= t < {self.timelist[ifunc + 1]})\n'
+        value += '}'
+        return value
+
+    def __repr__(self) -> str:
+        return f'PiecewiseFunction({len(self.funclist)} functions, {self.timelist})'
+
     def _fn(
         self,
         t: TimeType,
@@ -491,13 +565,11 @@ class PiecewiseFunction(TimeFunction):
 
             timelist = list(self.timelist)
             timelist.append(jnp.inf)
-            funclist = list(make_shifted_fun(ifun) for ifun in range(len(self.timelist)))
+            indices = list(range(len(self.timelist))) + [0]
+            funclist = list(make_shifted_fun(ifun) for ifun in indices)
 
-            ifun = jax.lax.while_loop(
-                lambda ifun: t > timelist[ifun],
-                lambda ifun: ifun + 1,
-                0
-            )
+            ifun = jnp.searchsorted(jnp.array(timelist), t, side='right')
+
             return jax.lax.switch(ifun, funclist, t, args)
 
         else:
