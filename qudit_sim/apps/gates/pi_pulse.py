@@ -12,6 +12,7 @@ from .components import gate_components
 from ...basis import change_basis
 from ...expression import Parameter
 from ...hamiltonian import HamiltonianBuilder
+from ...parallel import parallel_map
 from ...pulse import Drag
 from ...pulse_sim import (build_hamiltonian, compose_parameters, simulate_drive_odeint,
                           simulate_drive_sesolve)
@@ -28,7 +29,9 @@ def pi_pulse(
     duration: float = unit_time * 160,
     sigma: int = unit_time * 40,
     pulse_sim_solver: str = 'qutip',
+    method: str = 'nm',
     fit_tol: float = 1.e-5,
+    maxiter: int = 1000,
     log_level: int = logging.WARNING
 ) -> Tuple[float, Drag]:
     r"""Find the :math:`\pi` pulse for the given level of the given qudit by numerical optimization.
@@ -66,9 +69,6 @@ def pi_pulse(
     qudit_index = hgen.qudit_index(qudit_id)
     target_params = hgen.qudit_params(qudit_id)
 
-    spectator_indices = tuple(iq for iq in range(hgen.num_qudits) if iq != qudit_index)
-    spectator_size = np.prod(np.array(hgen.system_dim())[list(spectator_indices)])
-
     target_single = np.eye(target_params.num_levels, dtype=complex)
     pauli_x = paulis.paulis(2)[1]
     target_single[level:level + 2, level:level + 2] = matrix_exp(0.5j * angle * pauli_x, hermitian=-1)
@@ -79,8 +79,6 @@ def pi_pulse(
         else:
             num_levels = hgen.qudit_params(hgen.qudit_id(iq)).num_levels
             target = np.kron(target, np.eye(num_levels))
-
-    free_diags = list(range(level)) + list(range(level + 2, target_params.num_levels))
 
     # Pulse frequency
     drive_frequency = hgen.dressed_frequencies(qudit_id)[level]
@@ -112,9 +110,9 @@ def pi_pulse(
     if pulse_sim_solver == 'jax':
         tlist = duration
     else:
-        tlist = hgen.make_tlist(points_per_cycle=10, duration=duration)
+        tlist = hgen.make_tlist(duration=duration)
 
-    hamiltonian = build_hamiltonian(hgen, pulse_sim_solver, {'amp': 0., 'beta': 0.})
+    hamiltonian = build_hamiltonian(hgen, solver=pulse_sim_solver)
     parameters = compose_parameters(hgen, tlist, final_only=True, reunitarize=False,
                                     solver=pulse_sim_solver)
 
@@ -123,41 +121,105 @@ def pi_pulse(
     else:
         simulate_drive = simulate_drive_sesolve
 
-    icall = 0
-
-    def fun(params):
-        nonlocal icall
-
-        logger.debug('COBYLA fun call %d: %s', icall, params)
-        icall += 1
-
+    def loss_fn(params):
         # params are O(1) -> normalize
         drive_args = {'amp': params[0] * amp_estimate, 'beta': params[1] * beta_estimate}
-
         states, _ = simulate_drive(hamiltonian, parameters, drive_args)
 
         # Take the prod with the target and extract the diagonals
         diag_prod = np.diag(states[-1] @ target).reshape(hgen.system_dim())
-        # Integrate out the non-participating qudits
-        norm_ptr = np.sum(diag_prod, axis=spectator_indices) / spectator_size
-        # Compute the fidelity (sum of abs-squared of commuting diagonals + abs-square of the trace
-        # of target levels)
-        fidelity = np.sum(np.square(np.abs(norm_ptr[free_diags])))
-        fidelity += np.square(np.abs(np.sum(norm_ptr[level:level + 2]))) / 2.
+        diag_prod = np.moveaxis(diag_prod, qudit_index, 0)
+        # Compute the fidelity (abs-square of the trace of target levels)
+        subspace_fidelity = np.square(np.abs(np.sum(diag_prod[level:level + 2], axis=0)) / 2.)
+        # Average over the non-participating qudit states
+        loss = 1. - np.mean(subspace_fidelity)
 
-        logger.debug('COBYLA diag_prod %s fidelity %f', diag_prod, fidelity)
-
-        return -fidelity
+        return loss
 
     logger.info('Starting pi pulse identification..')
 
-    optres = sciopt.minimize(fun, (1., 1.), method='COBYLA', tol=fit_tol, options={'rhobeg': 0.5})
+    if method == 'nm':
+        popt, loss, niter = _minimize_nm(loss_fn, fit_tol, maxiter, logger)
+    elif method == 'grid':
+        popt, loss, niter = _minimize_grid(loss_fn, fit_tol, maxiter, logger)
 
-    logger.info('Done after %d function calls. Final fidelity %f.', icall, -optres.fun)
+    logger.info('Done after %d function calls. Final infidelity %.4e.', niter, loss)
 
-    amp = optres.x[0] * amp_estimate
-    beta = optres.x[1] * beta_estimate
+    amp = popt[0] * amp_estimate
+    beta = popt[1] * beta_estimate
 
     logger.setLevel(original_log_level)
 
     return drive_frequency, Drag(duration=duration, amp=amp, sigma=sigma, beta=beta)
+
+
+def _minimize_nm(loss_fn, fit_tol, maxiter, logger):
+    icall = 0
+    def callback(params):
+        nonlocal icall
+        icall += 1
+
+        if logger.getEffectiveLevel() > logging.DEBUG and icall % 10 != 0:
+            return
+
+        msg = f'Nelder-Mead iteration={icall} params={params} loss={loss_fn(params):.4e}'
+        if icall % 10 == 0:
+            logger.info(msg)
+        else:
+            logger.debug(msg)
+
+    optres = sciopt.minimize(loss_fn, (1., 1.), method='Nelder-Mead', tol=fit_tol,
+                             options={'maxiter': maxiter}, callback=callback)
+
+    return optres.x, optres.nit, optres.fun
+
+
+def _minimize_grid(loss_fn, fit_tol, maxiter, logger):
+    amp_grid = np.linspace(0.8, 1.2, 5)
+    beta_grid = np.linspace(0.8, 1.2, 5)
+    grids = [amp_grid, beta_grid]
+
+    last_losses = np.zeros(5)
+
+    for istep in range(maxiter):
+        grid_shape = sum((grid.shape for grid in grids), ())
+        indices = np.unravel_index(np.arange(np.prod(grid_shape)), grid_shape)
+        params = list(zip(*tuple(grid[idx] for grid, idx in zip(grids, indices))))
+        losses = parallel_map(loss_fn, params, arg_position=0, thread_based=True)
+
+        best_idx = np.unravel_index(np.argmin(losses), grid_shape)
+        popt = tuple(grid[idx] for grid, idx in zip(grids, best_idx))
+
+        min_loss = np.amin(losses)
+
+        logger.info('Grid search iteration=%d grid_bounds=(%s) grid_spacing=(%s) loss=%.4e',
+                    istep, ', '.join(f'[{grid[0]:.4f}, {grid[-1]:.4f}]' for grid in grids),
+                    ', '.join(f'{np.diff(grid)[0]:.4f}' for grid in grids), min_loss)
+
+        last_losses[1:] = last_losses[:-1]
+        last_losses[0] = min_loss
+
+        if np.max(np.abs(last_losses - min_loss)) < fit_tol:
+            break
+
+        new_grids = []
+
+        for idx, old_grid in zip(best_idx, grids):
+            old_unit = np.diff(old_grid)[0]
+            num_points = old_grid.shape[0]
+
+            if idx == 0:
+                low = old_grid[0] - old_unit * (num_points - 2)
+                high = old_grid[1]
+            elif idx == num_points - 1:
+                low = old_grid[-2]
+                high = old_grid[-1] + old_unit * (num_points - 2)
+            else:
+                low = old_grid[idx - 1]
+                high = old_grid[idx + 1]
+
+            new_grids.append(np.linspace(low, high, num_points))
+
+        grids = new_grids
+
+    return popt, istep, last_losses[0]
