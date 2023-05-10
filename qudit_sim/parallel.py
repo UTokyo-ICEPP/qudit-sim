@@ -71,7 +71,7 @@ def parallel_map(
     arg_list = None
 
     if args is not None:
-        if isinstance(args[0], tuple):
+        if isinstance(args[0], tuple) and not isinstance(arg_position, int):
             arg_list = list((a, dict()) for a in args)
         else:
             arg_list = list(((a,), dict()) for a in args)
