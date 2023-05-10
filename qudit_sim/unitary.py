@@ -43,7 +43,8 @@ def truncate_matrix(
 
     truncation = tuple(slice(0, dim) for dim in reduced_dim) * 2
     trunc_matrix = matrix[(slice(None),) + truncation]
-    trunc_matrix = trunc_matrix.reshape(extra_dims + reduced_dim + reduced_dim)
+    trunc_matrix_shape = (np.prod(reduced_dim),) * 2
+    trunc_matrix = trunc_matrix.reshape(extra_dims + trunc_matrix_shape)
 
     return trunc_matrix
 

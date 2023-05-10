@@ -531,7 +531,7 @@ class PiecewiseFunction(TimeFunction):
     def __str__(self) -> str:
         value = '{\n'
         for ifunc, func in enumerate(self.funclist):
-            value += f'  {func}  ({self.timelist[ifunc]} <= t < {self.timelist[ifunc + 1]})\n'
+            value += f'  {func}  ({self.timelist[ifunc]:.3f} <= t < {self.timelist[ifunc + 1]:.3f})\n'
         value += '}'
         return value
 
