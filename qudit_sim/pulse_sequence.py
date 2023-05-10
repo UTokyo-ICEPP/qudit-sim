@@ -87,7 +87,61 @@ class PulseSequence(list):
         Returns:
             Pulse sequence envelope (complex) as a function of time.
         """
+        instlist = self._make_instlist()
+
+        tlist = list()
+        flist = list()
+        for time, frequency, phase_offset, inst in instlist:
+            envelope = _make_envelope(inst, 1., phase_offset, True)
+
+
+            tlist.append(time)
+            flist.append(envelope)
+            ylist.append(fn_y)
         funclist = list()
+
+        frequency = None
+        phase_offset = 0.
+        time = 0.
+
+        for inst in self:
+            if isinstance(inst, ShiftFrequency):
+                if frequency is None:
+                    raise RuntimeError('ShiftFrequency called before SetFrequency')
+
+                frequency += inst.value
+            elif isinstance(inst, ShiftPhase):
+                phase_offset += inst.value
+            elif isinstance(inst, SetFrequency):
+                frequency = inst.value
+            elif isinstance(inst, SetPhase):
+                if frequency is None:
+                    raise RuntimeError('SetPhase called before SetFrequency')
+
+                phase_offset = inst.value - frequency * time
+            elif isinstance(inst, Delay):
+                funclist.append((time, 0.))
+                time += inst.value
+            else:
+                if frequency is None:
+                    raise RuntimeError('Pulse called before SetFrequency')
+
+                envelope = _make_envelope(inst, 1., phase_offset, False)
+                funclist.append((time, envelope))
+
+                if isinstance(inst, Pulse):
+                    time += inst.duration
+                else:
+                    if time != 0. and isinstance(inst, str) and \
+                        re.search('[^a-zA-Z_]t[^a-zA-Z0-9_]', inst):
+                        warnings.warn('Possibly time-dependent string amplitude in a sequence'
+                                      ' detected; this is not supported.', UserWarning)
+                    # Indefinite drive
+                    time = np.inf
+                    break
+
+        funclist.append((time, None, None))
+
         time = 0.
 
         for inst in self:
@@ -131,16 +185,54 @@ class PulseSequence(list):
         Returns:
             X and Y coefficient functions.
         """
-        funclist = list()
+        instlist = self._make_instlist()
+
+        tlist = list()
+        xlist = list()
+        ylist = list()
+        for time, frequency, phase_offset, inst in instlist:
+            envelope = _make_envelope(inst, drive_base, phase_offset, as_timefn)
+
+            if frequency is None:
+                # End of list or the very specific case of initial Delay without SetFrequency
+                # -> envelope is 0 or ConstantFunction(0)
+                fn_x = fn_y = envelope
+            elif rwa:
+                fn_x, fn_y = _modulate_rwa(envelope, frequency, frame_frequency)
+            else:
+                fn_x, fn_y = _modulate(envelope, frequency, frame_frequency)
+
+            tlist.append(time)
+            xlist.append(fn_x)
+            ylist.append(fn_y)
+
+        if len(tlist) == 1:
+            raise ValueError('No drive amplitude specified')
+
+        elif len(tlist) == 2:
+            fn_x = xlist[0]
+            fn_y = ylist[0]
+
+        elif all(isinstance(func, TimeFunction) for func in xlist[:-1]):
+            fn_x = PiecewiseFunction(tlist, xlist[:-1])
+            fn_y = PiecewiseFunction(tlist, ylist[:-1])
+
+        elif all(isinstance(func, np.ndarray) for func in xlist[:-1]):
+            fn_x = np.concatenate(xlist[:-1])
+            fn_y = np.concatenate(ylist[:-1])
+
+        else:
+            raise ValueError('Cannot generate a Hamiltonian coefficient from amplitude types'
+                             f' {list(type(func) for func in xlist[:-1])}')
+
+        return fn_x, fn_y
+
+    def _make_instlist(self):
+        instlist = list()
 
         frequency = None
         phase_offset = 0.
         time = 0.
-
-        if rwa:
-            _generate_single = _generate_single_rwa
-        else:
-            _generate_single = _generate_single_full
 
         for inst in self:
             if isinstance(inst, ShiftFrequency):
@@ -158,55 +250,29 @@ class PulseSequence(list):
 
                 phase_offset = inst.value - frequency * time
             elif isinstance(inst, Delay):
-                funclist.append((time, ConstantFunction(0.), ConstantFunction(0.)))
+                instlist.append((time, frequency, phase_offset, 0.))
                 time += inst.value
             else:
                 if frequency is None:
                     raise RuntimeError('Pulse called before SetFrequency')
 
-                envelope = _make_envelope(inst, drive_base, phase_offset, as_timefn)
-
-                fn_x, fn_y = _generate_single(envelope, frequency, frame_frequency)
-
-                funclist.append((time, fn_x, fn_y))
-
                 if isinstance(inst, Pulse):
+                    instlist.append((time, frequency, phase_offset, inst.shift(time)))
                     time += inst.duration
                 else:
-                    if time != 0. and re.search('[^a-zA-Z_]t[^a-zA-Z0-9_]', inst):
+                    if time != 0. and isinstance(inst, str) and \
+                        re.search('[^a-zA-Z_]t[^a-zA-Z0-9_]', inst):
                         warnings.warn('Possibly time-dependent string amplitude in a sequence'
                                       ' detected; this is not supported.', UserWarning)
 
+                    instlist.append((time, frequency, phase_offset, inst))
                     # Indefinite drive
                     time = np.inf
                     break
 
-        funclist.append((time, None, None))
+        instlist.append((time, None, None, 0.))
 
-        if len(funclist) == 1:
-            raise ValueError('No drive amplitude specified')
-
-        elif len(funclist) == 2:
-            fn_x = funclist[0][1]
-            fn_y = funclist[0][2]
-
-        elif all(isinstance(func, TimeFunction) for _, func, _ in funclist[:-1]):
-            timelist = list(f[0] for f in funclist)
-            xlist = list(f[1] for f in funclist[:-1])
-            ylist = list(f[2] for f in funclist[:-1])
-
-            fn_x = PiecewiseFunction(timelist, xlist)
-            fn_y = PiecewiseFunction(timelist, ylist)
-
-        elif all(isinstance(func, np.ndarray) for _, func, _ in funclist[:-1]):
-            fn_x = np.concatenate(list(x for _, x, _ in funclist[:-1]))
-            fn_y = np.concatenate(list(y for _, _, y in funclist[:-1]))
-
-        else:
-            raise ValueError('Cannot generate a Hamiltonian coefficient from amplitude types'
-                             f' {list(type(func) for _, func, _ in funclist[:-1])}')
-
-        return fn_x, fn_y
+        return instlist
 
 
 def _make_envelope(inst, drive_base, phase_offset, as_timefn):
@@ -224,7 +290,11 @@ def _make_envelope(inst, drive_base, phase_offset, as_timefn):
 
     if isinstance(inst, (float, complex, Parameter)):
         # static envelope
-        envelope = phase_factor * drive_base * inst
+        if inst == 0.:
+            envelope = 0.
+        else:
+            envelope = phase_factor * drive_base * inst
+
         if as_timefn:
             envelope = ConstantFunction(envelope)
 
@@ -255,7 +325,7 @@ def _make_envelope(inst, drive_base, phase_offset, as_timefn):
     return envelope
 
 
-def _generate_single_rwa(envelope, frequency, frame_frequency):
+def _modulate_rwa(envelope, frequency, frame_frequency):
     detuning = frequency - frame_frequency
 
     if isinstance(frequency, ParameterExpression):
@@ -293,12 +363,12 @@ def _generate_single_rwa(envelope, frequency, frame_frequency):
             return f'({envelope}).real', f'({envelope}).imag'
         else:
             return (f'({envelope}).real * cos({detuning} * t)'
-                    ' + ({envelope}).imag * sin({detuning} * t)',
+                    f' + ({envelope}).imag * sin({detuning} * t)',
                     f'({envelope}).imag * cos({detuning} * t)'
-                    ' - ({envelope}).real * sin({detuning} * t)')
+                    f' - ({envelope}).real * sin({detuning} * t)')
 
 
-def _generate_single_full(envelope, frequency, frame_frequency):
+def _modulate(envelope, frequency, frame_frequency):
     if isinstance(frequency, ParameterExpression) or isinstance(envelope, (np.ndarray, Expression)):
         envelope *= 2.
         labframe_fn = (ExpFunction(-frequency) * envelope).real

@@ -11,10 +11,11 @@ opted for an original lightweight implementation because the represented functio
 be pure to be compatible with JAX odeint.
 """
 
+import copy
+from abc import ABC
+from numbers import Number
 from typing import Callable, Optional, Union, Tuple, Dict, Any, Sequence
 from types import ModuleType
-from numbers import Number
-from abc import ABC
 
 import numpy as np
 import jax
@@ -115,10 +116,17 @@ class ParameterExpression(Expression):
     def parameters(self) -> Tuple[str, ...]:
         raise NotImplementedError('To be implemented in subclasses.')
 
+    def copy(self) -> ParameterExpression:
+        raise NotImplementedError('To be implemented in subclasses.')
+
 
 class Constant(ParameterExpression):
     def __init__(self, value: ReturnType):
         self.value = value
+
+    @property
+    def value_type(self) -> type:
+        return type(self.value)
 
     def __str__(self) -> str:
         return f'Constant({self.value})'
@@ -141,10 +149,14 @@ class Constant(ParameterExpression):
     def parameters(self) -> Tuple[str, ...]:
         return ()
 
+    def copy(self) -> Constant:
+        return Constant(self.value)
+
 
 class Parameter(ParameterExpression):
-    def __init__(self, name: str):
+    def __init__(self, name: str, value_type: type = complex):
         self.name = name
+        self.value_type = value_type
 
     def __str__(self) -> str:
         return f'Parameter({self.name})'
@@ -170,15 +182,20 @@ class Parameter(ParameterExpression):
     def parameters(self) -> Tuple[str, ...]:
         return (self.name,)
 
+    def copy(self) -> Parameter:
+        return Parameter(self.name, value_type=self.value_type)
+
 
 class ParameterFunction(ParameterExpression):
     def __init__(
         self,
         fn: Callable[[Tuple[Any, ...], ModuleType], ReturnType],
-        parameters: Tuple[str, ...]
+        parameters: Tuple[str, ...],
+        value_type: type = complex
     ):
-        self._parameters = parameters
         self.fn = fn
+        self._parameters = tuple(parameters)
+        self.value_type = value_type
 
     def __str__(self) -> str:
         return f'ParameterFunction({", ".join(self._parameters)})'
@@ -206,6 +223,9 @@ class ParameterFunction(ParameterExpression):
     def parameters(self) -> Tuple[str, ...]:
         return self._parameters
 
+    def copy(self) -> ParameterFunction:
+        return ParameterFunction(self.fn, self._parameters, value_type=self.value_type)
+
 
 class _ParameterUnaryOp(ParameterFunction):
     def __init__(
@@ -218,7 +238,7 @@ class _ParameterUnaryOp(ParameterFunction):
         self.op = op
         self.opname = opname or op.__name__
 
-        super().__init__(self._fn, self.expr.parameters)
+        super().__init__(self._fn, self.expr.parameters, value_type=expr.value_type)
 
     def __str__(self) -> str:
         return f'{self.opname}({self.expr})'
@@ -232,6 +252,9 @@ class _ParameterUnaryOp(ParameterFunction):
         npmod: ModuleType
     ) -> ReturnType:
         return self.op(self.expr.evaluate(args, npmod), npmod)
+
+    def copy(self) -> _ParameterUnaryOp:
+        return _ParameterUnaryOp(self.expr.copy(), self.op, opname=self.opname)
 
 ParameterExpression._unary_op = _ParameterUnaryOp
 
@@ -259,7 +282,7 @@ class _ParameterBinaryOp(ParameterFunction):
         else:
             raise TypeError(f'Cannot apply {op} to {type(lexpr)} and {type(rexpr)}')
 
-        super().__init__(fn, parameters)
+        super().__init__(fn, parameters, value_type=lexpr.value_type)
 
     def __str__(self) -> str:
         return f'{self.opname}({self.lexpr}, {self.rexpr})'
@@ -286,6 +309,14 @@ class _ParameterBinaryOp(ParameterFunction):
     ) -> ReturnType:
         return self.op(self.lexpr.evaluate(args, npmod), self.rexpr, npmod)
 
+    def copy(self) -> _ParameterBinaryOp:
+        try:
+            rexpr = self.rexpr.copy()
+        except (AttributeError, TypeError):
+            rexpr = self.rexpr
+
+        return _ParameterBinaryOp(self.lexpr.copy(), rexpr, self.op, opname=self.opname)
+
 ParameterExpression._binary_op = _ParameterBinaryOp
 
 
@@ -294,15 +325,17 @@ class TimeFunction(Expression):
         self,
         fn: Callable[[TimeType, Tuple[Any, ...], ModuleType], ReturnType],
         parameters: Optional[Tuple[str, ...]] = None,
-        tzero: float = 0.
+        tzero: float = 0.,
+        return_type: type = complex
     ):
         self.fn = fn
         self.tzero = tzero
+        self.return_type = return_type
 
         if parameters is None:
             self.parameters = ()
         else:
-            self.parameters = parameters
+            self.parameters = tuple(parameters)
 
     def _targ(self) -> str:
         if self.tzero == 0.:
@@ -315,7 +348,7 @@ class TimeFunction(Expression):
 
     def __repr__(self) -> str:
         parameters = ', '.join(f'"{p}"' for p in self.parameters)
-        return f'TimeFunction({self.fn.__name__}, ({parameters}), {self.tzero})'
+        return f'TimeFunction({self.fn.__name__}, ({parameters}), {self.tzero}, {self.return_type})'
 
     def __call__(
         self,
@@ -345,6 +378,16 @@ class TimeFunction(Expression):
 
         return self.fn(t, args, npmod)
 
+    def copy(self) -> TimeFunction:
+        return TimeFunction(self.fn, parameters=self.parameters, tzero=self.tzero,
+                            return_type=self.return_type)
+
+    def shift(self, t: float) -> TimeFunction:
+        shifted = self.copy()
+        shifted.tzero += t
+
+        return shifted
+
 
 class _TimeFunctionUnaryOp(TimeFunction):
     def __init__(
@@ -357,7 +400,7 @@ class _TimeFunctionUnaryOp(TimeFunction):
         self.op = op
         self.opname = opname or op.__name__
 
-        super().__init__(self._fn, self.expr.parameters)
+        super().__init__(self._fn, self.expr.parameters, return_type=expr.return_type)
 
     def __str__(self) -> str:
         return f'{self.opname}({self.expr})'
@@ -375,6 +418,9 @@ class _TimeFunctionUnaryOp(TimeFunction):
             t = t - self.expr.tzero
 
         return self.op(self.expr.fn(t, args, npmod), npmod)
+
+    def copy(self) -> _TimeFunctionUnaryOp:
+        return _TimeFunctionUnaryOp(self.expr.copy(), self.op, opname=self.opname)
 
 TimeFunction._unary_op = _TimeFunctionUnaryOp
 
@@ -404,7 +450,7 @@ class _TimeFunctionBinaryOp(TimeFunction):
         else:
             raise TypeError(f'Cannot apply {op} to {type(lexpr)} and {type(rexpr)}')
 
-        super().__init__(fn, parameters)
+        super().__init__(fn, parameters, return_type=lexpr.return_type)
 
     def __str__(self) -> str:
         return f'{self.opname}({self.lexpr}, {self.rexpr})'
@@ -467,6 +513,14 @@ class _TimeFunctionBinaryOp(TimeFunction):
             npmod
         )
 
+    def copy(self) -> _TimeFunctionBinaryOp:
+        try:
+            rexpr = self.rexpr.copy()
+        except (AttributeError, TypeError):
+            rexpr = self.rexpr
+
+        return _TimeFunctionBinaryOp(self.lexpr.copy(), rexpr, self.op, opname=self.opname)
+
 TimeFunction._binary_op = _TimeFunctionBinaryOp
 
 
@@ -479,11 +533,13 @@ class ConstantFunction(TimeFunction):
         if isinstance(value, Number):
             fn = self._fn_Number
             parameters = ()
+            return_type = type(value)
         else:
             fn = self._fn_ParameterExpression
             parameters = value.parameters
+            return_type = value.value_type
 
-        super().__init__(fn, parameters)
+        super().__init__(fn, parameters, return_type=return_type)
 
     def __str__(self) -> str:
         return f'({self._targ()})->{self.value}'
@@ -507,6 +563,14 @@ class ConstantFunction(TimeFunction):
     ) -> ReturnType:
         return (t * 0.) + self.value.evaluate(args, npmod)
 
+    def copy(self) -> ConstantFunction:
+        try:
+            value = self.value.copy()
+        except (AttributeError, TypeError):
+            value = self.value
+
+        return ConstantFunction(value)
+
 
 class PiecewiseFunction(TimeFunction):
     """A time function defined by Piecewise connection of a list of TimeFunctions.
@@ -515,28 +579,30 @@ class PiecewiseFunction(TimeFunction):
         timelist: Ordered list of N + 1 time points, where the first element is the start time
             of the first function and the last element is the end time of the last function.
             The function evaluates to 0 for t < timelist[0] and t > timelist[-1].
-        funclist: List of N TimeFunctions.
+        funclist: List of N TimeFunctions with domain [timelist[k], timelist[k+1]].
     """
     def __init__(
         self,
         timelist: Sequence[float],
         funclist: Sequence[TimeFunction]
     ):
-        self.timelist = timelist
-        self.funclist = funclist
+        self._timelist = np.array(list(timelist) + [np.inf])
+        self._funclist = list(funclist)
+        self._arg_indices = np.cumsum([0] + list(len(func.parameters) for func in funclist))
 
         parameters = sum((func.parameters for func in funclist), ())
-        super().__init__(self._fn, parameters)
+        super().__init__(self._fn, parameters, return_type=funclist[0].return_type)
 
     def __str__(self) -> str:
         value = '{\n'
-        for ifunc, func in enumerate(self.funclist):
-            value += f'  {func}  ({self.timelist[ifunc]:.3f} <= t < {self.timelist[ifunc + 1]:.3f})\n'
+        for ifunc, func in enumerate(self._funclist):
+            value += f'  {func}'
+            value += f'  ({self._timelist[ifunc]:.3f} <= t < {self._timelist[ifunc + 1]:.3f})\n'
         value += '}'
         return value
 
     def __repr__(self) -> str:
-        return f'PiecewiseFunction({len(self.funclist)} functions, {self.timelist})'
+        return f'PiecewiseFunction({len(self._funclist)} functions, {self._timelist})'
 
     def _fn(
         self,
@@ -544,47 +610,26 @@ class PiecewiseFunction(TimeFunction):
         args: Tuple[Any, ...],
         npmod: ModuleType
     ) -> ReturnType:
-        t = npmod.asarray(t)
+        t = npmod.asarray(t, dtype=self.return_type)
 
-        if npmod is jnp and len(t.shape) == 0:
-            iarg_starts = np.cumsum([0] + list(len(func.parameters) for func in self.funclist))
+        def evaluated_fn(func, func_args):
+            def fn(t):
+                return func.evaluate(t, func_args, npmod)
 
-            def make_shifted_fun(ifun):
-                if ifun == 0:
-                    def fn(t, args):
-                        return 0.
-                else:
-                    func = self.funclist[ifun - 1]
-                    t0 = self.timelist[ifun - 1]
-                    iarg_start = iarg_starts[ifun - 1]
-                    iarg_end = iarg_starts[ifun]
-                    def fn(t, args):
-                        return func.evaluate(t - t0, args[iarg_start:iarg_end], npmod)
+            return fn
 
-                return fn
+        funclist = [0.]
+        for ifun, func in enumerate(self._funclist):
+            start = self._arg_indices[ifun]
+            end = self._arg_indices[ifun + 1]
+            funclist.append(evaluated_fn(func, args[start:end]))
+        funclist.append(0.)
 
-            timelist = list(self.timelist)
-            timelist.append(jnp.inf)
-            indices = list(range(len(self.timelist))) + [0]
-            funclist = list(make_shifted_fun(ifun) for ifun in indices)
+        ifun = npmod.searchsorted(self._timelist, t, side='right')
+        dims = list(range(1, len(t.shape) + 1))
+        condlist = npmod.expand_dims(npmod.arange(len(funclist)), dims) == ifun
 
-            ifun = jnp.searchsorted(jnp.array(timelist), t, side='right')
+        return npmod.piecewise(t, condlist, funclist)
 
-            return jax.lax.switch(ifun, funclist, t, args)
-
-        else:
-            result = 0.
-            iarg = 0
-
-            for time, func in zip(self.timelist[:-1], self.funclist):
-                nparam = len(func.parameters)
-
-                result = npmod.where(
-                    t > time,
-                    func.fn(t - time, args[iarg:iarg + nparam], npmod),
-                    result
-                )
-                iarg += nparam
-
-            result = npmod.where(t > self.timelist[-1], 0., result)
-            return result
+    def copy(self) -> PiecewiseFunction:
+        return PiecewiseFunction(self._timelist[:-1], map(lambda f: f.copy(), self._funclist))
