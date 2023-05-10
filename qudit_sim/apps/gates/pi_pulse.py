@@ -136,14 +136,14 @@ def pi_pulse(
 
         return loss
 
-    logger.info('Starting pi pulse identification..')
+    logger.info('Starting pi pulse identification (method="%s")..', method)
 
     if method == 'nm':
         popt, loss, niter = _minimize_nm(loss_fn, fit_tol, maxiter, logger)
     elif method == 'grid':
         popt, loss, niter = _minimize_grid(loss_fn, fit_tol, maxiter, logger)
 
-    logger.info('Done after %d function calls. Final infidelity %.4e.', niter, loss)
+    logger.info('Done after %d iterations. Final infidelity %.4e.', niter, loss)
 
     amp = popt[0] * amp_estimate
     beta = popt[1] * beta_estimate
@@ -171,7 +171,7 @@ def _minimize_nm(loss_fn, fit_tol, maxiter, logger):
     optres = sciopt.minimize(loss_fn, (1., 1.), method='Nelder-Mead', tol=fit_tol,
                              options={'maxiter': maxiter}, callback=callback)
 
-    return optres.x, optres.nit, optres.fun
+    return optres.x, optres.fun, optres.nit
 
 
 def _minimize_grid(loss_fn, fit_tol, maxiter, logger):
@@ -222,4 +222,4 @@ def _minimize_grid(loss_fn, fit_tol, maxiter, logger):
 
         grids = new_grids
 
-    return popt, istep, last_losses[0]
+    return popt, last_losses[0], istep
