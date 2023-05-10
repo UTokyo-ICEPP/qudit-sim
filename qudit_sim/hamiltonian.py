@@ -17,9 +17,10 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Un
 import numpy as np
 import qutip as qtp
 
-from .drive import CosFunction, DriveTerm, HamiltonianCoefficient, SetFrequency, SinFunction
+from .drive import CosFunction, SetFrequency, SinFunction
 from .expression import ConstantFunction, ParameterExpression, TimeFunction
 from .frame import FrameSpec, SystemFrame
+from .pulse_sequence import HamiltonianCoefficient, PulseSequence
 
 QobjCoeffPair = List[Union[qtp.Qobj, HamiltonianCoefficient]]
 
@@ -159,7 +160,7 @@ class HamiltonianBuilder:
     def drive(
         self,
         qudit_id: Optional[str] = None
-    ) -> Union[Dict[str, List[DriveTerm]], List[DriveTerm]]:
+    ) -> Union[Dict[str, List[PulseSequence]], List[PulseSequence]]:
         """Drive terms for the qudit."""
         if qudit_id is None:
             return copy.deepcopy(self._drive)
@@ -395,9 +396,17 @@ class HamiltonianBuilder:
             amplitude: Function :math:`r(t)`. Ignored if ``sequence`` is set.
             sequence: Pulse sequence of the drive.
         """
-        self._drive[qudit_id].append(
-            DriveTerm(frequency=frequency, amplitude=amplitude, sequence=sequence)
-        )
+        if sequence is None:
+            if frequency is None or amplitude is None:
+                raise RuntimeError('Frequency and amplitude must be set if sequence is None.')
+
+            sequence = PulseSequence([SetFrequency(frequency), amplitude])
+        else:
+            sequence = PulseSequence(sequence)
+            if frequency is not None and not isinstance(sequence[0], SetFrequency):
+                sequence.insert(0, SetFrequency(frequency))
+
+        self._drive[qudit_id].append(sequence)
 
     def clear_drive(self) -> None:
         """Remove all drives."""
@@ -716,21 +725,7 @@ class HamiltonianBuilder:
             if len(drives) == 0:
                 continue
 
-            drive_freqs = list()
-            for drive in drives:
-                frequency = drive.frequency
-                if isinstance(frequency, ParameterExpression):
-                    try:
-                        args = tuple(freq_args[param] for param in frequency.parameters)
-                    except KeyError:
-                        raise RuntimeError(f'Frequency for a drive term of {qid} is parametric but no value'
-                                           ' was given as freq_args')
-
-                    drive_freqs.append(frequency.evaluate(args))
-                else:
-                    drive_freqs.append(frequency)
-
-            drive_freqs = np.array(drive_freqs)
+            drive_freqs = np.array(list(drive.max_frequency(freq_args) for drive in drives))
             if self.use_rwa:
                 rel_sign = -1
             else:
