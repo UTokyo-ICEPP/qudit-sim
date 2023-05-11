@@ -41,26 +41,44 @@ class Expression(ABC):
         return type(self)._binary_op(self, other,
                                      lambda a1, a2, npmod: npmod.multiply(a1, a2), 'multiply')
 
+    def __truediv__(self, other: Union['Expression', array_like]) -> 'Expression':
+        return type(self)._binary_op(self, other,
+                                     lambda a1, a2, npmod: npmod.true_divide(a1, a2), 'divide')
+
+    def __pow__(self, other: Union['Expression', array_like]) -> 'Expression':
+        return type(self)._binary_op(self, other,
+                                     lambda a1, a2, npmod: npmod.power(a1, a2), 'power')
+
     def __radd__(self, other: Union['Expression', array_like]) -> 'Expression':
         if isinstance(other, Expression):
-            return type(self)._binary_op(other, self,
-                                         lambda a1, a2, npmod: npmod.add(a1, a2), 'add')
+            return other.__add__(self)
         else:
             return self.__add__(other)
 
     def __rsub__(self, other: Union['Expression', array_like]) -> 'Expression':
         if isinstance(other, Expression):
-            type(self)._binary_op(other, self,
-                                  lambda a1, a2, npmod: npmod.subtract(a1, a2), 'subtract')
+            return other.__sub__(self)
         else:
             return (-self).__add__(other)
 
     def __rmul__(self, other: Union['Expression', array_like]) -> 'Expression':
         if isinstance(other, Expression):
-            type(self)._binary_op(other, self,
-                                  lambda a1, a2, npmod: npmod.multiply(a1, a2), 'multiply')
+            return other.__mul__(self)
         else:
             return self.__mul__(other)
+
+    def __rtruediv__(self, other: Union['Expression', array_like]) -> 'Expression':
+        if isinstance(other, Expression):
+            return other.__truediv__(self)
+        else:
+            return type(self)._unary_op(self.__truediv__(other),
+                                        lambda a, npmod: npmod.reciprocal(a), 'reciprocal')
+
+    def __rpow__(self, other: Union['Expression', array_like]) -> 'Expression':
+        if isinstance(other, Expression):
+            return other.__pow__(self)
+        else:
+            return self.__pow__(other)
 
     def __abs__(self) -> 'Expression':
         return type(self)._unary_op(self,
