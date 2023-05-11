@@ -85,6 +85,16 @@ class OscillationFunction(TimeFunction):
     ) -> ReturnType:
         return self.op(self.frequency * t + self.phase, npmod)
 
+    def copy(self) -> 'OscillationFunction':
+        args = []
+        for arg in [self.frequency, self.phase]:
+            try:
+                args.append(arg.copy())
+            except (AttributeError, TypeError):
+                args.append(arg)
+
+        return type(self)(*args)
+
 
 class CosFunction(OscillationFunction):
     def __init__(

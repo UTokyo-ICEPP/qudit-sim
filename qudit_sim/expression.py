@@ -96,6 +96,9 @@ class Expression(ABC):
         return type(self)._unary_op(self,
                                     lambda a, npmod: npmod.exp(a), 'exp')
 
+    def copy(self) -> 'Expression':
+        raise NotImplementedError('To be implemented in subclasses.')
+
 
 class ParameterExpression(Expression):
     def subs(
@@ -114,9 +117,6 @@ class ParameterExpression(Expression):
 
     @property
     def parameters(self) -> Tuple[str, ...]:
-        raise NotImplementedError('To be implemented in subclasses.')
-
-    def copy(self) -> ParameterExpression:
         raise NotImplementedError('To be implemented in subclasses.')
 
 
@@ -149,7 +149,7 @@ class Constant(ParameterExpression):
     def parameters(self) -> Tuple[str, ...]:
         return ()
 
-    def copy(self) -> Constant:
+    def copy(self) -> 'Constant':
         return Constant(self.value)
 
 
@@ -182,7 +182,7 @@ class Parameter(ParameterExpression):
     def parameters(self) -> Tuple[str, ...]:
         return (self.name,)
 
-    def copy(self) -> Parameter:
+    def copy(self) -> 'Parameter':
         return Parameter(self.name, value_type=self.value_type)
 
 
@@ -223,7 +223,7 @@ class ParameterFunction(ParameterExpression):
     def parameters(self) -> Tuple[str, ...]:
         return self._parameters
 
-    def copy(self) -> ParameterFunction:
+    def copy(self) -> 'ParameterFunction':
         return ParameterFunction(self.fn, self._parameters, value_type=self.value_type)
 
 
@@ -253,7 +253,7 @@ class _ParameterUnaryOp(ParameterFunction):
     ) -> ReturnType:
         return self.op(self.expr.evaluate(args, npmod), npmod)
 
-    def copy(self) -> _ParameterUnaryOp:
+    def copy(self) -> '_ParameterUnaryOp':
         return _ParameterUnaryOp(self.expr.copy(), self.op, opname=self.opname)
 
 ParameterExpression._unary_op = _ParameterUnaryOp
@@ -309,7 +309,7 @@ class _ParameterBinaryOp(ParameterFunction):
     ) -> ReturnType:
         return self.op(self.lexpr.evaluate(args, npmod), self.rexpr, npmod)
 
-    def copy(self) -> _ParameterBinaryOp:
+    def copy(self) -> '_ParameterBinaryOp':
         try:
             rexpr = self.rexpr.copy()
         except (AttributeError, TypeError):
@@ -378,11 +378,11 @@ class TimeFunction(Expression):
 
         return self.fn(t, args, npmod)
 
-    def copy(self) -> TimeFunction:
+    def copy(self) -> 'TimeFunction':
         return TimeFunction(self.fn, parameters=self.parameters, tzero=self.tzero,
                             return_type=self.return_type)
 
-    def shift(self, t: float) -> TimeFunction:
+    def shift(self, t: float) -> 'TimeFunction':
         shifted = self.copy()
         shifted.tzero += t
 
@@ -419,7 +419,7 @@ class _TimeFunctionUnaryOp(TimeFunction):
 
         return self.op(self.expr.fn(t, args, npmod), npmod)
 
-    def copy(self) -> _TimeFunctionUnaryOp:
+    def copy(self) -> '_TimeFunctionUnaryOp':
         return _TimeFunctionUnaryOp(self.expr.copy(), self.op, opname=self.opname)
 
 TimeFunction._unary_op = _TimeFunctionUnaryOp
@@ -513,7 +513,7 @@ class _TimeFunctionBinaryOp(TimeFunction):
             npmod
         )
 
-    def copy(self) -> _TimeFunctionBinaryOp:
+    def copy(self) -> '_TimeFunctionBinaryOp':
         try:
             rexpr = self.rexpr.copy()
         except (AttributeError, TypeError):
@@ -563,7 +563,7 @@ class ConstantFunction(TimeFunction):
     ) -> ReturnType:
         return (t * 0.) + self.value.evaluate(args, npmod)
 
-    def copy(self) -> ConstantFunction:
+    def copy(self) -> 'ConstantFunction':
         try:
             value = self.value.copy()
         except (AttributeError, TypeError):
@@ -631,5 +631,5 @@ class PiecewiseFunction(TimeFunction):
 
         return npmod.piecewise(t, condlist, funclist)
 
-    def copy(self) -> PiecewiseFunction:
+    def copy(self) -> 'PiecewiseFunction':
         return PiecewiseFunction(self._timelist[:-1], map(lambda f: f.copy(), self._funclist))

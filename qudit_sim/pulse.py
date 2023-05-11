@@ -39,7 +39,35 @@ class Pulse(TimeFunction):
         return f'Pulse(duration={self.duration}, tzero={self.tzero})'
 
 
-class Gaussian(Pulse):
+class ScalablePulse(Pulse):
+    """Pulse with parametrized amplitude."""
+    def __init__(
+        self,
+        duration: float,
+        amp: Union[float, complex, ParameterExpression],
+        fn: Callable[[TimeType, Tuple[Any, ...], ModuleType], ReturnType],
+        parameters: Optional[Tuple[str, ...]] = None,
+        tzero: float = 0.
+    ):
+        if isinstance(amp, Number):
+            self._amp = Constant(complex(amp))
+        else:
+            self._amp = amp.copy()
+
+        if parameters is not None:
+            parameters = self._amp.parameters + parameters
+
+        super().__init__(duration, fn, parameters, tzero)
+
+    @property
+    def amp(self) -> Union[complex, ParameterExpression]:
+        if isinstance(self._amp, Constant):
+            return self._amp.evaluate()
+        else:
+            return self._amp
+
+
+class Gaussian(ScalablePulse):
     """Gaussian pulse.
 
     Args:
@@ -59,11 +87,6 @@ class Gaussian(Pulse):
         zero_ends: bool = True,
         tzero: float = 0.
     ):
-        if isinstance(amp, Number):
-            self.amp = Constant(complex(amp))
-        else:
-            self.amp = amp
-
         self.sigma = sigma
 
         if center is None:
@@ -80,11 +103,15 @@ class Gaussian(Pulse):
         else:
             self._pedestal = 0.
 
-        super().__init__(duration, self._fn, self.amp.parameters, tzero)
+        super().__init__(duration, amp, self._fn, tzero=tzero)
 
     def __str__(self) -> str:
         return (f'Gaussian(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, center={self.center},'
                 f' zero_ends={self._pedestal != 0.}, tzero={self.tzero})')
+
+    @property
+    def zero_ends(self) -> bool:
+        return self._pedestal != 0.
 
     def _fn(
         self,
@@ -94,12 +121,15 @@ class Gaussian(Pulse):
     ) -> ReturnType:
         x_over_sqrt2 = (t - self.center) / self.sigma * np.sqrt(0.5)
         v = npmod.exp(-npmod.square(x_over_sqrt2))
-        amp = self.amp.evaluate(args, npmod)
+        amp = self._amp.evaluate(args, npmod)
         return npmod.asarray(amp / (1. - self._pedestal) * (v - self._pedestal),
                              dtype='complex128')
 
+    def copy(self) -> 'Gaussian':
+        return Gaussian(self.duration, self.amp, self.sigma, self.center, self.zero_ends, self.tzero)
 
-class GaussianSquare(Pulse):
+
+class GaussianSquare(ScalablePulse):
     """Gaussian-square pulse.
 
     Args:
@@ -124,11 +154,6 @@ class GaussianSquare(Pulse):
             raise ValueError("That's just a square pulse, dude")
 
         assert width < duration, 'GaussianSquare width must be less than duration'
-
-        if isinstance(amp, Number):
-            self.amp = Constant(complex(amp))
-        else:
-            self.amp = amp
 
         self.sigma = sigma
         self.width = width
@@ -161,7 +186,7 @@ class GaussianSquare(Pulse):
         elif fall:
             fn = self._fn_right
 
-        super().__init__(duration, fn, self.amp.parameters, tzero=tzero)
+        super().__init__(duration, amp, fn, tzero=tzero)
 
     def __str__(self) -> str:
         rise = self.gauss_rise is not None
@@ -175,6 +200,11 @@ class GaussianSquare(Pulse):
         return (f'GaussianSquare(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, width={self.width}, '
                 f' zero_ends={zero_ends}, rise={rise}, fall={fall})')
 
+    @property
+    def zero_ends(self) -> bool:
+        return (self.gauss_rise and self.gauss_rise.zero_ends) or \
+            (self.gauss_fall and self.gauss_fall.zero_ends)
+
     def _fn_full(
         self,
         t: TimeType,
@@ -186,7 +216,7 @@ class GaussianSquare(Pulse):
         value_left = npmod.asarray(t <= self.t_plateau) * (self.gauss_rise(t, npmod=npmod) - 1.)
         value_right = npmod.asarray(t > self.t_plateau + self.width) * (self.gauss_fall(t, npmod=npmod) - 1.)
 
-        return (value_left + value_right + 1.) * self.amp.evaluate(args, npmod)
+        return (value_left + value_right + 1.) * self._amp.evaluate(args, npmod)
 
     def _fn_left(
         self,
@@ -198,7 +228,7 @@ class GaussianSquare(Pulse):
 
         value_left = npmod.asarray(t <= self.t_plateau) * (self.gauss_rise(t, npmod=npmod) - 1.)
 
-        return (value_left + 1.) * self.amp.evaluate(args, npmod)
+        return (value_left + 1.) * self._amp.evaluate(args, npmod)
 
     def _fn_right(
         self,
@@ -210,7 +240,11 @@ class GaussianSquare(Pulse):
 
         value_right = npmod.asarray(t > self.t_plateau + self.width) * (self.gauss_fall(t, npmod=npmod) - 1.)
 
-        return (value_right + 1.) * self.amp.evaluate(args, npmod)
+        return (value_right + 1.) * self._amp.evaluate(args, npmod)
+
+    def copy(self) -> 'GaussianSquare':
+        return GaussianSquare(self.duration, self.amp, self.sigma, self.width, self.zero_ends,
+                              self.gauss_rise is not None, self.gauss_fall is not None, self.tzero)
 
 
 class Drag(Gaussian):
@@ -245,15 +279,22 @@ class Drag(Gaussian):
         )
 
         if isinstance(beta, Number):
-            self.beta = Constant(float(beta))
+            self._beta = Constant(float(beta))
         else:
-            self.beta = beta
+            self._beta = beta.copy()
 
-        self.parameters += self.beta.parameters
+        self.parameters += self._beta.parameters
 
     def __str__(self) -> str:
         return (f'Drag(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, beta={self.beta}, '
                 f'center={self.center}, zero_ends={self._pedestal != 0.})')
+
+    @property
+    def beta(self) -> Union[float, ParameterExpression]:
+        if isinstance(self._beta, Constant):
+            return self._beta.evaluate()
+        else:
+            return self._beta
 
     def _fn(
         self,
@@ -266,12 +307,16 @@ class Drag(Gaussian):
         gauss = super()._fn(t, args, npmod)
         dgauss = -(t - self.center) / npmod.square(self.sigma) * gauss
 
-        beta = self.beta.evaluate(args[-len(self.beta.parameters):], npmod)
+        beta = self._beta.evaluate(args[-len(self._beta.parameters):], npmod)
 
         return gauss + 1.j * beta * dgauss
 
+    def copy(self) -> 'Drag':
+        return Drag(self.duration, self.amp, self.sigma, self.beta, self.center, self.zero_ends,
+                    self.tzero)
 
-class Square(Pulse):
+
+class Square(ScalablePulse):
     """Square (constant) pulse.
 
     Args:
@@ -284,12 +329,7 @@ class Square(Pulse):
         amp: Union[float, complex, ParameterExpression],
         tzero: float = 0.
     ):
-        if isinstance(amp, Number):
-            self.amp = Constant(complex(amp))
-        else:
-            self.amp = amp
-
-        super().__init__(duration, self._fn, self.amp.parameters, tzero=tzero)
+        super().__init__(duration, amp, self._fn, tzero=tzero)
 
     def __str__(self) -> str:
         return f'Square(duration={self.duration}, amp={self.amp})'
@@ -300,4 +340,7 @@ class Square(Pulse):
         args: Tuple[Any, ...] = (),
         npmod: ModuleType = np
     ) -> ReturnType:
-        return npmod.full_like(t, self.amp.evaluate(args, npmod))
+        return npmod.full_like(t, self._amp.evaluate(args, npmod))
+
+    def copy(self) -> 'Square':
+        return Square(self.duration, self.amp, self.tzero)
