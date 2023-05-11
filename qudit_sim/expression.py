@@ -397,6 +397,9 @@ class TimeFunction(Expression):
 
         return self.fn(t, args, npmod)
 
+    def is_nonzero(self) -> bool:
+        return True
+
     def copy(self) -> 'TimeFunction':
         return TimeFunction(self.fn, parameters=self.parameters, tzero=self.tzero,
                             value_type=self.value_type)
@@ -568,6 +571,14 @@ class ConstantFunction(TimeFunction):
     def __repr__(self) -> str:
         return f'ConstantFunction({repr(self.value)})'
 
+    def __add__(self, other: Union[TimeFunction, array_like]) -> TimeFunction:
+        if isinstance(other, ConstantFunction):
+            return ConstantFunction(self.value + other.value)
+        elif isinstance(other, TimeFunction) and self.value == 0.:
+            return other.copy()
+        else:
+            return super().__add__(other)
+
     def _fn_Number(
         self,
         t: TimeType,
@@ -583,6 +594,9 @@ class ConstantFunction(TimeFunction):
         npmod: ModuleType
     ) -> ReturnType:
         return (t * 0.) + self.value.evaluate(args, npmod)
+
+    def is_nonzero(self) -> bool:
+        return self.value != 0.
 
     def copy(self) -> 'ConstantFunction':
         try:
@@ -609,10 +623,10 @@ class PiecewiseFunction(TimeFunction):
     ):
         self._timelist = np.array(list(timelist) + [np.inf])
         self._funclist = list(funclist)
-        self._arg_indices = np.cumsum([0] + list(len(func.parameters) for func in funclist))
+        self._arg_indices = np.cumsum([0] + list(len(func.parameters) for func in self._funclist))
 
-        parameters = sum((func.parameters for func in funclist), ())
-        super().__init__(self._fn, parameters, value_type=funclist[0].value_type)
+        parameters = sum((func.parameters for func in self._funclist), ())
+        super().__init__(self._fn, parameters, value_type=self._funclist[0].value_type)
 
     def __str__(self) -> str:
         value = '{\n'
