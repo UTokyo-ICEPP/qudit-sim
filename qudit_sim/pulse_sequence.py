@@ -89,83 +89,13 @@ class PulseSequence(list):
         """
         instlist = self._make_instlist()
 
-        tlist = list()
-        flist = list()
+        tlist = []
+        flist = []
         for time, frequency, phase_offset, inst in instlist:
-            envelope = _make_envelope(inst, 1., phase_offset, True)
-
-
             tlist.append(time)
-            flist.append(envelope)
-            ylist.append(fn_y)
-        funclist = list()
+            flist.append(_make_envelope(inst, 1., phase_offset, True))
 
-        frequency = None
-        phase_offset = 0.
-        time = 0.
-
-        for inst in self:
-            if isinstance(inst, ShiftFrequency):
-                if frequency is None:
-                    raise RuntimeError('ShiftFrequency called before SetFrequency')
-
-                frequency += inst.value
-            elif isinstance(inst, ShiftPhase):
-                phase_offset += inst.value
-            elif isinstance(inst, SetFrequency):
-                frequency = inst.value
-            elif isinstance(inst, SetPhase):
-                if frequency is None:
-                    raise RuntimeError('SetPhase called before SetFrequency')
-
-                phase_offset = inst.value - frequency * time
-            elif isinstance(inst, Delay):
-                funclist.append((time, 0.))
-                time += inst.value
-            else:
-                if frequency is None:
-                    raise RuntimeError('Pulse called before SetFrequency')
-
-                envelope = _make_envelope(inst, 1., phase_offset, False)
-                funclist.append((time, envelope))
-
-                if isinstance(inst, Pulse):
-                    time += inst.duration
-                else:
-                    if time != 0. and isinstance(inst, str) and \
-                        re.search('[^a-zA-Z_]t[^a-zA-Z0-9_]', inst):
-                        warnings.warn('Possibly time-dependent string amplitude in a sequence'
-                                      ' detected; this is not supported.', UserWarning)
-                    # Indefinite drive
-                    time = np.inf
-                    break
-
-        funclist.append((time, None, None))
-
-        time = 0.
-
-        for inst in self:
-            if isinstance(inst, Delay):
-                funclist.append((time, 0.))
-                time += inst.value
-            elif isinstance(inst, TimeFunction):
-                fn = copy.copy(inst)
-                fn.tzero = time
-                funclist.append((time, fn))
-                time += inst.duration
-
-        funclist.append((time, None))
-
-        result = 0.
-        for time, func in funclist[:-1]:
-            if isinstance(func, TimeFunction):
-                result = np.where(t > time, func(t, args), result)
-            else:
-                result = np.where(t > time, func, result)
-
-        result = np.where(t > funclist[-1][0], 0., result)
-
-        return result
+        return _concatenate_functions(flist, tlist)(t, args)
 
     def generate_fn(
         self,
@@ -187,9 +117,9 @@ class PulseSequence(list):
         """
         instlist = self._make_instlist()
 
-        tlist = list()
-        xlist = list()
-        ylist = list()
+        tlist = []
+        xlist = []
+        ylist = []
         for time, frequency, phase_offset, inst in instlist:
             envelope = _make_envelope(inst, drive_base, phase_offset, as_timefn)
 
@@ -206,37 +136,12 @@ class PulseSequence(list):
             xlist.append(fn_x)
             ylist.append(fn_y)
 
-        if len(tlist) == 1:
-            raise ValueError('No drive amplitude specified')
-
         if frame_frequency != 0. or rwa:
-            flists = [xlist, ylist]
+            return _concatenate_functions(xlist, tlist), _concatenate_functions(ylist, tlist)
         else:
             # ylist is a list of Nones
-            flists = [xlist]
+            return _concatenate_functions(xlist, tlist), None
 
-        fns = []
-        for flist in flists:
-            if len(tlist) == 2:
-                fns.append(flist[0])
-            elif all(isinstance(func, TimeFunction) for func in flist[:-1]):
-                if (all(isinstance(func, ConstantFunction) for func in flist[:-1])
-                    and np.allclose(list(func.value for func in flist[:-1]), flist[0].value)):
-                    fn = ConstantFunction(flist[0].value)
-                else:
-                    fn = PiecewiseFunction(tlist, flist)
-
-                fns.append(fn)
-            elif all(isinstance(func, np.ndarray) for func in flist[:-1]):
-                fns.append(np.concatenate(flist[:-1]))
-            else:
-                raise ValueError('Cannot generate a Hamiltonian coefficient from amplitude types'
-                                 f' {list(type(func) for func in flist[:-1])}')
-
-        if len(fns) == 1:
-            fns.append(None)
-
-        return tuple(fns)
 
     def _make_instlist(self):
         instlist = list()
@@ -288,9 +193,9 @@ class PulseSequence(list):
 
 def _make_envelope(inst, drive_base, phase_offset, as_timefn):
     if isinstance(phase_offset, Number):
-        phase_factor = np.exp(-1.j * phase_offset)
+        phase_factor = np.exp(1.j * phase_offset)
     else:
-        phase_factor = (phase_offset * (-1.j)).exp()
+        phase_factor = (phase_offset * 1.j).exp()
 
     if isinstance(inst, str):
         # If this is actually a static expression, convert to complex
@@ -411,3 +316,20 @@ def _modulate(envelope, frequency, frame_frequency):
         else:
             return (f'{labframe_fn} * cos({frame_frequency} * t)',
                     f'{labframe_fn} * sin({frame_frequency} * t)')
+
+
+def _concatenate_functions(flist, tlist):
+    if len(tlist) == 1:
+        raise ValueError('No drive amplitude specified')
+    elif len(tlist) == 2:
+        return flist[0]
+    elif (all(isinstance(func, ConstantFunction) for func in flist[:-1])
+        and np.allclose(list(func.value for func in flist[:-1]), flist[0].value)):
+        return ConstantFunction(flist[0].value)
+    elif all(isinstance(func, TimeFunction) for func in flist[:-1]):
+        return PiecewiseFunction(tlist, flist)
+    elif all(isinstance(func, np.ndarray) for func in flist[:-1]):
+        return np.concatenate(flist[:-1])
+    else:
+        raise ValueError('Cannot generate a Hamiltonian coefficient from amplitude types'
+                         f' {list(type(func) for func in flist[:-1])}')
