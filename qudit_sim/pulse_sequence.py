@@ -209,23 +209,28 @@ class PulseSequence(list):
         if len(tlist) == 1:
             raise ValueError('No drive amplitude specified')
 
-        elif len(tlist) == 2:
-            fn_x = xlist[0]
-            fn_y = ylist[0]
-
-        elif all(isinstance(func, TimeFunction) for func in xlist[:-1]):
-            fn_x = PiecewiseFunction(tlist, xlist[:-1])
-            fn_y = PiecewiseFunction(tlist, ylist[:-1])
-
-        elif all(isinstance(func, np.ndarray) for func in xlist[:-1]):
-            fn_x = np.concatenate(xlist[:-1])
-            fn_y = np.concatenate(ylist[:-1])
-
+        if frame_frequency != 0. or rwa:
+            flists = [xlist, ylist]
         else:
-            raise ValueError('Cannot generate a Hamiltonian coefficient from amplitude types'
-                             f' {list(type(func) for func in xlist[:-1])}')
+            # ylist is a list of Nones
+            flists = [xlist]
 
-        return fn_x, fn_y
+        fns = []
+        for flist in flists:
+            if len(tlist) == 2:
+                fns.append(flist[0])
+            elif all(isinstance(func, TimeFunction) for func in flist[:-1]):
+                fns.append(_make_piecewise(tlist, flist[:-1]))
+            elif all(isinstance(func, np.ndarray) for func in flist[:-1]):
+                fns.append(np.concatenate(flist[:-1]))
+            else:
+                raise ValueError('Cannot generate a Hamiltonian coefficient from amplitude types'
+                                 f' {list(type(func) for func in flist[:-1])}')
+
+        if len(fns) == 1:
+            fns.append(None)
+
+        return tuple(fns)
 
     def _make_instlist(self):
         instlist = list()
@@ -270,7 +275,7 @@ class PulseSequence(list):
                     time = np.inf
                     break
 
-        instlist.append((time, None, None, 0.))
+        instlist.append((time, None, 0., 0.))
 
         return instlist
 
@@ -374,7 +379,7 @@ def _modulate(envelope, frequency, frame_frequency):
         labframe_fn = (ExpFunction(-frequency) * envelope).real
 
         if frame_frequency == 0.:
-            return labframe_fn, ConstantFunction(0.)
+            return labframe_fn, None
         else:
             return labframe_fn * CosFunction(frame_frequency), labframe_fn * SinFunction(frame_frequency)
 
@@ -396,7 +401,15 @@ def _modulate(envelope, frequency, frame_frequency):
             labframe_fn = f'(2. * ({envelope}) * (cos({frequency} * t) - 1.j * sin({frequency} * t))).real'
 
         if frame_frequency == 0.:
-            return labframe_fn, ''
+            return labframe_fn, None
         else:
             return (f'{labframe_fn} * cos({frame_frequency} * t)',
                     f'{labframe_fn} * sin({frame_frequency} * t)')
+
+
+def _make_piecewise(tlist, flist):
+    if all(isinstance(f, ConstantFunction) for f in flist) and \
+        np.allclose(list(f.value for f in flist), flist[0].value):
+            return ConstantFunction(flist[0].value)
+
+    return PiecewiseFunction(tlist, flist)

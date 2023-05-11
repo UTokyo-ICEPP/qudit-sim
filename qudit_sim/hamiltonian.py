@@ -657,7 +657,8 @@ class HamiltonianBuilder:
 
                         if isinstance(fn_x, Number):
                             hstatic += fn_x * h_x
-                            hstatic += fn_y * h_y
+                            if fn_y:
+                                hstatic += fn_y * h_y
 
                         elif isinstance(fn_x, str):
                             hdrive.append([h_x, fn_x])
@@ -667,14 +668,17 @@ class HamiltonianBuilder:
                         elif isinstance(fn_x, np.ndarray):
                             if np.any(fn_x):
                                 hdrive.append([h_x, fn_x])
-                            if np.any(fn_y):
+                            if fn_y is not None and np.any(fn_y):
                                 hdrive.append([h_y, fn_y])
 
                         else:
                             # TimeFunction
-                            if not (isinstance(fn_x, ConstantFunction) and fn_x.value == 0.):
+                            def is_nonzero_fn(fn):
+                                return not (isinstance(fn, ConstantFunction) and fn.value == 0.)
+
+                            if is_nonzero_fn(fn_x):
                                 hdrive.append([h_x, fn_x])
-                            if not (isinstance(fn_y, ConstantFunction) and fn_y.value == 0.):
+                            if fn_y is not None and is_nonzero_fn(fn_y):
                                 hdrive.append([h_y, fn_y])
 
         if np.any(hstatic.data.data):
