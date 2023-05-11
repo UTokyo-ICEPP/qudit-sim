@@ -28,7 +28,7 @@ class Pulse(TimeFunction):
         self,
         duration: float,
         fn: Callable[[TimeType, Tuple[Any, ...], ModuleType], ReturnType],
-        parameters: Optional[Tuple[str, ...]] = None,
+        parameters: Tuple[str, ...] = (),
         tzero: float = 0.
     ):
         assert duration > 0., 'Pulse duration must be positive'
@@ -46,7 +46,7 @@ class ScalablePulse(Pulse):
         duration: float,
         amp: Union[float, complex, ParameterExpression],
         fn: Callable[[TimeType, Tuple[Any, ...], ModuleType], ReturnType],
-        parameters: Optional[Tuple[str, ...]] = None,
+        parameters: Tuple[str, ...] = (),
         tzero: float = 0.
     ):
         if isinstance(amp, Number):
@@ -54,8 +54,7 @@ class ScalablePulse(Pulse):
         else:
             self._amp = amp.copy()
 
-        if parameters is not None:
-            parameters = self._amp.parameters + parameters
+        parameters = self._amp.parameters + parameters
 
         super().__init__(duration, fn, parameters, tzero)
 
@@ -65,6 +64,9 @@ class ScalablePulse(Pulse):
             return self._amp.evaluate()
         else:
             return self._amp
+
+    def _scale(self, value: ReturnType, args: Tuple[Any, ...], npmod: ModuleType):
+        return value * self._amp.evaluate(args, npmod)
 
 
 class Gaussian(ScalablePulse):
@@ -121,9 +123,8 @@ class Gaussian(ScalablePulse):
     ) -> ReturnType:
         x_over_sqrt2 = (t - self.center) / self.sigma * np.sqrt(0.5)
         v = npmod.exp(-npmod.square(x_over_sqrt2))
-        amp = self._amp.evaluate(args, npmod)
-        return npmod.asarray(amp / (1. - self._pedestal) * (v - self._pedestal),
-                             dtype='complex128')
+        norm_val = npmod.asarray((1. - self._pedestal) * (v - self._pedestal), dtype='complex128')
+        return self._scale(norm_val, args, npmod)
 
     def copy(self) -> 'Gaussian':
         return Gaussian(self.duration, self.amp, self.sigma, self.center, self.zero_ends, self.tzero)
@@ -197,8 +198,9 @@ class GaussianSquare(ScalablePulse):
         else:
             zero_ends = self.gauss_fall._pedestal != 0.
 
-        return (f'GaussianSquare(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, width={self.width}, '
-                f' zero_ends={zero_ends}, rise={rise}, fall={fall})')
+        return (f'GaussianSquare(duration={self.duration}, amp={self.amp}, sigma={self.sigma},'
+                f' width={self.width}, zero_ends={zero_ends}, rise={rise}, fall={fall},'
+                f' tzero={self.tzero})')
 
     @property
     def zero_ends(self) -> bool:
@@ -215,8 +217,7 @@ class GaussianSquare(ScalablePulse):
 
         value_left = npmod.asarray(t <= self.t_plateau) * (self.gauss_rise(t, npmod=npmod) - 1.)
         value_right = npmod.asarray(t > self.t_plateau + self.width) * (self.gauss_fall(t, npmod=npmod) - 1.)
-
-        return (value_left + value_right + 1.) * self._amp.evaluate(args, npmod)
+        return self._scale((value_left + value_right + 1.), args, npmod)
 
     def _fn_left(
         self,
@@ -227,8 +228,7 @@ class GaussianSquare(ScalablePulse):
         t = npmod.asarray(t)
 
         value_left = npmod.asarray(t <= self.t_plateau) * (self.gauss_rise(t, npmod=npmod) - 1.)
-
-        return (value_left + 1.) * self._amp.evaluate(args, npmod)
+        return self._scale(value_left + 1., args, npmod)
 
     def _fn_right(
         self,
@@ -239,8 +239,7 @@ class GaussianSquare(ScalablePulse):
         t = npmod.asarray(t)
 
         value_right = npmod.asarray(t > self.t_plateau + self.width) * (self.gauss_fall(t, npmod=npmod) - 1.)
-
-        return (value_right + 1.) * self._amp.evaluate(args, npmod)
+        return self._scale(value_right + 1., args, npmod)
 
     def copy(self) -> 'GaussianSquare':
         return GaussianSquare(self.duration, self.amp, self.sigma, self.width, self.zero_ends,
@@ -287,7 +286,7 @@ class Drag(Gaussian):
 
     def __str__(self) -> str:
         return (f'Drag(duration={self.duration}, amp={self.amp}, sigma={self.sigma}, beta={self.beta}, '
-                f'center={self.center}, zero_ends={self._pedestal != 0.})')
+                f'center={self.center}, zero_ends={self.zero_ends}, tzero={self.tzero})')
 
     @property
     def beta(self) -> Union[float, ParameterExpression]:
@@ -332,7 +331,7 @@ class Square(ScalablePulse):
         super().__init__(duration, amp, self._fn, tzero=tzero)
 
     def __str__(self) -> str:
-        return f'Square(duration={self.duration}, amp={self.amp})'
+        return f'Square(duration={self.duration}, amp={self.amp}, tzero={self.tzero})'
 
     def _fn(
         self,
@@ -340,7 +339,7 @@ class Square(ScalablePulse):
         args: Tuple[Any, ...] = (),
         npmod: ModuleType = np
     ) -> ReturnType:
-        return npmod.full_like(t, self._amp.evaluate(args, npmod))
+        return self._scale(npmod.ones_like(t), args, npmod)
 
     def copy(self) -> 'Square':
         return Square(self.duration, self.amp, self.tzero)

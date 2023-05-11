@@ -220,7 +220,13 @@ class PulseSequence(list):
             if len(tlist) == 2:
                 fns.append(flist[0])
             elif all(isinstance(func, TimeFunction) for func in flist[:-1]):
-                fns.append(_make_piecewise(tlist, flist[:-1]))
+                if (all(isinstance(func, ConstantFunction) for func in flist[:-1])
+                    and np.allclose(list(func.value for func in flist[:-1]), flist[0].value)):
+                    fn = ConstantFunction(flist[0].value)
+                else:
+                    fn = PiecewiseFunction(tlist, flist)
+
+                fns.append(fn)
             elif all(isinstance(func, np.ndarray) for func in flist[:-1]):
                 fns.append(np.concatenate(flist[:-1]))
             else:
@@ -405,11 +411,3 @@ def _modulate(envelope, frequency, frame_frequency):
         else:
             return (f'{labframe_fn} * cos({frame_frequency} * t)',
                     f'{labframe_fn} * sin({frame_frequency} * t)')
-
-
-def _make_piecewise(tlist, flist):
-    if all(isinstance(f, ConstantFunction) for f in flist) and \
-        np.allclose(list(f.value for f in flist), flist[0].value):
-            return ConstantFunction(flist[0].value)
-
-    return PiecewiseFunction(tlist, flist)

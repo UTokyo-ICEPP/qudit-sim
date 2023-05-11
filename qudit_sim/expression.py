@@ -64,7 +64,8 @@ class Expression(ABC):
 
     def __abs__(self) -> 'Expression':
         return type(self)._unary_op(self,
-                                    lambda a, npmod: npmod.abs(a), 'abs')
+                                    lambda a, npmod: npmod.abs(a), 'abs',
+                                    value_type=float)
 
     def __neg__(self) -> 'Expression':
         return type(self)._unary_op(self,
@@ -77,12 +78,14 @@ class Expression(ABC):
     @property
     def real(self) -> 'Expression':
         return type(self)._unary_op(self,
-                                    lambda a, npmod: npmod.real(a), 'real')
+                                    lambda a, npmod: npmod.real(a), 'real',
+                                    value_type=float)
 
     @property
     def imag(self) -> 'Expression':
         return type(self)._unary_op(self,
-                                    lambda a, npmod: npmod.imag(a), 'imag')
+                                    lambda a, npmod: npmod.imag(a), 'imag',
+                                    value_type=float)
 
     def cos(self) -> 'Expression':
         return type(self)._unary_op(self,
@@ -232,13 +235,14 @@ class _ParameterUnaryOp(ParameterFunction):
         self,
         expr: ParameterExpression,
         op: Callable[[array_like, ModuleType], ReturnType],
-        opname: Optional[str] = None
+        opname: Optional[str] = None,
+        value_type: Optional[type] = None
     ):
         self.expr = expr
         self.op = op
         self.opname = opname or op.__name__
 
-        super().__init__(self._fn, self.expr.parameters, value_type=expr.value_type)
+        super().__init__(self._fn, self.expr.parameters, value_type=(value_type or expr.value_type))
 
     def __str__(self) -> str:
         return f'{self.opname}({self.expr})'
@@ -266,7 +270,8 @@ class _ParameterBinaryOp(ParameterFunction):
         lexpr: ParameterExpression,
         rexpr: Union[ParameterExpression, array_like],
         op: Callable[[array_like, array_like, ModuleType], ReturnType],
-        opname: Optional[str] = None
+        opname: Optional[str] = None,
+        value_type: Optional[type] = None
     ):
         self.lexpr = lexpr
         self.rexpr = rexpr
@@ -282,7 +287,7 @@ class _ParameterBinaryOp(ParameterFunction):
         else:
             raise TypeError(f'Cannot apply {op} to {type(lexpr)} and {type(rexpr)}')
 
-        super().__init__(fn, parameters, value_type=lexpr.value_type)
+        super().__init__(fn, parameters, value_type=(value_type or lexpr.value_type))
 
     def __str__(self) -> str:
         return f'{self.opname}({self.lexpr}, {self.rexpr})'
@@ -324,18 +329,14 @@ class TimeFunction(Expression):
     def __init__(
         self,
         fn: Callable[[TimeType, Tuple[Any, ...], ModuleType], ReturnType],
-        parameters: Optional[Tuple[str, ...]] = None,
+        parameters: Tuple[str, ...] = (),
         tzero: float = 0.,
-        return_type: type = complex
+        value_type: type = complex
     ):
         self.fn = fn
         self.tzero = tzero
-        self.return_type = return_type
-
-        if parameters is None:
-            self.parameters = ()
-        else:
-            self.parameters = tuple(parameters)
+        self.value_type = value_type
+        self.parameters = tuple(parameters)
 
     def _targ(self) -> str:
         if self.tzero == 0.:
@@ -348,7 +349,7 @@ class TimeFunction(Expression):
 
     def __repr__(self) -> str:
         parameters = ', '.join(f'"{p}"' for p in self.parameters)
-        return f'TimeFunction({self.fn.__name__}, ({parameters}), {self.tzero}, {self.return_type})'
+        return f'TimeFunction({self.fn.__name__}, ({parameters}), {self.tzero}, {self.value_type})'
 
     def __call__(
         self,
@@ -380,7 +381,7 @@ class TimeFunction(Expression):
 
     def copy(self) -> 'TimeFunction':
         return TimeFunction(self.fn, parameters=self.parameters, tzero=self.tzero,
-                            return_type=self.return_type)
+                            value_type=self.value_type)
 
     def shift(self, t: float) -> 'TimeFunction':
         shifted = self.copy()
@@ -394,13 +395,14 @@ class _TimeFunctionUnaryOp(TimeFunction):
         self,
         expr: TimeFunction,
         op: Callable[[array_like, ModuleType], ReturnType],
-        opname: Optional[str] = None
+        opname: Optional[str] = None,
+        value_type: Optional[type] = None
     ):
         self.expr = expr
         self.op = op
         self.opname = opname or op.__name__
 
-        super().__init__(self._fn, self.expr.parameters, return_type=expr.return_type)
+        super().__init__(self._fn, self.expr.parameters, value_type=(value_type or expr.value_type))
 
     def __str__(self) -> str:
         return f'{self.opname}({self.expr})'
@@ -431,7 +433,8 @@ class _TimeFunctionBinaryOp(TimeFunction):
         lexpr: TimeFunction,
         rexpr: Union[TimeFunction, array_like],
         op: Callable[[array_like, array_like, ModuleType], ReturnType],
-        opname: Optional[str] = None
+        opname: Optional[str] = None,
+        value_type: Optional[type] = None
     ):
         self.lexpr = lexpr
         self.rexpr = rexpr
@@ -450,7 +453,7 @@ class _TimeFunctionBinaryOp(TimeFunction):
         else:
             raise TypeError(f'Cannot apply {op} to {type(lexpr)} and {type(rexpr)}')
 
-        super().__init__(fn, parameters, return_type=lexpr.return_type)
+        super().__init__(fn, parameters, value_type=(value_type or lexpr.value_type))
 
     def __str__(self) -> str:
         return f'{self.opname}({self.lexpr}, {self.rexpr})'
@@ -533,13 +536,13 @@ class ConstantFunction(TimeFunction):
         if isinstance(value, Number):
             fn = self._fn_Number
             parameters = ()
-            return_type = type(value)
+            value_type = type(value)
         else:
             fn = self._fn_ParameterExpression
             parameters = value.parameters
-            return_type = value.value_type
+            value_type = value.value_type
 
-        super().__init__(fn, parameters, return_type=return_type)
+        super().__init__(fn, parameters, value_type=value_type)
 
     def __str__(self) -> str:
         return f'({self._targ()})->{self.value}'
@@ -591,13 +594,13 @@ class PiecewiseFunction(TimeFunction):
         self._arg_indices = np.cumsum([0] + list(len(func.parameters) for func in funclist))
 
         parameters = sum((func.parameters for func in funclist), ())
-        super().__init__(self._fn, parameters, return_type=funclist[0].return_type)
+        super().__init__(self._fn, parameters, value_type=funclist[0].value_type)
 
     def __str__(self) -> str:
         value = '{\n'
         for ifunc, func in enumerate(self._funclist):
             value += f'  {func}'
-            value += f'  ({self._timelist[ifunc]:.3f} <= t < {self._timelist[ifunc + 1]:.3f})\n'
+            value += f'  ({self._timelist[ifunc]:.3e} <= t < {self._timelist[ifunc + 1]:.3e})\n'
         value += '}'
         return value
 
@@ -610,7 +613,7 @@ class PiecewiseFunction(TimeFunction):
         args: Tuple[Any, ...],
         npmod: ModuleType
     ) -> ReturnType:
-        t = npmod.asarray(t, dtype=self.return_type)
+        t = npmod.asarray(t, dtype=self.value_type)
 
         def evaluated_fn(func, func_args):
             def fn(t):
