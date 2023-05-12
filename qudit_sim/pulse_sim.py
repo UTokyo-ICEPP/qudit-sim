@@ -353,20 +353,25 @@ def _run_single(
                 parameters.tlist[0], parameters.tlist[-1])
 
     ## Run the simulation or exponentiate the static Hamiltonian
+    sim_start = time.time()
     if isinstance(hamiltonian, list) and len(hamiltonian) == 1 and isinstance(hamiltonian[0], qtp.Qobj):
-        states, expect = exponentiate_hstat(hamiltonian[0], parameters, logger_name)
+        evolution = exponentiate_hstat(hamiltonian[0], parameters, logger_name)
     elif solver == 'jax':
-        states, expect = simulate_drive_odeint(hamiltonian, parameters, drive_args, logger_name)
+        evolution = simulate_drive_odeint(hamiltonian, parameters, drive_args, logger_name)
     else:
-        states, expect = simulate_drive_sesolve(hamiltonian, parameters, drive_args, logger_name)
+        evolution = simulate_drive_sesolve(hamiltonian, parameters, drive_args, logger_name)
 
-    ## Compile the result and return
-    if parameters.final_only:
-        tlist = parameters.tlist[-1:]
-    else:
-        tlist = parameters.tlist
+    # Compute the states and expectation values in the original frame
+    transform_start = time.time()
+    states, expect = transform_evolution(evolution, parameters)
 
-    result = PulseSimResult(times=tlist, expect=expect, states=states, frame=parameters.frame)
+    logger.debug('Calculation of states and expectation values completed in %.2f seconds.',
+                 time.time() - transform_start)
+
+    result = PulseSimResult(times=parameters.tlist, expect=expect, states=states,
+                            frame=parameters.frame)
+
+    logger.info('Done in %.2f seconds.', time.time() - sim_start)
 
     if save_result_to:
         logger.info('Saving the simulation result to %s.h5', save_result_to)
@@ -398,13 +403,13 @@ def simulate_drive_sesolve(
     with tempfile.TemporaryDirectory() as tempdir:
         try:
             os.chdir(tempdir)
-            states, expect = _run_sesolve(hamiltonian, parameters, logger)
+            evolution = _run_sesolve(hamiltonian, parameters, logger)
         finally:
             os.chdir(cwd)
             # Clear the cached solver
             qtp.rhs_clear()
 
-    return states, expect
+    return evolution
 
 
 def _run_sesolve(hamiltonian, parameters, logger):
@@ -424,33 +429,12 @@ def _run_sesolve(hamiltonian, parameters, logger):
     global_phase = np.trace(hdiag.full()).real / hdiag.shape[0]
     hamiltonian[0] = hdiag - global_phase
 
-    isarray = list(isinstance(term, list) and isinstance(term[1], np.ndarray)
-                   for term in hamiltonian)
-    if not any(isarray):
+    isarray_list = list(isinstance(term, list) and isinstance(term[1], np.ndarray)
+                        for term in hamiltonian)
+    if all(isarray_list):
         # No interval dependency in the Hamiltonian (all constants or string expressions)
         # -> Can reuse the compiled objects
         solver_options.rhs_reuse = True
-
-    # Array to store the unitaries
-    if not parameters.e_ops or solver_options.store_states:
-        # squeezed shape
-        state_shape = parameters.psi0.shape
-        if parameters.final_only:
-            states = np.empty((1,) + state_shape, dtype=np.complex128)
-        else:
-            states = np.empty(parameters.tlist.shape + state_shape, dtype=np.complex128)
-    else:
-        states = None
-
-    # Arrays to store the expectation values
-    if parameters.e_ops:
-        num_e_ops = len(parameters.e_ops)
-        if parameters.final_only:
-            expect = list(np.empty(1) for _ in range(num_e_ops))
-        else:
-            expect = list(np.empty_like(parameters.tlist) for _ in range(num_e_ops))
-    else:
-        expect = None
 
     # We'll always need the states
     solver_options.store_states = True
@@ -466,36 +450,39 @@ def _run_sesolve(hamiltonian, parameters, logger):
     logger.debug('Integrating time evolution in %d intervals of %d steps.',
                  num_intervals, interval_len)
 
-    sim_start = time.time()
+    if parameters.final_only:
+        evolution = np.empty((1,) + hdiag.shape, dtype=complex)
+    else:
+        evolution = np.empty(parameters.tlist.shape + hdiag.shape, dtype=complex)
 
     # Initial unitary is the identity
-    last_unitary = np.eye(np.prod(hdiag.dims[0]))
+    evolution[0] = np.eye(evolution.shape[-1], dtype=complex)
 
     for interval in range(num_intervals):
         interval_sim_start = time.time()
-
-        psi0 = qtp.Qobj(inpt=last_unitary, dims=hdiag.dims)
 
         start = interval * (interval_len - 1)
         end = start + interval_len
 
         local_hamiltonian = list()
-        for h_term, isa in zip(hamiltonian, isarray):
-            if isa:
+        for h_term, isarray in zip(hamiltonian, isarray_list):
+            if isarray:
                 local_hamiltonian.append([h_term[0], h_term[1][start:end]])
             else:
                 local_hamiltonian.append(h_term)
 
-        tlist = parameters.tlist[start:end]
+        psi0 = qtp.Qobj(inpt=evolution[start], dims=hdiag.dims)
 
-        qtp_result = qtp.sesolve(local_hamiltonian, psi0, tlist, options=solver_options)
+        result = qtp.sesolve(local_hamiltonian, psi0, parameters.tlist[start:end],
+                             options=solver_options)
 
         # Array of lab-frame evolution ops
         if parameters.final_only:
-            evolution = np.squeeze(qtp_result.states[-1].full())[None, ...]
-            tlist = tlist[-1:]
+            evolution[0] = result.states[-1].full()[None, ...]
+            out_slice = slice(0, 1)
         else:
-            evolution = np.stack(list(np.squeeze(state.full()) for state in qtp_result.states))
+            evolution[start:end] = np.stack(list(state.full() for state in result.states))
+            out_slice = slice(start, end)
 
         interval_sim_end = time.time()
         logger.debug('Integration of interval %d completed in %.2f seconds.',
@@ -503,45 +490,14 @@ def _run_sesolve(hamiltonian, parameters, logger):
 
         # Apply reunitarization
         if parameters.reunitarize:
-            evolution = closest_unitary(evolution)
+            evolution[out_slice] = closest_unitary(evolution[out_slice])
             logger.debug('Reunitarization of interval %d completed in %.2f seconds.',
                          interval, time.time() - interval_sim_end)
 
-        transform_start = time.time()
+    # Restore the actual global phase
+    evolution *= np.exp(-1.j * global_phase * parameters.tlist[-evolution.shape[0]:, None, None])
 
-        # evolution[-1] is the lab-frame evolution operator
-        last_unitary = evolution[-1].copy()
-
-        # Restore the actual global phase
-        evolution *= np.exp(-1.j * global_phase * tlist[:, None, None])
-
-        # Compute the states and expectation values in the original frame
-        local_states, local_expect = transform_evolution(evolution, parameters, tlist)
-
-        logger.debug('Calculation of states and expectation values of interval %d completed in'
-                     ' %.2f seconds.', interval, time.time() - transform_start)
-
-        # Indices for the output arrays
-        if parameters.final_only:
-            out_slice = slice(0, 1)
-        else:
-            out_slice = slice(start, end)
-
-        # Fill the states
-        if states is not None:
-            states[out_slice] = local_states
-
-        # Fill the expectation values
-        if expect is not None:
-            for out, local in zip(expect, local_expect):
-                out[out_slice] = local
-
-        logger.debug('Processed interval %d/%d in %.2f seconds.',
-                     interval, num_intervals, time.time() - interval_sim_start)
-
-    logger.info('Done in %.2f seconds.', time.time() - sim_start)
-
-    return states, expect
+    return evolution
 
 
 def simulate_drive_odeint(
@@ -576,15 +532,12 @@ def simulate_drive_odeint(
     y0 = jax.device_put(np.eye(state_dim, dtype=complex), device=jax_device)
     tlists = jax.device_put(tlists, device=jax_device)
     evolution = integrator(y0, tlists, drive_args)
-    evolution = np.asarray(evolution)
 
-    ## Recover the original tlist & pick the corresponding time points from evolution
-    tlist = np.concatenate([tlists[:, :-1].reshape(-1), tlists[-1, -1:]])[tlist_indices]
-    evolution = evolution[tlist_indices]
+    ## Pick the time points included in the original tlist
+    evolution = np.asarray(evolution[tlist_indices])
 
     if parameters.final_only:
         evolution = evolution[-1:]
-        tlist = tlist[-1:]
 
     sim_end = time.time()
     logger.debug('Integration completed in %.2f seconds.', sim_end - compile_end)
@@ -595,18 +548,7 @@ def simulate_drive_odeint(
         evolution = closest_unitary(evolution, npmod=np)
         logger.debug('Reunitarization completed in %.2f seconds.', time.time() - sim_end)
 
-    transform_start = time.time()
-
-    # Compute the states and expectation values in the original frame
-    states, expect = transform_evolution(evolution, parameters, tlist)
-
-    transform_end = time.time()
-    logger.debug('Calculation of states and expectation values completed in %.2f seconds.',
-                 transform_end - transform_start)
-
-    logger.info('Done in %.2f seconds.', transform_end - compile_start)
-
-    return states, expect
+    return evolution
 
 
 def _stack_tlist(tlist: np.ndarray, num_parallel: int):
@@ -736,24 +678,17 @@ def exponentiate_hstat(
     sim_end = time.time()
     logger.debug('Exponentiation completed in %.2f seconds.', sim_end - sim_start)
 
-    states, expect = transform_evolution(evolution, parameters, tlist)
-
-    transform_end = time.time()
-    logger.debug('Calculation of states and expectation values completed in %.2f seconds.',
-                 transform_end - sim_end)
-
-    logger.info('Done in %.2f seconds.', transform_end - sim_start)
-
-    return states, expect
+    return evolution
 
 
 def transform_evolution(
     evolution: np.ndarray,
-    parameters: PulseSimParameters,
-    tlist: Optional[np.ndarray] = None
+    parameters: PulseSimParameters
 ):
     """Compute the evolution operator and expectation values in the given frame."""
-    if tlist is None:
+    if parameters.final_only:
+        tlist = parameters.tlist[-1:]
+    else:
         tlist = parameters.tlist
 
     # Change the frame back to original
