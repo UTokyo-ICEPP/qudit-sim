@@ -601,9 +601,6 @@ class HamiltonianBuilder:
         hdrive = Hamiltonian()
         hstatic = qtp.tensor(list(qtp.qzero(dim) for dim in self.system_dim()))
 
-        # Construct the Qobj for each qudit/level first
-        creation_ops = {}
-
         identities = list(qtp.qeye(dim) for dim in self.system_dim())
 
         for iq, (qudit_id, params) in enumerate(self._qudit_params.items()):
@@ -631,27 +628,23 @@ class HamiltonianBuilder:
                     frame_frequencies.append(level_frequency)
                     qudit_creation_ops.append(op)
 
-            creation_ops[qudit_id] = list(zip(qudit_creation_ops, frame_frequencies))
+            for creation_op, frame_frequency in zip(qudit_creation_ops, frame_frequencies):
+                h_x = creation_op + creation_op.dag()
+                h_y = 1.j * (creation_op - creation_op.dag())
 
-        # Loop over the drive channels
-        for channel, drives in self._drive.items():
-            drive_amplitude = self._qudit_params[channel].drive_amplitude
+                # Sum the drives from all channels that talk to this qudit
+                xdrives = [[], np.array(0.), ConstantFunction(0.)]
+                ydrives = [[], np.array(0.), ConstantFunction(0.)]
 
-            # Crosstalk between a qudit and itself is set to 1 in add_qudit
-            driven_qudits = list(qid for qid in self.qudit_ids()
-                                 if (channel, qid) in self._crosstalk)
+                for channel, drives in self._drive.items():
+                    try:
+                        # Crosstalk between a qudit and itself is set to 1 in add_qudit
+                        crosstalk = self._crosstalk[(channel, qudit_id)]
+                    except KeyError:
+                        continue
 
-            # Loop over the driven operators
-            for qudit_id in driven_qudits:
-                drive_base = drive_amplitude / 2. * self._crosstalk[(channel, qudit_id)]
+                    drive_base = self._qudit_params[channel].drive_amplitude / 2. * crosstalk
 
-                for creation_op, frame_frequency in creation_ops[qudit_id]:
-                    h_x = creation_op + creation_op.dag()
-                    h_y = 1.j * (creation_op - creation_op.dag())
-
-                    # Sum up the drive coefficients
-                    xdrives = [[], np.array(0.), ConstantFunction(0.)]
-                    ydrives = [[], np.array(0.), ConstantFunction(0.)]
                     for drive in drives:
                         # Generate the potentially time-dependent Hamiltonian coefficients
                         fn_x, fn_y = drive.generate_fn(frame_frequency, drive_base, self.use_rwa,
@@ -673,21 +666,21 @@ class HamiltonianBuilder:
                             if fn_y is not None:
                                 ydrives[2] += fn_y
 
-                    # String
-                    if xdrives[0]:
-                        hdrive.append([h_x, ' + '.join(f'({fn})' for fn in xdrives[0])])
-                    if ydrives[0]:
-                        hdrive.append([h_y, ' + '.join(f'({fn})' for fn in ydrives[0])])
-                    # Array
-                    if np.any(xdrives[1]):
-                        hdrive.append([h_x, xdrives[1]])
-                    if np.any(ydrives[1]):
-                        hdrive.append([h_y, ydrives[1]])
-                    # TimeFunction
-                    if xdrives[2].is_nonzero():
-                        hdrive.append([h_x, xdrives[2]])
-                    if ydrives[2].is_nonzero():
-                        hdrive.append([h_y, ydrives[2]])
+                # String
+                if xdrives[0]:
+                    hdrive.append([h_x, ' + '.join(f'({fn})' for fn in xdrives[0])])
+                if ydrives[0]:
+                    hdrive.append([h_y, ' + '.join(f'({fn})' for fn in ydrives[0])])
+                # Array
+                if np.any(xdrives[1]):
+                    hdrive.append([h_x, xdrives[1]])
+                if np.any(ydrives[1]):
+                    hdrive.append([h_y, ydrives[1]])
+                # TimeFunction
+                if xdrives[2].is_nonzero():
+                    hdrive.append([h_x, xdrives[2]])
+                if ydrives[2].is_nonzero():
+                    hdrive.append([h_y, ydrives[2]])
 
         if np.any(hstatic.data.data):
             hdrive.insert(0, hstatic)
