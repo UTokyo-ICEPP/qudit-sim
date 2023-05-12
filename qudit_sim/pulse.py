@@ -15,7 +15,8 @@ from types import ModuleType
 from typing import Any, Callable, Optional, Tuple, Union
 import numpy as np
 
-from .expression import Constant, ParameterExpression, ReturnType, TimeFunction, TimeType
+from .expression import (Constant, Expression, ParameterExpression, ReturnType, TimeFunction,
+                         TimeType, array_like)
 
 class Pulse(TimeFunction):
     """Base class for all pulse shapes.
@@ -67,6 +68,11 @@ class ScalablePulse(Pulse):
 
     def _scale(self, value: ReturnType, args: Tuple[Any, ...], npmod: ModuleType):
         return value * self._amp.evaluate(args, npmod)
+
+    def __mul__(self, other: Union[Expression, array_like]) -> Expression:
+        scaled = self.copy()
+        scaled._amp *= other
+        return scaled
 
 
 class Gaussian(ScalablePulse):

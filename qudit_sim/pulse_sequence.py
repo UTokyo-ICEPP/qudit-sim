@@ -124,8 +124,7 @@ class PulseSequence(list):
             envelope = _make_envelope(inst, drive_base, phase_offset, as_timefn)
 
             if frequency is None:
-                # End of list or the very specific case of initial Delay without SetFrequency
-                # -> envelope is 0 or ConstantFunction(0)
+                # Envelope is 0 or ConstantFunction(0)
                 fn_x = fn_y = envelope
             elif rwa:
                 fn_x, fn_y = _modulate_rwa(envelope, frequency, frame_frequency)
@@ -157,7 +156,10 @@ class PulseSequence(list):
 
                 frequency += inst.value
             elif isinstance(inst, ShiftPhase):
-                phase_offset += inst.value
+                if phase_offset == 0.:
+                    phase_offset = inst.value
+                else:
+                    phase_offset += inst.value
             elif isinstance(inst, SetFrequency):
                 frequency = inst.value
             elif isinstance(inst, SetPhase):
@@ -166,7 +168,7 @@ class PulseSequence(list):
 
                 phase_offset = inst.value - frequency * time
             elif isinstance(inst, Delay):
-                instlist.append((time, frequency, phase_offset, 0.))
+                instlist.append((time, None, 0., 0.))
                 time += inst.value
             else:
                 if frequency is None:
