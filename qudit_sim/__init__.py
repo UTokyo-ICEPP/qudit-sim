@@ -17,7 +17,7 @@ from .pulse_sequence import PulseSequence
 from .pulse_sim import pulse_sim
 from .scale import FrequencyScale
 from .sim_result import PulseSimResult, load_sim_result, save_sim_result
-from .unitary import closest_unitary, truncate_matrix
+from .unitary import closest_unitary, remove_global_phase, truncate_matrix
 
 from . import apps
 from . import visualization

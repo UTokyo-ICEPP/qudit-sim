@@ -1,8 +1,9 @@
 from types import ModuleType
-from typing import Tuple, Union
+from typing import Optional, Tuple, Union
 import numpy as np
 
 from rqutils import ArrayType
+from rqutils.math import matrix_angle, matrix_exp
 
 def truncate_matrix(
     matrix: np.ndarray,
@@ -85,3 +86,32 @@ def closest_unitary(
         return unitary, fidelity
 
     return unitary
+
+
+def remove_global_phase(
+    matrix: np.ndarray,
+    block: Optional[Tuple[int, int]] = None
+) -> np.ndarray:
+    """Remove the global phase from unitaries or blocks within.
+
+    The first argument can be a unitary matrix or an array thereof. If the block argument is
+    present, phase factor is applied to the entire matrix in order to eliminate the local phase of
+    the specific block. The function takes the log of the unitaries, subtract the trace component,
+    and re-exponentiates the result.
+
+    Args:
+        matrix: A unitary or an array of unitaries.
+        block: The start and end (inclusive) rows of the subunitary.
+
+    Returns:
+        Exponential(s) of traceless Hermitian matrix(ces).
+    """
+    hermitian = matrix_angle(matrix)
+    if block is None:
+        norm_trace = np.trace(hermitian, axis1=-2, axis2=-1) / hermitian.shape[-1]
+    else:
+        subunitary = closest_unitary(matrix[..., block[0]:block[1] + 1, block[0]:block[1] + 1])
+        norm_trace = np.trace(matrix_angle(subunitary), axis1=-2, axis2=-1) / subunitary.shape[-1]
+
+    hermitian -= norm_trace[..., None, None] * np.eye(hermitian.shape[-1], dtype=complex)
+    return matrix_exp(1.j * hermitian, hermitian=-1)
