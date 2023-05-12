@@ -15,8 +15,8 @@ from types import ModuleType
 from typing import Any, Callable, Optional, Tuple, Union
 import numpy as np
 
-from .expression import (Constant, Expression, ParameterExpression, ReturnType, TimeFunction,
-                         TimeType, array_like)
+from .expression import (Constant, Expression, ParameterExpression, Piecewise, ReturnType,
+                         TimeFunction, TimeType, array_like)
 
 class Pulse(TimeFunction):
     """Base class for all pulse shapes.
@@ -34,7 +34,7 @@ class Pulse(TimeFunction):
     ):
         assert duration > 0., 'Pulse duration must be positive'
         self.duration = duration
-        super().__init__(fn, parameters, tzero)
+        super().__init__(fn, parameters=parameters, tzero=tzero, value_type=complex)
 
     def __str__(self) -> str:
         return f'Pulse(duration={self.duration}, tzero={self.tzero})'
@@ -129,14 +129,14 @@ class Gaussian(ScalablePulse):
     ) -> ReturnType:
         x_over_sqrt2 = (t - self.center) / self.sigma * np.sqrt(0.5)
         v = npmod.exp(-npmod.square(x_over_sqrt2))
-        norm_val = npmod.asarray((1. - self._pedestal) * (v - self._pedestal), dtype='complex128')
+        norm_val = npmod.asarray((v - self._pedestal) / (1. - self._pedestal), dtype='complex128')
         return self._scale(norm_val, args, npmod)
 
     def copy(self) -> 'Gaussian':
         return Gaussian(self.duration, self.amp, self.sigma, self.center, self.zero_ends, self.tzero)
 
 
-class GaussianSquare(ScalablePulse):
+class GaussianSquare(Piecewise, ScalablePulse):
     """Gaussian-square pulse.
 
     Args:
@@ -171,85 +171,58 @@ class GaussianSquare(ScalablePulse):
         else:
             gauss_duration = ramp_duration * 2.
 
+        funclist = []
+        timelist = [0.]
+
         if rise:
-            self.t_plateau = gauss_duration / 2.
-            self.gauss_rise = Gaussian(duration=gauss_duration, amp=1., sigma=sigma,
-                                       center=None, zero_ends=zero_ends)
-        else:
-            self.t_plateau = 0.
-            self.gauss_rise = None
+            funclist.append(Gaussian(duration=gauss_duration, amp=1., sigma=sigma, center=None,
+                                     zero_ends=zero_ends))
+            timelist.append(gauss_duration / 2.)
+
+        funclist.append(1.)
+        timelist.append(timelist[-1] + self.width)
 
         if fall:
-            fall_tzero = self.t_plateau + self.width - gauss_duration / 2.
-            self.gauss_fall = Gaussian(duration=gauss_duration, amp=1., sigma=sigma,
-                                       center=None, zero_ends=zero_ends, tzero=fall_tzero)
-        else:
-            self.gauss_fall = None
+            fall_tzero = timelist[-1] - gauss_duration / 2.
+            funclist.append(Gaussian(duration=gauss_duration, amp=1., sigma=sigma, center=None,
+                                     zero_ends=zero_ends, tzero=fall_tzero))
+            timelist.append(timelist[-1] + gauss_duration / 2.)
 
-        if rise and fall:
-            fn = self._fn_full
-        elif rise:
-            fn = self._fn_left
-        elif fall:
-            fn = self._fn_right
-
-        super().__init__(duration, amp, fn, tzero=tzero)
+        Piecewise.__init__(self, timelist, funclist)
+        ScalablePulse.__init__(self, duration, amp, self._fn, tzero=tzero)
 
     def __str__(self) -> str:
-        rise = self.gauss_rise is not None
-        fall = self.gauss_fall is not None
-
-        if rise:
-            zero_ends = self.gauss_rise._pedestal != 0.
-        else:
-            zero_ends = self.gauss_fall._pedestal != 0.
-
         return (f'GaussianSquare(duration={self.duration}, amp={self.amp}, sigma={self.sigma},'
-                f' width={self.width}, zero_ends={zero_ends}, rise={rise}, fall={fall},'
-                f' tzero={self.tzero})')
+                f' width={self.width}, zero_ends={self.zero_ends}, rise={self.rise},'
+                f' fall={self.fall}, tzero={self.tzero})')
+
+    @property
+    def rise(self) -> bool:
+        return isinstance(self._funclist[0], Gaussian)
+
+    @property
+    def fall(self) -> bool:
+        return isinstance(self._funclist[-1], Gaussian)
 
     @property
     def zero_ends(self) -> bool:
-        return (self.gauss_rise and self.gauss_rise.zero_ends) or \
-            (self.gauss_fall and self.gauss_fall.zero_ends)
+        if isinstance(self._funclist[0], Gaussian):
+            return self._funclist[0].zero_ends
+        else:
+            return self._funclist[-1].zero_ends
 
-    def _fn_full(
+    def _fn(
         self,
         t: TimeType,
         args: Tuple[Any, ...] = (),
         npmod: ModuleType = np
     ) -> ReturnType:
-        t = npmod.asarray(t)
-
-        value_left = npmod.asarray(t <= self.t_plateau) * (self.gauss_rise(t, npmod=npmod) - 1.)
-        value_right = npmod.asarray(t > self.t_plateau + self.width) * (self.gauss_fall(t, npmod=npmod) - 1.)
-        return self._scale((value_left + value_right + 1.), args, npmod)
-
-    def _fn_left(
-        self,
-        t: TimeType,
-        args: Tuple[Any, ...] = (),
-        npmod: ModuleType = np
-    ) -> ReturnType:
-        t = npmod.asarray(t)
-
-        value_left = npmod.asarray(t <= self.t_plateau) * (self.gauss_rise(t, npmod=npmod) - 1.)
-        return self._scale(value_left + 1., args, npmod)
-
-    def _fn_right(
-        self,
-        t: TimeType,
-        args: Tuple[Any, ...] = (),
-        npmod: ModuleType = np
-    ) -> ReturnType:
-        t = npmod.asarray(t)
-
-        value_right = npmod.asarray(t > self.t_plateau + self.width) * (self.gauss_fall(t, npmod=npmod) - 1.)
-        return self._scale(value_right + 1., args, npmod)
+        norm_val = self._piecewise(t, args, npmod)
+        return self._scale(norm_val, args, npmod)
 
     def copy(self) -> 'GaussianSquare':
         return GaussianSquare(self.duration, self.amp, self.sigma, self.width, self.zero_ends,
-                              self.gauss_rise is not None, self.gauss_fall is not None, self.tzero)
+                              self.rise, self.fall, self.tzero)
 
 
 class Drag(Gaussian):

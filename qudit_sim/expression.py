@@ -120,6 +120,16 @@ class Expression(ABC):
     def copy(self) -> 'Expression':
         raise NotImplementedError('To be implemented in subclasses.')
 
+    def pprint(self, return_str: bool = False, _indent: int = -1) -> Union[None, str]:
+        value = ''
+        if _indent >= 0:
+            value += '  ' * _indent
+        value += str(self)
+        if return_str:
+            return value
+        else:
+            print(value)
+
 
 class ParameterExpression(Expression):
     def subs(
@@ -150,6 +160,9 @@ class Constant(ParameterExpression):
         return type(self.value)
 
     def __str__(self) -> str:
+        return f'[{self.value}]'
+
+    def __repr__(self) -> str:
         return f'Constant({self.value})'
 
     def subs(
@@ -180,7 +193,7 @@ class Parameter(ParameterExpression):
         self.value_type = value_type
 
     def __str__(self) -> str:
-        return f'Parameter({self.name})'
+        return self.name
 
     def __repr__(self) -> str:
         return f'Parameter("{self.name}")'
@@ -219,7 +232,7 @@ class ParameterFunction(ParameterExpression):
         self.value_type = value_type
 
     def __str__(self) -> str:
-        return f'ParameterFunction({", ".join(self._parameters)})'
+        return f'{fn.__name__}({", ".join(self._parameters)})'
 
     def __repr__(self) -> str:
         parameters = ', '.join(f'"{p}"' for p in self._parameters)
@@ -277,6 +290,20 @@ class _ParameterUnaryOp(ParameterFunction):
 
     def copy(self) -> '_ParameterUnaryOp':
         return _ParameterUnaryOp(self.expr.copy(), self.op, opname=self.opname)
+
+    def pprint(self, return_str: bool = False, _indent: int = -1) -> Union[None, str]:
+        if _indent < 0:
+            _indent = 0
+
+        indentation = '  ' * _indent
+
+        value += f'{indentation}{self.opname}(\n'
+        value += f'{self.expr.pprint(return_str=True, _indent=(_indent + 1))}\n'
+        value += f'{indentation})'
+        if return_str:
+            return value
+        else:
+            print(value)
 
 ParameterExpression._unary_op = _ParameterUnaryOp
 
@@ -339,6 +366,24 @@ class _ParameterBinaryOp(ParameterFunction):
             rexpr = self.rexpr
 
         return _ParameterBinaryOp(self.lexpr.copy(), rexpr, self.op, opname=self.opname)
+
+    def pprint(self, return_str: bool = False, _indent: int = -1) -> Union[None, str]:
+        if _indent < 0:
+            _indent = 0
+
+        indentation = '  ' * _indent
+
+        value += f'{indentation}{self.opname}(\n'
+        value += f'{self.lexpr.pprint(return_str=True, _indent=(_indent + 1))},\n'
+        if isinstance(self.rexpr, Expression):
+            value += f'{self.rexpr.pprint(return_str=True, _indent=(_indent + 1))}\n'
+        else:
+            value += f'{self.rexpr}\n'
+        value += f'{indentation})'
+        if return_str:
+            return value
+        else:
+            print(value)
 
 ParameterExpression._binary_op = _ParameterBinaryOp
 
@@ -445,6 +490,20 @@ class _TimeFunctionUnaryOp(TimeFunction):
     def copy(self) -> '_TimeFunctionUnaryOp':
         return _TimeFunctionUnaryOp(self.expr.copy(), self.op, opname=self.opname)
 
+    def pprint(self, return_str: bool = False, _indent: int = -1) -> Union[None, str]:
+        if _indent < 0:
+            _indent = 0
+
+        indentation = '  ' * _indent
+
+        value = f'{indentation}{self.opname}(\n'
+        value += f'{self.expr.pprint(return_str=True, _indent=(_indent + 1))}\n'
+        value += f'{indentation})'
+        if return_str:
+            return value
+        else:
+            print(value)
+
 TimeFunction._unary_op = _TimeFunctionUnaryOp
 
 
@@ -545,6 +604,24 @@ class _TimeFunctionBinaryOp(TimeFunction):
 
         return _TimeFunctionBinaryOp(self.lexpr.copy(), rexpr, self.op, opname=self.opname)
 
+    def pprint(self, return_str: bool = False, _indent: int = -1) -> Union[None, str]:
+        if _indent < 0:
+            _indent = 0
+
+        indentation = '  ' * _indent
+
+        value = f'{indentation}{self.opname}(\n'
+        value += f'{self.lexpr.pprint(return_str=True, _indent=(_indent + 1))},\n'
+        if isinstance(self.rexpr, Expression):
+            value += f'{self.rexpr.pprint(return_str=True, _indent=(_indent + 1))}\n'
+        else:
+            value += f'{self.rexpr}\n'
+        value += f'{indentation})'
+        if return_str:
+            return value
+        else:
+            print(value)
+
 TimeFunction._binary_op = _TimeFunctionBinaryOp
 
 
@@ -607,8 +684,8 @@ class ConstantFunction(TimeFunction):
         return ConstantFunction(value)
 
 
-class PiecewiseFunction(TimeFunction):
-    """A time function defined by Piecewise connection of a list of TimeFunctions.
+class Piecewise:
+    """A mixin implementing a piecewise function.
 
     Args:
         timelist: Ordered list of N + 1 time points, where the first element is the start time
@@ -623,23 +700,8 @@ class PiecewiseFunction(TimeFunction):
     ):
         self._timelist = np.array(list(timelist) + [np.inf])
         self._funclist = list(funclist)
-        self._arg_indices = np.cumsum([0] + list(len(func.parameters) for func in self._funclist))
 
-        parameters = sum((func.parameters for func in self._funclist), ())
-        super().__init__(self._fn, parameters, value_type=self._funclist[0].value_type)
-
-    def __str__(self) -> str:
-        value = '{\n'
-        for ifunc, func in enumerate(self._funclist):
-            value += f'  {func}'
-            value += f'  ({self._timelist[ifunc]:.3e} <= t < {self._timelist[ifunc + 1]:.3e})\n'
-        value += '}'
-        return value
-
-    def __repr__(self) -> str:
-        return f'PiecewiseFunction({len(self._funclist)} functions, {self._timelist})'
-
-    def _fn(
+    def _piecewise(
         self,
         t: TimeType,
         args: Tuple[Any, ...],
@@ -654,10 +716,14 @@ class PiecewiseFunction(TimeFunction):
             return fn
 
         funclist = [0.]
-        for ifun, func in enumerate(self._funclist):
-            start = self._arg_indices[ifun]
-            end = self._arg_indices[ifun + 1]
-            funclist.append(evaluated_fn(func, args[start:end]))
+        arg_start = 0
+        for func in self._funclist:
+            if isinstance(func, TimeFunction):
+                arg_end = arg_start + len(func.parameters)
+                funclist.append(evaluated_fn(func, args[arg_start:arg_end]))
+                arg_start = arg_end
+            else:
+                funclist.append(func)
         funclist.append(0.)
 
         ifun = npmod.searchsorted(self._timelist, t, side='right')
@@ -666,5 +732,51 @@ class PiecewiseFunction(TimeFunction):
 
         return npmod.piecewise(t, condlist, funclist)
 
+
+class PiecewiseFunction(Piecewise, TimeFunction):
+    """A time function defined by Piecewise connection of a list of TimeFunctions.
+
+    Args:
+        timelist: Ordered list of N + 1 time points, where the first element is the start time
+            of the first function and the last element is the end time of the last function.
+            The function evaluates to 0 for t < timelist[0] and t > timelist[-1].
+        funclist: List of N TimeFunctions with domain [timelist[k], timelist[k+1]].
+    """
+    def __init__(
+        self,
+        timelist: Sequence[float],
+        funclist: Sequence[TimeFunction]
+    ):
+        Piecewise.__init__(self, timelist, funclist)
+        parameters = sum((func.parameters for func in self._funclist), ())
+        TimeFunction.__init__(self, self._piecewise, parameters, value_type=self._funclist[0].value_type)
+
+    def __str__(self) -> str:
+        value = '{\n'
+        for ifunc, func in enumerate(self._funclist):
+            value += f'  {func}'
+            value += f'  ({self._timelist[ifunc]:.3e} <= t < {self._timelist[ifunc + 1]:.3e})\n'
+        value += '}'
+        return value
+
+    def __repr__(self) -> str:
+        return f'PiecewiseFunction({len(self._funclist)} functions, {self._timelist})'
+
     def copy(self) -> 'PiecewiseFunction':
         return PiecewiseFunction(self._timelist[:-1], map(lambda f: f.copy(), self._funclist))
+
+    def pprint(self, return_str: bool = False, _indent: int = -1) -> Union[None, str]:
+        if _indent < 0:
+            _indent = 0
+
+        indentation = '  ' * _indent
+
+        value = f'{indentation}{{\n'
+        for ifunc, func in enumerate(self._funclist):
+            value += func.pprint(return_str=True, _indent=(_indent + 1))
+            value += f' ... {self._timelist[ifunc]:.3e} <= t < {self._timelist[ifunc + 1]:.3e})\n'
+        value += f'{indentation}}}'
+        if return_str:
+            return value
+        else:
+            print(value)
