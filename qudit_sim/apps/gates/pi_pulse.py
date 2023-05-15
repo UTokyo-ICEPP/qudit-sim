@@ -124,10 +124,10 @@ def pi_pulse(
     def loss_fn(params):
         # params are O(1) -> normalize
         drive_args = {'amp': params[0] * amp_estimate, 'beta': params[1] * beta_estimate}
-        states, _ = simulate_drive(hamiltonian, parameters, drive_args)
+        evolution = simulate_drive(hamiltonian, parameters, drive_args)
 
         # Take the prod with the target and extract the diagonals
-        diag_prod = np.diag(states[-1] @ target).reshape(hgen.system_dim())
+        diag_prod = np.diag(evolution[-1] @ target).reshape(hgen.system_dim())
         diag_prod = np.moveaxis(diag_prod, qudit_index, 0)
         # Compute the fidelity (abs-square of the trace of target levels)
         subspace_fidelity = np.square(np.abs(np.sum(diag_prod[level:level + 2], axis=0)) / 2.)

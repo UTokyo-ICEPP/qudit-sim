@@ -487,9 +487,8 @@ def _find_init(
 
         parameters = PulseSimParameters(sim_frame, tlist, psi0)
 
-        states, _ = exponentiate_hstat(hstat, parameters, logger.name)
-
-        time_evolution_nodrv = truncate_matrix(states, sim_frame.dim, dim)
+        evolution = exponentiate_hstat(hstat, parameters, logger.name)
+        time_evolution_nodrv = truncate_matrix(evolution, sim_frame.dim, dim)
         unitaries_nodrv = closest_unitary(time_evolution_nodrv)
         generator_nodrv = matrix_angle(unitaries_nodrv)
         nodrv_compos = paulis.components(-generator_nodrv, dim=dim).real
