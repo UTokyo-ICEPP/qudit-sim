@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field
 from functools import partial
 from threading import Condition
+from types import ModuleType
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 import jax
 import jax.numpy as jnp
@@ -60,7 +61,8 @@ def pulse_sim(
     All parameters except ``hgen``, ``save_result_to``, and ``log_level`` can be given as lists to
     trigger a parallel execution of ``sesolve``. If more than one parameter is a list, their lengths
     must be identical, and all parameters are "zipped" together to form the argument lists of
-    individual single simulation jobs. Parallel jobs are run as separate processes if QuTiP (internally scipy)-based integrator is used, and as threads if JAX integrator is used.
+    individual single simulation jobs. Parallel jobs are run as separate processes if QuTiP
+    (internally scipy)-based integrator is used, and as threads if JAX integrator is used.
 
     .. rubric:: Reunitarization of time evolution
 
@@ -229,7 +231,7 @@ def pulse_sim(
 class PulseSimParameters:
     frame: SystemFrame
     tlist: np.ndarray
-    psi0: np.ndarray
+    psi0: Union[np.ndarray, None] = None
     e_ops: Union[List[np.ndarray], None] = None
     final_only: bool = False
     reunitarize: bool = True
@@ -286,9 +288,7 @@ def compose_parameters(
     if isinstance(tlist, (float, int)):
         tlist = np.array([0., tlist])
 
-    if psi0 is None:
-        psi0 = hgen.identity_op().full()
-    elif isinstance(psi0, qtp.Qobj):
+    if isinstance(psi0, qtp.Qobj):
         psi0 = np.squeeze(psi0.full())
     elif isinstance(psi0, csr_array):
         psi0 = psi0.todense()
@@ -357,13 +357,18 @@ def _run_single(
     if isinstance(hamiltonian, list) and len(hamiltonian) == 1 and isinstance(hamiltonian[0], qtp.Qobj):
         evolution = exponentiate_hstat(hamiltonian[0], parameters, logger_name)
     elif solver == 'jax':
-        evolution = simulate_drive_odeint(hamiltonian, parameters, drive_args, logger_name)
+        with jax.default_device(jax.devices()[config.jax_devices[0]]):
+            evolution = simulate_drive_odeint(hamiltonian, parameters, drive_args, logger_name)
     else:
         evolution = simulate_drive_sesolve(hamiltonian, parameters, drive_args, logger_name)
 
     # Compute the states and expectation values in the original frame
     transform_start = time.time()
-    states, expect = transform_evolution(evolution, parameters)
+    if solver == 'jax':
+        with jax.default_device(jax.devices()[config.jax_devices[0]]):
+            states, expect = transform_evolution(evolution, parameters, npmod=jnp)
+    else:
+        states, expect = transform_evolution(evolution, parameters)
 
     logger.debug('Calculation of states and expectation values completed in %.2f seconds.',
                  time.time() - transform_start)
@@ -473,8 +478,12 @@ def _run_sesolve(hamiltonian, parameters, logger):
 
         psi0 = qtp.Qobj(inpt=evolution[start], dims=hdiag.dims)
 
+        ham_and_psi0 = time.time()
+
         result = qtp.sesolve(local_hamiltonian, psi0, parameters.tlist[start:end],
                              options=solver_options)
+
+        sesolve = time.time()
 
         # Array of lab-frame evolution ops
         if parameters.final_only:
@@ -485,8 +494,8 @@ def _run_sesolve(hamiltonian, parameters, logger):
             out_slice = slice(start, end)
 
         interval_sim_end = time.time()
-        logger.debug('Integration of interval %d completed in %.2f seconds.',
-                     interval, interval_sim_end - interval_sim_start)
+        logger.debug('Integration of interval %d completed in %.2f (ham_and_psi0), %.2f (sesolve), %.2f seconds.',
+                     interval, ham_and_psi0 - interval_sim_start, sesolve - ham_and_psi0, interval_sim_end - interval_sim_start)
 
         # Apply reunitarization
         if parameters.reunitarize:
@@ -510,9 +519,7 @@ def simulate_drive_odeint(
     logger = logging.getLogger(logger_name)
 
     # parallel.parallel_map sets jax_devices[0] to the ID of the GPU to be used in this thread
-    jax_device = jax.devices()[config.jax_devices[0]]
-
-    logger.info('Starting simulation on JAX device %d.', jax_device.id)
+    logger.info('Starting simulation on JAX device %d.', config.jax_devices[0])
 
     tlists, tlist_indices = _stack_tlist(parameters.tlist,
                                          parameters.solver_options.get('num_parallel', 64))
@@ -521,7 +528,7 @@ def simulate_drive_odeint(
 
     compile_start = time.time()
 
-    state_dim = parameters.psi0.shape[0]
+    state_dim = np.prod(parameters.frame.dim)
     integrator = _compile_vodeint(hamiltonian, parameters.solver_options, tlists.shape, state_dim,
                                   drive_args)
 
@@ -529,12 +536,12 @@ def simulate_drive_odeint(
     logger.debug('Compilation of integrator completed in %.2f seconds.', compile_end - compile_start)
 
     ## Run the evolution on a given device
-    y0 = jax.device_put(np.eye(state_dim, dtype=complex), device=jax_device)
-    tlists = jax.device_put(tlists, device=jax_device)
-    evolution = integrator(y0, tlists, drive_args)
+    y0 = jnp.eye(state_dim, dtype=complex)
+    tlists = jnp.array(tlists)
 
+    evolution = integrator(y0, tlists, drive_args)
     ## Pick the time points included in the original tlist
-    evolution = np.asarray(evolution[tlist_indices])
+    evolution = evolution[tlist_indices]
 
     if parameters.final_only:
         evolution = evolution[-1:]
@@ -542,10 +549,8 @@ def simulate_drive_odeint(
     sim_end = time.time()
     logger.debug('Integration completed in %.2f seconds.', sim_end - compile_end)
 
-    ## Apply reunitarization
     if parameters.reunitarize:
-        # Note: Downloading the evolution matrices and using the numpy SVD because that seems faster
-        evolution = closest_unitary(evolution, npmod=np)
+        evolution = closest_unitary(evolution, npmod=jnp)
         logger.debug('Reunitarization completed in %.2f seconds.', time.time() - sim_end)
 
     return evolution
@@ -610,13 +615,11 @@ def _compile_vodeint(
             hamiltonian.compiled_vodeint[h_key] = None
             odeint_cv.release()
 
-            jax_device = jax.devices()[config.jax_devices[0]]
-            with jax.default_device(jax_device):
-                tlists = jnp.empty(tshape, dtype=float)
-                y0 = jnp.empty((ydim, ydim), dtype=complex)
-                converted, _ = jax.custom_derivatives.closure_convert(hamiltonian, y0, 0.,
-                                                                      drive_args)
-                lowered = vodeint.lower(converted, y0, tlists, drive_args, opt)
+            tlists = jnp.empty(tshape, dtype=float)
+            y0 = jnp.empty((ydim, ydim), dtype=complex)
+            converted, _ = jax.custom_derivatives.closure_convert(hamiltonian, y0, 0.,
+                                                                  drive_args)
+            lowered = vodeint.lower(converted, y0, tlists, drive_args, opt)
 
             if _compile:
                 integrator = lowered.compile()
@@ -683,9 +686,11 @@ def exponentiate_hstat(
 
 def transform_evolution(
     evolution: np.ndarray,
-    parameters: PulseSimParameters
+    parameters: PulseSimParameters,
+    npmod: ModuleType = np
 ):
     """Compute the evolution operator and expectation values in the given frame."""
+    print('evolution type', type(evolution))
     if parameters.final_only:
         tlist = parameters.tlist[-1:]
     else:
@@ -696,22 +701,32 @@ def transform_evolution(
                             for qid, qf in parameters.frame.items()})
 
     evolution = parameters.frame.change_frame(tlist, evolution, from_frame=lab_frame,
-                                              objtype='evolution', t0=parameters.tlist[0])
+                                              objtype='evolution', t0=parameters.tlist[0],
+                                              npmod=npmod)
+
+    print('after frame change', type(evolution))
 
     # State evolution in the original frame
-    states = evolution @ parameters.psi0
+    if parameters.psi0 is None:
+        states = evolution
+    else:
+        states = evolution @ npmod.asarray(parameters.psi0)
+
+    print('states type', type(states))
 
     if not parameters.e_ops:
-        return states, None
+        return np.asarray(states), None
 
     # Fill the expectation values
     expect = list()
     for observable in parameters.e_ops:
         if len(states.shape) == 3:
-            out = np.einsum('ij,tij->t', observable.conjugate(), states)
+            out = npmod.einsum('ij,tij->t', observable.conjugate(), states)
         else:
-            out = np.einsum('ti,ij,tj->t', states.conjugate(), observable, states).real
+            out = npmod.einsum('ti,ij,tj->t', states.conjugate(), observable, states).real
 
-        expect.append(out)
+        expect.append(np.asarray(out))
 
-    return states, expect
+    print('expect type', list(type(out) for out in expect))
+
+    return np.asarray(states), expect

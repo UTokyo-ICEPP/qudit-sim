@@ -335,7 +335,7 @@ def plot_amplitude_scan(
         except RuntimeError:
             logging.warning(f'Components for {label} could not be fit with an order {max_poly_order} polynomial.')
             continue
-        except OptimizeWarning:
+        except sciopt.OptimizeWarning:
             logging.warning(f'Covariance of the fit parameters for {label} could not be determined.')
 
         if use_all_powers:

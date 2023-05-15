@@ -7,11 +7,16 @@ Frame (:mod:`qudit_sim.frame`)
 
 See :doc:`/hamiltonian` for theoretical background.
 """
-
 from dataclasses import dataclass
+from types import ModuleType
 from typing import Dict, Optional, Sequence, Tuple, Union
+import jax
+import jax.numpy as jnp
 import numpy as np
 import qutip as qtp
+
+from rqutils import ArrayType
+
 
 @dataclass(frozen=True)
 class QuditFrame:
@@ -181,11 +186,12 @@ class SystemFrame(dict):
     def change_frame(
         self,
         tlist: np.ndarray,
-        obj: Union[np.ndarray, qtp.Qobj],
+        obj: Union[ArrayType, qtp.Qobj],
         from_frame: FrameSpec,
         objtype: str = 'evolution',
-        t0: Optional[float] = None
-    ) -> np.ndarray:
+        t0: Optional[float] = None,
+        npmod: ModuleType = np
+    ) -> ArrayType:
         r"""Apply the change-of-frame unitaries to states, unitaries, hamiltonians, and observables.
 
         Args:
@@ -212,7 +218,7 @@ class SystemFrame(dict):
                 obj = obj.full()
 
         ## Validate and determine the object shape & type
-        state_dim = np.prod(list(qudit_frame.num_levels for qudit_frame in self.values()))
+        state_dim = npmod.prod(self.dim)
         shape_consistent = True
         type_valid = True
 
@@ -288,7 +294,7 @@ class SystemFrame(dict):
             from_frame = SystemFrame(from_frame)
 
         en_diagonal, offset_diagonal = self.frame_change_operator(from_frame)
-        cof_op_diag = np.exp(1.j * (en_diagonal[None, :] * tlist[:, None] + offset_diagonal))
+        cof_op_diag = npmod.exp(1.j * (en_diagonal[None, :] * tlist[:, None] + offset_diagonal))
 
         if objtype == 'state':
             # Left-multiplying by a diagonal is the same as element-wise multiplication
@@ -300,13 +306,13 @@ class SystemFrame(dict):
             if t0 is None:
                 cof_op_diag_t0_conj = cof_op_diag[0].conjugate()
             else:
-                cof_op_diag_t0_conj = np.exp(-1.j * (en_diagonal * t0 + offset_diagonal))
+                cof_op_diag_t0_conj = npmod.exp(-1.j * (en_diagonal * t0 + offset_diagonal))
 
             obj = cof_op_diag[:, :, None] * obj * cof_op_diag_t0_conj
 
         elif objtype == 'hamiltonian':
             obj = cof_op_diag[:, :, None] * obj * cof_op_diag[:, None, :].conjugate()
-            obj -= np.diag(en_diagonal)
+            obj -= npmod.diag(en_diagonal)
 
         elif objtype == 'observable':
             obj = cof_op_diag[:, :, None] * obj * cof_op_diag[:, None, :].conjugate()
