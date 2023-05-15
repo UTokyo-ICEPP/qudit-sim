@@ -681,9 +681,8 @@ def _minimize(
     opt_params = {'heff': heff_init, 'offset': offset_init}
     with jax.default_device(jax_device):
         opt_state = grad_trans.init(opt_params)
-
-    ## Compile the step function
-    step = step.lower(opt_params, opt_state).compile()
+        ## Compile the step function
+        step = step.lower(opt_params, opt_state).compile()
 
     losses = np.ones(convergence_window)
 
@@ -699,7 +698,8 @@ def _minimize(
         intermediate_results = None
 
     for iup in range(max_updates):
-        new_params, opt_state, loss, gradient = step(opt_params, opt_state)
+        with jax.default_device(jax_device):
+            new_params, opt_state, loss, gradient = step(opt_params, opt_state)
 
         if return_intermediate:
             intermediate_results['loss'][iup] = loss
