@@ -218,7 +218,7 @@ class SystemFrame(dict):
                 obj = obj.full()
 
         ## Validate and determine the object shape & type
-        state_dim = npmod.prod(self.dim)
+        state_dim = np.prod(self.dim)
         shape_consistent = True
         type_valid = True
 

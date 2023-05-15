@@ -434,12 +434,10 @@ def _run_sesolve(hamiltonian, parameters, logger):
     global_phase = np.trace(hdiag.full()).real / hdiag.shape[0]
     hamiltonian[0] = hdiag - global_phase
 
-    isarray_list = list(isinstance(term, list) and isinstance(term[1], np.ndarray)
-                        for term in hamiltonian)
-    if all(isarray_list):
-        # No interval dependency in the Hamiltonian (all constants or string expressions)
-        # -> Can reuse the compiled objects
-        solver_options.rhs_reuse = True
+    # If all coefficients in the Hamiltonian are constants, or string expressions, or functions,
+    # we can reuse the compiled objects
+    solver_options.rhs_reuse = all(not (type(term) is list and isinstance(term[1], np.ndarray))
+                                   for term in hamiltonian)
 
     # We'll always need the states
     solver_options.store_states = True
@@ -470,20 +468,16 @@ def _run_sesolve(hamiltonian, parameters, logger):
         end = start + interval_len
 
         local_hamiltonian = list()
-        for h_term, isarray in zip(hamiltonian, isarray_list):
-            if isarray:
+        for h_term in hamiltonian:
+            if type(h_term) is list and isinstance(h_term[1], np.ndarray):
                 local_hamiltonian.append([h_term[0], h_term[1][start:end]])
             else:
                 local_hamiltonian.append(h_term)
 
         psi0 = qtp.Qobj(inpt=evolution[start], dims=hdiag.dims)
 
-        ham_and_psi0 = time.time()
-
         result = qtp.sesolve(local_hamiltonian, psi0, parameters.tlist[start:end],
                              options=solver_options)
-
-        sesolve = time.time()
 
         # Array of lab-frame evolution ops
         if parameters.final_only:
@@ -494,8 +488,8 @@ def _run_sesolve(hamiltonian, parameters, logger):
             out_slice = slice(start, end)
 
         interval_sim_end = time.time()
-        logger.debug('Integration of interval %d completed in %.2f (ham_and_psi0), %.2f (sesolve), %.2f seconds.',
-                     interval, ham_and_psi0 - interval_sim_start, sesolve - ham_and_psi0, interval_sim_end - interval_sim_start)
+        logger.debug('Integration of interval %d completed in %.2f seconds.',
+                     interval, interval_sim_end - interval_sim_start)
 
         # Apply reunitarization
         if parameters.reunitarize:
@@ -690,7 +684,6 @@ def transform_evolution(
     npmod: ModuleType = np
 ):
     """Compute the evolution operator and expectation values in the given frame."""
-    print('evolution type', type(evolution))
     if parameters.final_only:
         tlist = parameters.tlist[-1:]
     else:
@@ -704,15 +697,11 @@ def transform_evolution(
                                               objtype='evolution', t0=parameters.tlist[0],
                                               npmod=npmod)
 
-    print('after frame change', type(evolution))
-
     # State evolution in the original frame
     if parameters.psi0 is None:
         states = evolution
     else:
         states = evolution @ npmod.asarray(parameters.psi0)
-
-    print('states type', type(states))
 
     if not parameters.e_ops:
         return np.asarray(states), None
@@ -726,7 +715,5 @@ def transform_evolution(
             out = npmod.einsum('ti,ij,tj->t', states.conjugate(), observable, states).real
 
         expect.append(np.asarray(out))
-
-    print('expect type', list(type(out) for out in expect))
 
     return np.asarray(states), expect
