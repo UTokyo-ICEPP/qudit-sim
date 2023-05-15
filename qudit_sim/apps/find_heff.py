@@ -24,7 +24,7 @@ from ..frame import FrameSpec, SystemFrame
 from ..hamiltonian import HamiltonianBuilder
 from ..parallel import parallel_map
 from ..pulse import GaussianSquare
-from ..pulse_sim import pulse_sim, PulseSimParameters, exponentiate_hstat
+from ..pulse_sim import pulse_sim, PulseSimParameters, exponentiate_hstat, transform_evolution
 from ..sim_result import PulseSimResult, save_sim_result, load_sim_result
 from ..unitary import truncate_matrix, closest_unitary
 
@@ -116,13 +116,14 @@ def find_heff(
                            log_level=log_level)
 
     if isinstance(init, np.ndarray):
-        hstat = None
+        hstat_lab = None
     else:
-        hstat = hgen_drv.build_hstatic(frame='lab')
+        # Lab-frame Hstat = full H0 + Hint
+        hstat_lab = hgen_drv.build_hstatic(frame='lab')
 
     if isinstance(drive_args, dict):
         components = heff_fit(sim_result, comp_dim=comp_dim, time_range=time_range,
-                              init=init, hstat=hstat, optimizer=optimizer,
+                              init=init, hstat_lab=hstat_lab, optimizer=optimizer,
                               optimizer_args=optimizer_args, max_updates=max_updates,
                               convergence=convergence, convergence_window=convergence_window,
                               min_fidelity=min_fidelity, zero_suppression=zero_suppression,
@@ -147,7 +148,7 @@ def find_heff(
         kwarg_values = list(zip(logger_names, save_result_paths))
 
         common_kwargs = {'comp_dim': comp_dim, 'time_range': time_range, 'init': init,
-                         'hstat': hstat, 'optimizer': optimizer, 'optimizer_args': optimizer_args,
+                         'hstat_lab': hstat_lab, 'optimizer': optimizer, 'optimizer_args': optimizer_args,
                          'max_updates': max_updates,
                          'convergence': convergence, 'convergence_window': convergence_window,
                          'min_fidelity': min_fidelity, 'zero_suppression': zero_suppression,
@@ -274,7 +275,7 @@ def heff_fit(
     comp_dim: Optional[Union[int, Tuple[int, ...]]] = None,
     time_range: Optional[Tuple[float, float]] = None,
     init: Optional[InitSpec] = None,
-    hstat: Optional[qtp.Qobj] = None,
+    hstat_lab: Optional[qtp.Qobj] = None,
     optimizer: str = 'adam',
     optimizer_args: Any = 0.05,
     max_updates: int = 10000,
@@ -351,7 +352,7 @@ def heff_fit(
     logger.info('Determining the initial values for Heff and offset..')
 
     heff_init, fixed, offset_init = _find_init(time_evolution, sim_result.times, comp_dim,
-                                               init, hstat, sim_result.frame, zero_suppression,
+                                               init, hstat_lab, sim_result.frame, zero_suppression,
                                                flat_start, flat_end, logger)
     # Fix the identity component because its gradient is identically zero
     fixed[(0,) * num_qudits] = True
@@ -439,7 +440,7 @@ def _find_init(
     tlist: np.ndarray,
     dim: Tuple[int, ...],
     init: Union[InitSpec, None],
-    hstat: Union[qtp.Qobj, None],
+    hstat_lab: Union[qtp.Qobj, None],
     sim_frame: SystemFrame,
     zero_suppression: bool,
     flat_start: int,
@@ -483,11 +484,10 @@ def _find_init(
 
         ## 2. Find off-diagonals with finite values under no drive -> static terms; zero slope
 
-        psi0 = np.eye(np.prod(hstat.dims[0]))
+        parameters = PulseSimParameters(sim_frame, tlist)
 
-        parameters = PulseSimParameters(sim_frame, tlist, psi0)
-
-        evolution = exponentiate_hstat(hstat, parameters, logger.name)
+        evolution_lab = exponentiate_hstat(hstat_lab, parameters, logger.name)
+        evolution, _ = transform_evolution(evolution_lab, parameters)
         time_evolution_nodrv = truncate_matrix(evolution, sim_frame.dim, dim)
         unitaries_nodrv = closest_unitary(time_evolution_nodrv)
         generator_nodrv = matrix_angle(unitaries_nodrv)
