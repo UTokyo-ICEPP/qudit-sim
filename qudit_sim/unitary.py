@@ -6,10 +6,10 @@ from rqutils import ArrayType
 from rqutils.math import matrix_angle, matrix_exp
 
 def truncate_matrix(
-    matrix: np.ndarray,
+    matrix: ArrayType,
     original_dim: Union[int, Tuple[int, ...]],
     reduced_dim: Union[int, Tuple[int, ...]]
-) -> np.ndarray:
+) -> ArrayType:
     """Truncate a multi-qudit operator matrix.
 
     The input matrix can have extra dimensions in front. The last two dimensions must have
@@ -51,7 +51,7 @@ def truncate_matrix(
 
 
 def closest_unitary(
-    matrix: np.ndarray,
+    matrix: ArrayType,
     with_fidelity: bool = False,
     npmod: ModuleType = np
 ) -> Union[ArrayType, Tuple[ArrayType, float]]:

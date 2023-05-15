@@ -2,6 +2,7 @@
 
 import logging
 from typing import Tuple
+import jax
 import numpy as np
 import scipy.optimize as sciopt
 
@@ -10,6 +11,7 @@ import rqutils.paulis as paulis
 
 from .components import gate_components
 from ...basis import change_basis
+from ...config import config
 from ...expression import Parameter
 from ...hamiltonian import HamiltonianBuilder
 from ...parallel import parallel_map
@@ -138,10 +140,11 @@ def pi_pulse(
 
     logger.info('Starting pi pulse identification (method="%s")..', method)
 
-    if method == 'nm':
-        popt, loss, niter = _minimize_nm(loss_fn, fit_tol, maxiter, logger)
-    elif method == 'grid':
-        popt, loss, niter = _minimize_grid(loss_fn, fit_tol, maxiter, logger)
+    with jax.default_device(jax.devices()[config.jax_devices[0]]):
+        if method == 'nm':
+            popt, loss, niter = _minimize_nm(loss_fn, fit_tol, maxiter, logger)
+        elif method == 'grid':
+            popt, loss, niter = _minimize_grid(loss_fn, fit_tol, maxiter, logger)
 
     logger.info('Done after %d iterations. Final infidelity %.4e.', niter, loss)
 

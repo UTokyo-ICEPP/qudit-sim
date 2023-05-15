@@ -78,15 +78,13 @@ def gate_components(
     convergence_window: int = 5,
     with_loss: bool = False
 ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
-    jax_device = jax.devices()[config.jax_devices[0]]
-
+    """Find the components of log unitary through fidelity maximization."""
     gate = sim_result.states[-1]
     frame = sim_result.frame
 
     comp_dim = tuple(map(int, np.around(np.sqrt(initial_guess.shape))))
 
     trunc_gate = truncate_matrix(gate, frame.dim, comp_dim)
-    trunc_gate = jax.device_put(trunc_gate, device=jax_device)
 
     def loss_fn(params):
         hermitian = paulis.compose(params['components'], comp_dim, npmod=jnp)
@@ -110,11 +108,12 @@ def gate_components(
 
         return new_params, opt_state, loss
 
+    jax_device = jax.devices()[config.jax_devices[0]]
+
     opt_params = {'components': initial_guess}
     with jax.default_device(jax_device):
         opt_state = grad_trans.init(opt_params)
-
-    step = step.lower(opt_params, opt_state).compile()
+        step = step.lower(opt_params, opt_state).compile()
 
     losses = np.zeros(max_update)
 
