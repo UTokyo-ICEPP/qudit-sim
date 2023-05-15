@@ -557,18 +557,10 @@ def _maximize_fidelity(
     floating = np.logical_not(fixed)
 
     heff_static = np.tensordot(heff_init[fixed], basis[fixed], (0, 0))
-
-    ## Working arrays
-    # parallel.parallel_map sets jax_devices[0] to the ID of the GPU to be used in this thread
-    jax_device = jax.devices()[config.jax_devices[0]]
-
-    time_evolution = jax.device_put(time_evolution, device=jax_device)
-    tlist = jax.device_put(tlist, device=jax_device)
-    heff_static = jax.device_put(heff_static, device=jax_device)
-    heff_init_dev = jax.device_put(heff_init[floating], device=jax_device)
-    heff_basis = jax.device_put(basis[floating], device=jax_device)
-    offset_init_dev = jax.device_put(offset_init.reshape(-1)[1:], device=jax_device)
-    offset_basis = jax.device_put(basis.reshape(-1, *basis.shape[-2:])[1:], device=jax_device)
+    heff_init_floating = heff_init[floating]
+    basis_floating = basis[floating]
+    offset_init_flat = offset_init.reshape(-1)[1:]
+    offset_basis = basis.reshape(-1, *basis.shape[-2:])[1:]
 
     ## Loss function
     def loss_fn(heff_compos, offset_compos):
@@ -577,7 +569,7 @@ def _maximize_fidelity(
         # diverges when matrix_exp is used with a diagonal hermitian where some parameters
         # only control off-diagonal elements.
 
-        heff = jnp.tensordot(heff_compos, heff_basis, (0, 0))
+        heff = jnp.tensordot(heff_compos, basis_floating, (0, 0))
         heff += heff_static
         offset = jnp.tensordot(offset_compos, offset_basis, (0, 0))
         generator = heff[None, ...] * tlist[:, None, None] + offset
@@ -589,8 +581,9 @@ def _maximize_fidelity(
         return -jnp.mean(fidelity)
 
     ## Minimize
+    logger.debug('Minimizing using JAX device %s', jax.config.jax_default_device)
     if optimizer == 'minuit':
-        heff_compos, offset_compos = _minimize_minuit(loss_fn, heff_init_dev, offset_init_dev,
+        heff_compos, offset_compos = _minimize_minuit(loss_fn, heff_init_floating, offset_init_flat,
                                                       logger)
         intermediate_results = None
     else:
@@ -601,7 +594,8 @@ def _maximize_fidelity(
         grad_trans = getattr(optax, optimizer)(*optimizer_args)
 
         heff_compos, offset_compos, intermediate_results = _minimize(grad_trans, loss_fn,
-                                                                     heff_init_dev, offset_init_dev,
+                                                                     heff_init_floating,
+                                                                     offset_init_flat,
                                                                      max_updates, convergence,
                                                                      convergence_window,
                                                                      return_intermediate, logger)
@@ -618,14 +612,11 @@ def _maximize_fidelity(
 
 def _minimize_minuit(
     loss_fn: Callable,
-    heff_init: jnp.DeviceArray,
-    offset_init: jnp.DeviceArray,
+    heff_init: np.ndarray,
+    offset_init: np.ndarray,
     logger: logging.Logger
 ):
     from iminuit import Minuit
-
-    jax_device = heff_init.device()
-    logger.debug('Using JAX device %s', jax_device)
 
     initial = jnp.concatenate((heff_init, offset_init))
     num_heff = heff_init.shape[0]
@@ -638,10 +629,7 @@ def _minimize_minuit(
 
     logger.info('Running MIGRAD..')
 
-    # https://github.com/google/jax/issues/11478
-    # default_device is thread-local
-    with jax.default_device(jax_device):
-        minimizer.migrad()
+    minimizer.migrad()
 
     logger.info('Done.')
 
@@ -651,38 +639,30 @@ def _minimize_minuit(
 def _minimize(
     grad_trans,
     loss_fn: Callable,
-    heff_init: jnp.DeviceArray,
-    offset_init: jnp.DeviceArray,
+    heff_init: np.ndarray,
+    offset_init: np.ndarray,
     max_updates: int,
     convergence: float,
     convergence_window: int,
     return_intermediate: bool,
     logger: logging.Logger
 ):
-    jax_device = heff_init.device()
-    logger.debug('Using JAX device %s', jax_device)
-
     value_and_grad = jax.value_and_grad(lambda p: loss_fn(p['heff'], p['offset']))
 
     @jax.jit
     def step(opt_params, opt_state):
-        # https://github.com/google/jax/issues/11478
-        # default_device is thread-local
-        with jax.default_device(jax_device):
-            loss, gradient = value_and_grad(opt_params)
-            updates, opt_state = grad_trans.update(gradient, opt_state)
-            new_params = optax.apply_updates(opt_params, updates)
-
+        loss, gradient = value_and_grad(opt_params)
+        updates, opt_state = grad_trans.update(gradient, opt_state)
+        new_params = optax.apply_updates(opt_params, updates)
         return new_params, opt_state, loss, gradient
 
     ## Start the fidelity maximization loop
     logger.info('Starting maximization loop..')
 
-    opt_params = {'heff': heff_init, 'offset': offset_init}
-    with jax.default_device(jax_device):
-        opt_state = grad_trans.init(opt_params)
-        ## Compile the step function
-        step = step.lower(opt_params, opt_state).compile()
+    opt_params = {'heff': jnp.array(heff_init), 'offset': jnp.array(offset_init)}
+    opt_state = grad_trans.init(opt_params)
+    ## Compile the step function
+    step = step.lower(opt_params, opt_state).compile()
 
     losses = np.ones(convergence_window)
 
@@ -698,8 +678,7 @@ def _minimize(
         intermediate_results = None
 
     for iup in range(max_updates):
-        with jax.default_device(jax_device):
-            new_params, opt_state, loss, gradient = step(opt_params, opt_state)
+        new_params, opt_state, loss, gradient = step(opt_params, opt_state)
 
         if return_intermediate:
             intermediate_results['loss'][iup] = loss

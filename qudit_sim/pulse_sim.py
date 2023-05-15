@@ -8,7 +8,6 @@ import time
 from dataclasses import dataclass, field
 from functools import partial
 from threading import Condition
-from types import ModuleType
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 import jax
 import jax.numpy as jnp
@@ -17,8 +16,8 @@ import numpy as np
 from scipy.sparse import csr_array
 import qutip as qtp
 
+from rqutils import ArrayType
 from rqutils.math import matrix_exp
-from .config import config
 from .frame import FrameSpec, QuditFrame, SystemFrame
 from .hamiltonian import Hamiltonian, HamiltonianBuilder
 from .parallel import parallel_map
@@ -357,18 +356,13 @@ def _run_single(
     if isinstance(hamiltonian, list) and len(hamiltonian) == 1 and isinstance(hamiltonian[0], qtp.Qobj):
         evolution = exponentiate_hstat(hamiltonian[0], parameters, logger_name)
     elif solver == 'jax':
-        with jax.default_device(jax.devices()[config.jax_devices[0]]):
-            evolution = simulate_drive_odeint(hamiltonian, parameters, drive_args, logger_name)
+        evolution = simulate_drive_odeint(hamiltonian, parameters, drive_args, logger_name)
     else:
         evolution = simulate_drive_sesolve(hamiltonian, parameters, drive_args, logger_name)
 
     # Compute the states and expectation values in the original frame
     transform_start = time.time()
-    if solver == 'jax':
-        with jax.default_device(jax.devices()[config.jax_devices[0]]):
-            states, expect = transform_evolution(evolution, parameters, npmod=jnp)
-    else:
-        states, expect = transform_evolution(evolution, parameters)
+    states, expect = transform_evolution(evolution, parameters)
 
     logger.debug('Calculation of states and expectation values completed in %.2f seconds.',
                  time.time() - transform_start)
@@ -512,8 +506,8 @@ def simulate_drive_odeint(
     """Use JAX odeint to integrate the time evolution operator."""
     logger = logging.getLogger(logger_name)
 
-    # parallel.parallel_map sets jax_devices[0] to the ID of the GPU to be used in this thread
-    logger.info('Starting simulation on JAX device %d.', config.jax_devices[0])
+    # parallel.parallel_map places the target function under jax.default_device()
+    logger.info('Starting simulation on JAX device %s.', jax.config.jax_default_device)
 
     tlists, tlist_indices = _stack_tlist(parameters.tlist,
                                          parameters.solver_options.get('num_parallel', 64))
@@ -597,7 +591,7 @@ def _compile_vodeint(
     # vodeint must be lowered on the specific device - key on arg shape + device ID
     opt = (solver_options.get('rtol', 1.e-8), solver_options.get('atol', 1.e-8),
            solver_options.get('mxstep', jnp.inf), solver_options.get('hmax', jnp.inf))
-    h_key = (tshape, opt, config.jax_devices[0])
+    h_key = (tshape, opt, jax.config.jax_default_device.id)
 
     with odeint_cv:
         if not hasattr(hamiltonian, 'compiled_vodeint'):
@@ -679,11 +673,15 @@ def exponentiate_hstat(
 
 
 def transform_evolution(
-    evolution: np.ndarray,
-    parameters: PulseSimParameters,
-    npmod: ModuleType = np
+    evolution: ArrayType,
+    parameters: PulseSimParameters
 ):
     """Compute the evolution operator and expectation values in the given frame."""
+    if isinstance(evolution, jax.Array):
+        npmod = jnp
+    else:
+        npmod = np
+
     if parameters.final_only:
         tlist = parameters.tlist[-1:]
     else:

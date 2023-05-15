@@ -8,6 +8,8 @@ import multiprocessing
 import threading
 import logging
 
+import jax
+
 from .config import config
 
 logger = logging.getLogger(__name__)
@@ -139,31 +141,24 @@ def parallel_map(
         proc_name = f'task{itask}'
 
         if thread_based:
-            # In thread-based parallelization, each thread sees only one GPU
-            jax_device_id = config.jax_devices[itask % len(config.jax_devices)]
+            conn = ThreadConn()
+            conn_recv = conn
 
             if thread_based == 'serial':
                 # Serial (debug) mode
                 logger.debug('Running process %d', itask)
-                current_jax_devices = config.jax_devices
-                config.jax_devices = [jax_device_id]
 
-                results[itask] = target(*a, **k)
-
-                config.jax_devices = current_jax_devices
+                _process_wrapper(target, a, k, conn, proc_name, itask)
+                results[itask] = conn_recv.recv()
+                conn_recv.close()
 
                 continue
             else:
-                conn = ThreadConn()
-                conn_recv = conn
-                proc_config = {'jax_devices': [jax_device_id]}
-                proc_args = (target, a, k, conn, proc_name, proc_config)
+                proc_args = (target, a, k, conn, proc_name, itask)
                 process = threading.Thread(target=_process_wrapper, args=proc_args, name=proc_name)
         else:
             conn_recv, conn_send = multiprocessing.Pipe()
-            # JAX (or CUDA in general?) does not seem to work with multiprocessing
-            proc_config = {'jax_devices': None}
-            proc_args = (target, a, k, conn_send, proc_name, proc_config)
+            proc_args = (target, a, k, conn_send, proc_name, None)
             process = multiprocessing.Process(target=_process_wrapper, args=proc_args,
                                               name=proc_name)
 
@@ -219,13 +214,17 @@ def _wait_procs(processes, results, max_num, wait=2):
         else:
             break
 
-def _process_wrapper(target, args, kwargs, conn, proc_name, proc_config=None):
-    if proc_config:
-        for key, value in proc_config.items():
-            setattr(config, key, value)
-
+def _process_wrapper(target, args, kwargs, conn, proc_name, itask=None):
     try:
-        result = target(*args, **kwargs)
+        if itask is None:
+            result = target(*args, **kwargs)
+        else:
+            device_id = config.jax_devices[itask % len(config.jax_devices)]
+            # https://github.com/google/jax/issues/11478
+            # default_device is thread-local
+            with jax.default_device(jax.devices()[device_id]):
+                result = target(*args, **kwargs)
+
     except Exception:
         sys.stderr.write(f'Exception in {proc_name}:\n')
         traceback.print_exc()

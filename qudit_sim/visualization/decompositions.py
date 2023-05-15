@@ -22,7 +22,6 @@ import rqutils.paulis as paulis
 from rqutils.qprint import QPrintPauli
 
 from ..basis import change_basis, matrix_labels
-from ..config import config
 from ..scale import FrequencyScale
 from ..sim_result import PulseSimResult
 
@@ -398,26 +397,19 @@ def smooth_components(
     dim: Tuple[int, ...]
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Identify the generator components and eigenvalues of the time evolution unitaries through fits."""
-    jax_device = jax.devices()[config.jax_devices[0]]
-
     def loss_fn(params, unitary):
-        with jax.default_device(jax_device):
-            hermitian = paulis.compose(params['components'], dim, npmod=jnp)
-            ansatz = jax.scipy.linalg.expm(1.j * hermitian)
-            return -jnp.square(jnp.abs(jnp.trace(unitary @ ansatz)))
+        hermitian = paulis.compose(params['components'], dim, npmod=jnp)
+        ansatz = jax.scipy.linalg.expm(1.j * hermitian)
+        return -jnp.square(jnp.abs(jnp.trace(unitary @ ansatz)))
 
     value_and_grad = jax.value_and_grad(loss_fn)
     grad_trans = optax.adam(0.005)
 
     @jax.jit
     def step(opt_params, opt_state, unitary):
-        # https://github.com/google/jax/issues/11478
-        # default_device is thread-local
-        with jax.default_device(jax_device):
-            loss, gradient = value_and_grad(opt_params, unitary)
-            updates, opt_state = grad_trans.update(gradient, opt_state)
-            new_params = optax.apply_updates(opt_params, updates)
-
+        loss, gradient = value_and_grad(opt_params, unitary)
+        updates, opt_state = grad_trans.update(gradient, opt_state)
+        new_params = optax.apply_updates(opt_params, updates)
         return new_params, opt_state, loss, gradient
 
     components = np.empty((time_evolution.shape[0],) + tuple(np.square(dim)))
@@ -430,9 +422,8 @@ def smooth_components(
     losses = np.empty(window)
 
     for itime in range(time_evolution.shape[0]):
-        opt_params = {'components': jax.device_put(initial, device=jax_device)}
-        with jax.default_device(jax_device):
-            opt_state = grad_trans.init(opt_params)
+        opt_params = {'components': jnp.array(initial)}
+        opt_state = grad_trans.init(opt_params)
 
         for iup in range(max_update):
             new_params, opt_state, loss, gradient = step(opt_params, opt_state, time_evolution[itime])

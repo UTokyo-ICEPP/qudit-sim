@@ -9,7 +9,6 @@ import optax
 from rqutils.math import matrix_angle
 import rqutils.paulis as paulis
 
-from ...config import config
 from ...sim_result import PulseSimResult
 from ...unitary import closest_unitary, truncate_matrix
 
@@ -108,20 +107,14 @@ def gate_components(
 
         return new_params, opt_state, loss
 
-    jax_device = jax.devices()[config.jax_devices[0]]
-
     opt_params = {'components': initial_guess}
-    with jax.default_device(jax_device):
-        opt_state = grad_trans.init(opt_params)
-        step = step.lower(opt_params, opt_state).compile()
+    opt_state = grad_trans.init(opt_params)
+    step = step.lower(opt_params, opt_state).compile()
 
     losses = np.zeros(max_update)
 
     for iup in range(max_update):
-        # https://github.com/google/jax/issues/11478
-        # default_device is thread-local
-        with jax.default_device(jax_device):
-            opt_params, opt_state, loss = step(opt_params, opt_state)
+        opt_params, opt_state, loss = step(opt_params, opt_state)
 
         losses[iup] = loss
 

@@ -14,9 +14,7 @@ class Config:
     """
     def __init__(self):
         self.num_cpus = 0
-
-        self._local = threading.local()
-        self._local.jax_devices = list(range(jax.local_device_count()))
+        self.jax_devices = list(range(jax.local_device_count()))
 
         # Check 64-bit float support
         if jnp.array([0.], dtype=jnp.float64).dtype is not jnp.dtype('float64'):
@@ -24,16 +22,6 @@ class Config:
                           'or JAX was already configured in 32 bits. It is advised not to '
                           'use "jax" for pulse simulation.')
 
-    @property
-    def jax_devices(self):
-        if self._local.jax_devices is None:
-            raise RuntimeError('jax_devices is nullified. Are you perhaps trying to use jax in a multiprocessing call?')
-
-        return self._local.jax_devices
-
-    @jax_devices.setter
-    def jax_devices(self, value):
-        self._local.jax_devices = value
-
-
 config = Config()
+if config.jax_devices:
+    jax_config.update('jax_default_device', jax.devices()[config.jax_devices[0]])
