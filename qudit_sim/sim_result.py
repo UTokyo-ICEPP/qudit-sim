@@ -28,6 +28,7 @@ def save_sim_result(filename: str, result: PulseSimResult):
             out.create_dataset('expect', data=result.expect)
         if result.states is not None:
             out.create_dataset('states', data=result.states)
+        out.create_dataset('qudit_ids', data=list(result.frame.keys()))
         frame = out.create_group('frame')
         for qudit_id, qudit_frame in result.frame.items():
             data = np.array([qudit_frame.frequency, qudit_frame.phase])
@@ -47,7 +48,9 @@ def load_sim_result(filename: str) -> PulseSimResult:
         except KeyError:
             states = None
 
-        frame = SystemFrame({str(qudit_id): QuditFrame(data[0], data[1])
-                             for qudit_id, data in source['frame'].items()})
+        frame = {}
+        for qudit_id in source['qudit_ids'].asstr():
+            frame_data = source['frame'][qudit_id]
+            frame[qudit_id] = QuditFrame(frame_data[0], frame_data[1])
 
-    return PulseSimResult(times, expect, states, frame)
+    return PulseSimResult(times, expect, states, SystemFrame(frame))
