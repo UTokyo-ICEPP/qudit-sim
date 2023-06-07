@@ -29,7 +29,7 @@ from ..sim_result import PulseSimResult
 def print_components(
     components: np.ndarray,
     uncertainties: Optional[np.ndarray] = None,
-    symbol: Optional[str] = None,
+    symbols: Optional[Union[str, List[str]]] = None,
     precision: int = 3,
     threshold: float = 1.e-3,
     lhs_label: Optional[str] = None,
@@ -58,9 +58,9 @@ def print_components(
     """
     if basis is not None:
         components = change_basis(components, to_basis=basis)
-        if symbol is None:
-            dim = np.around(np.sqrt(components.shape)).astype(int)[0]
-            symbol = matrix_labels(basis, dim)
+        if symbols is None:
+            pauli_dim = tuple(np.around(np.sqrt(components.shape)).astype(int))
+            symbols = list(matrix_labels(basis, dim) for dim in pauli_dim)
 
     max_abs = np.amax(np.abs(components))
 
@@ -92,9 +92,6 @@ def print_components(
     else:
         amp_cutoff = -threshold
 
-    if symbol is not None:
-        symbol = [symbol] * len(components.shape)
-
     if uncertainties is not None:
         if basis is not None:
             uncertainties = change_basis(uncertainties, to_basis=basis)
@@ -104,10 +101,10 @@ def print_components(
         unc[selected] = uncertainties[selected] / scale_omega
 
         central = QPrintPauli(components, amp_format=f'.{precision}f',
-                              amp_cutoff=amp_cutoff, symbol=symbol)
+                              amp_cutoff=amp_cutoff, symbol=symbols)
 
         uncert = QPrintPauli(unc, amp_format=f'.{precision}f',
-                             amp_cutoff=0., symbol=symbol)
+                             amp_cutoff=0., symbol=symbols)
 
         if HAS_IPYTHON:
             return Latex(fr'\begin{{split}} {lhs_label} & = {central.latex(env=None)} \\'
@@ -117,7 +114,7 @@ def print_components(
 
     else:
         pobj = QPrintPauli(components, amp_format=f'.{precision}f', amp_cutoff=amp_cutoff,
-                           lhs_label=lhs_label, symbol=symbol)
+                           lhs_label=lhs_label, symbol=symbols)
 
         if HAS_IPYTHON:
             return Latex(pobj.latex())
@@ -128,7 +125,7 @@ def print_components(
 def plot_components(
     components: np.ndarray,
     uncertainties: Optional[np.ndarray] = None,
-    symbol: Optional[str] = None,
+    symbols: Optional[Union[str, List[str]]] = None,
     threshold: float = 1.e-2,
     scale: Union[FrequencyScale, str, None] = FrequencyScale.auto,
     ignore_identity: bool = True,
@@ -139,7 +136,7 @@ def plot_components(
     Args:
         components: Array of Pauli components returned by find_heff.
         uncertainties: Array of component uncertainties.
-        symbol: Symbol to use instead of the numeric indices for the matrices.
+        symbols: Symbols to use instead of the numeric indices for the matrices.
         threshold: Ignore terms with absolute components below this value relative to the given
             scale (if >0) or to the maximum absolute component (if <0).
         scale: Normalize the components with the frequency scale. If None, components are taken
@@ -152,13 +149,13 @@ def plot_components(
     Returns:
         A Figure object containing the bar graph.
     """
-    pauli_dim = np.around(np.sqrt(components.shape)).astype(int)
+    pauli_dim = tuple(np.around(np.sqrt(components.shape)).astype(int))
     num_qudits = len(components.shape)
 
     if basis is not None:
         components = change_basis(components, to_basis=basis)
-        if symbol is None:
-            symbol = matrix_labels(basis, pauli_dim[0])
+        if symbols is None:
+            symbols = list(matrix_labels(basis, dim) for dim in pauli_dim)
 
     max_abs = np.amax(np.abs(components))
 
@@ -218,15 +215,13 @@ def plot_components(
 
     ax.axhline(0., color='black', linewidth=0.5)
 
-    if symbol is None:
-        symbol = ''
+    if symbols is None:
+        symbols = [''] * len(pauli_dim)
         delimiter = r'\,' if pauli_dim[0] == 2 else ','
     else:
         delimiter = r'\,'
 
-    symbol = [symbol] * len(pauli_dim)
-
-    labels = paulis.labels(pauli_dim, symbol=symbol, delimiter=delimiter, norm=False)
+    labels = paulis.labels(pauli_dim, symbol=symbols, delimiter=delimiter, norm=False)
 
     xticks = np.char.add(np.char.add('$', labels), '$')
 
@@ -250,7 +245,7 @@ def plot_evolution(
     fig: Optional[mpl.figure.Figure] = None,
     title: str = '',
     basis: Optional[str] = None,
-    symbol: Optional[str] = None,
+    symbols: Optional[Union[str, List[str]]] = None,
     smooth: bool = False
 ) -> Tuple[List[Tuple[int, ...]], mpl.figure.Figure]:
     r"""Plot the Pauli components of the generator of a time evolution as a function of time.
@@ -275,7 +270,7 @@ def plot_evolution(
         fig: Figure to add the plots into.
         title: Title of the figure.
         basis: Represent the components in the given matrix basis.
-        symbol: Symbol to use instead of the numeric indices for the matrices.
+        symbols: Symbols to use instead of the numeric indices for the matrices.
         smooth: (Experimental) Perform a fit to every single time evolution unitary with the initial
             value of the generator components taken from the previous step.
 
@@ -306,8 +301,8 @@ def plot_evolution(
 
     if basis is not None:
         components = change_basis(components, to_basis=basis, num_qudits=len(dim))
-        if symbol is None:
-            symbol = matrix_labels(basis, dim[0])
+        if symbols is None:
+            symbols = list(matrix_labels(basis, d) for d in dim)
 
     components = np.moveaxis(components, 0, -1)
 
@@ -338,10 +333,7 @@ def plot_evolution(
         fig.subplots(ny, nx)
 
     if len(select_components) > 0:
-        if symbol is not None:
-            symbol = [symbol] * len(dim)
-
-        labels = paulis.labels(dim, symbol=symbol, norm=False)
+        labels = paulis.labels(dim, symbol=symbols, norm=False)
 
         if align_ylim:
             indices_array = tuple(zip(*select_components))
