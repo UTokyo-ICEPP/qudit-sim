@@ -34,7 +34,8 @@ def inspect_heff_fit(
     align_ylim: bool = True,
     select_components: Optional[List[Tuple]] = None,
     basis: Optional[Union[str, np.ndarray]] = None,
-    symbol: Optional[str] = None
+    symbols: Optional[Union[str, List[str]]] = None,
+    figures: Optional[List[str]] = None
 ) -> List[mpl.figure.Figure]:
     """Plot the time evolution of Pauli components before and after fidelity maximization.
 
@@ -46,7 +47,7 @@ def inspect_heff_fit(
         align_ylim: Whether to align the y axis limits for all plots.
         select_components: List of Pauli components to plot.
         basis: Represent the components in the given matrix basis.
-        symbol: Symbol to use instead of the numeric indices for the matrices.
+        symbols: Symbols to use instead of the numeric indices for the matrices.
 
     Returns:
         A list of two (three if metrics=True) figures.
@@ -57,15 +58,20 @@ def inspect_heff_fit(
         fit_start, fit_end = source['fit_range'][()]
         components = source['components'][()]
         offset_components = source['offset_components'][()]
+        fixed_indices = source['fixed'][()]
 
         try:
             loss = source['loss'][()]
             heff_grads = source['heff_grads'][()]
             offset_grads = source['offset_grads'][()]
+            heff_compos = source['heff_compos'][()]
+            offset_compos = source['offset_compos'][()]
         except KeyError:
             loss = None
             heff_grads = None
             offset_grads = None
+            heff_compos = None
+            offset_compos = None
 
     tlist = sim_result.times
     time_evolution = sim_result.states
@@ -83,115 +89,146 @@ def inspect_heff_fit(
         time_evolution_trunc = time_evolution
         trunc_fidelity = np.ones(tlist.shape[0])
 
-    figures = []
-
-    ## First figure: original time evolution and Heff
-    indices, fig_generator = plot_evolution(time_evolution=time_evolution,
-                                            tlist=tlist,
-                                            dim=comp_dim,
-                                            threshold=threshold,
-                                            select_components=select_components,
-                                            eigvals=True,
-                                            align_ylim=align_ylim,
-                                            tscale=tscale,
-                                            title='Original time evolution vs $H_{eff}$',
-                                            basis=basis,
-                                            symbol=symbol)
-    figures.append(fig_generator)
-
-    # Add lines with slope=compo for terms above threshold
-    xval = (tlist_fit + tlist[fit_start]) * tscale.frequency_value
-    x0 = tlist[fit_start] * tscale.frequency_value
-    x1 = tlist[fit_end] * tscale.frequency_value
-
-    components_orig = components
-    offset_components_orig = offset_components
-
     if basis is not None:
-        components = change_basis(components, to_basis=basis)
-        offset_components = change_basis(offset_components, to_basis=basis)
+        components_tr = change_basis(components, to_basis=basis)
+        offset_components_tr = change_basis(offset_components, to_basis=basis)
+    else:
+        components_tr = components
+        offset_components_tr = offset_components
 
-    for iax, index in enumerate(indices):
-        ax = fig_generator.axes[iax]
-        yval = components[index] * tlist_fit + offset_components[index]
+    if figures is None:
+        figures = ['evolution', 'subtracted', 'metrics']
 
-        ax.plot(xval, yval)
+    figure_list = []
 
-    # Indicate the start-of-fit time
-    for ax in fig_generator.axes:
-        if ax.get_lines():
-            ax.axvline(x0, linestyle='dotted', color='black', linewidth=0.5)
-            ax.axvline(x1, linestyle='dotted', color='black', linewidth=0.5)
+    if 'evolution' in figures:
+        ## Original time evolution and Heff
+        indices, fig_generator = plot_evolution(time_evolution=time_evolution,
+                                                tlist=tlist,
+                                                dim=comp_dim,
+                                                threshold=threshold,
+                                                select_components=select_components,
+                                                eigvals=True,
+                                                align_ylim=align_ylim,
+                                                tscale=tscale,
+                                                title='Original time evolution vs $H_{eff}$',
+                                                basis=basis,
+                                                symbols=symbols)
+        figure_list.append(fig_generator)
 
-    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-    handles = [
-        mpl.lines.Line2D([0.], [0.], color=colors[0]),
-        mpl.lines.Line2D([0.], [0.], color=colors[1])
-    ]
-    labels = [
-        'Generator component',
-        '$H_{eff}t$ component'
-    ]
-    fig_generator.legend(handles, labels, 'upper right')
+        # Add lines with slope=compo for terms above threshold
+        xval = (tlist_fit + tlist[fit_start]) * tscale.frequency_value
+        x0 = tlist[fit_start] * tscale.frequency_value
+        x1 = tlist[fit_end] * tscale.frequency_value
 
-    ## Second figure: subtracted unitaries
-    target = unitary_subtraction(time_evolution[fit_start:fit_end + 1], components_orig,
-                                 offset_components_orig, tlist_fit)
+        for iax, index in enumerate(indices):
+            ax = fig_generator.axes[iax]
+            yval = components_tr[index] * tlist_fit + offset_components_tr[index]
 
-    _, fig_target = plot_evolution(time_evolution=target,
-                                   tlist=(tlist_fit + tlist[fit_start]),
-                                   dim=comp_dim,
-                                   threshold=threshold,
-                                   select_components=select_components,
-                                   align_ylim=align_ylim,
-                                   tscale=tscale,
-                                   title='Unitary-subtracted time evolution',
-                                   basis=basis,
-                                   symbol=symbol)
-    figures.append(fig_target)
+            ax.plot(xval, yval)
 
-    ## Third figure: fit metrics plots
-    fig_metrics, axes = plt.subplots(1, 3, figsize=(16, 4))
-    figures.append(fig_metrics)
-    fig_metrics.suptitle('Fit metrics', fontsize=16)
+        # Indicate the start-of-fit time
+        for ax in fig_generator.axes:
+            if ax.get_lines():
+                ax.axvline(x0, linestyle='dotted', color='black', linewidth=0.5)
+                ax.axvline(x1, linestyle='dotted', color='black', linewidth=0.5)
 
-    # fidelity
-    full_fidelity = heff_fidelity(time_evolution_trunc[fit_start:fit_end + 1], components_orig,
-                                  offset_components_orig, tlist_fit)
-    xval = (tlist_fit + tlist[fit_start]) * tscale.frequency_value
+        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+        handles = [
+            mpl.lines.Line2D([0.], [0.], color=colors[0]),
+            mpl.lines.Line2D([0.], [0.], color=colors[1])
+        ]
+        labels = [
+            'Generator component',
+            '$H_{eff}t$ component'
+        ]
+        fig_generator.legend(handles, labels, 'upper right')
 
-    ax = axes[0]
-    ax.set_title('Fidelity')
-    ax.set_xlabel(f't ({tscale.time_unit})')
-    ax.set_ylabel('fidelity')
-    ax.plot(xval, trunc_fidelity[fit_start:fit_end + 1], label='Upper bound')
-    ax.plot(xval, full_fidelity, label='Fidelity')
-    ax.axhline(1., color='black', linewidth=0.5)
-    ax.legend()
+    if 'subtracted' in figures:
+        ## Subtracted unitaries
+        target = unitary_subtraction(time_evolution[fit_start:fit_end + 1], components,
+                                     offset_components, tlist_fit)
 
-    ## Intermediate data is not available if minuit is used
-    if loss is not None:
-        ax = axes[1]
-        ax.set_title('Loss evolution')
-        ax.set_xlabel('steps')
-        ax.set_ylabel('loss')
-        ax.plot(loss)
-        ax.axhline(0., color='black', linewidth=0.5)
+        _, fig_target = plot_evolution(time_evolution=target,
+                                       tlist=(tlist_fit + tlist[fit_start]),
+                                       dim=comp_dim,
+                                       threshold=threshold,
+                                       select_components=select_components,
+                                       align_ylim=align_ylim,
+                                       tscale=tscale,
+                                       title='Unitary-subtracted time evolution',
+                                       basis=basis,
+                                       symbols=symbols)
+        figure_list.append(fig_target)
 
-        ax = axes[2]
-        ax.set_title('Gradient evolution')
-        ax.set_xlabel('steps')
-        ax.set_ylabel('max(abs(grad))')
-        ax.plot(np.amax(np.abs(heff_grads.reshape(heff_grads.shape[0], -1)), axis=1),
-                label='$H_{eff}$')
-        ax.plot(np.amax(np.abs(offset_grads.reshape(offset_grads.shape[0], -1)), axis=1),
-                label='Offset')
-        ax.axhline(0., color='black', linewidth=0.5)
+    if 'metrics' in figures:
+        ## Fit metrics plots
+        fig_metrics, axes = plt.subplots(1, 3, figsize=(16, 4))
+        figure_list.append(fig_metrics)
+        fig_metrics.suptitle('Fit metrics', fontsize=16)
+
+        # fidelity
+        full_fidelity = heff_fidelity(time_evolution_trunc[fit_start:fit_end + 1], components,
+                                      offset_components, tlist_fit)
+        xval = (tlist_fit + tlist[fit_start]) * tscale.frequency_value
+
+        ax = axes[0]
+        ax.set_title('Fidelity')
+        ax.set_xlabel(f't ({tscale.time_unit})')
+        ax.set_ylabel('fidelity')
+        ax.plot(xval, trunc_fidelity[fit_start:fit_end + 1], label='Upper bound')
+        ax.plot(xval, full_fidelity, label='Fidelity')
+        ax.axhline(1., color='black', linewidth=0.5)
         ax.legend()
 
-    fig_metrics.tight_layout()
+        ## Intermediate data is not available if minuit is used
+        if loss is not None:
+            ax = axes[1]
+            ax.set_title('Loss evolution')
+            ax.set_xlabel('steps')
+            ax.set_ylabel('loss')
+            ax.plot(loss)
+            ax.axhline(0., color='black', linewidth=0.5)
 
-    return figures
+            ax = axes[2]
+            ax.set_title('Gradient evolution')
+            ax.set_xlabel('steps')
+            ax.set_ylabel('max(abs(grad))')
+            ax.plot(np.amax(np.abs(heff_grads.reshape(heff_grads.shape[0], -1)), axis=1),
+                    label='$H_{eff}$')
+            ax.plot(np.amax(np.abs(offset_grads.reshape(offset_grads.shape[0], -1)), axis=1),
+                    label='Offset')
+            ax.axhline(0., color='black', linewidth=0.5)
+            ax.legend()
+
+        fig_metrics.tight_layout()
+
+    if 'heff_values' in figures and heff_compos is not None:
+        ## Fit evolution of Heff components
+        indices = list(zip(*np.nonzero(np.logical_not(fixed_indices))))
+        heff_compos_map = {idx: heff_compos[:, ic] for ic, idx in enumerate(indices)}
+        if select_components is not None:
+            indices = list(sorted(set(select_components) & set(indices)))
+
+        num_axes = len(indices)
+        nx = np.floor(np.sqrt(num_axes)).astype(int)
+        nx = max(nx, 4)
+        nx = min(nx, 9)
+        ny = np.ceil(num_axes / nx).astype(int)
+        fig_heff, axes = plt.subplots(ny, nx, figsize=(nx * 4, ny * 4))
+        figure_list.append(fig_heff)
+        fig_heff.suptitle('Heff components', fontsize=16)
+
+        labels = paulis.labels(comp_dim, symbol=symbols, norm=False)
+
+        for iax, idx in enumerate(indices):
+            ax = fig_heff.axes[iax]
+            ax.set_title(f'${labels[idx]}$')
+            ax.plot(np.arange(len(heff_compos_map[idx])), heff_compos_map[idx])
+
+        fig_heff.tight_layout()
+
+    return figure_list
 
 
 def plot_amplitude_scan(
@@ -200,11 +237,12 @@ def plot_amplitude_scan(
     threshold: Optional[float] = None,
     amp_scale: FrequencyScale = FrequencyScale.auto,
     compo_scale: FrequencyScale = FrequencyScale.auto,
-    max_poly_order: int = 4,
+    max_poly_order: Union[int, None] = 4,
     use_all_powers: bool = False,
+    auto_scale: bool = True,
     select_components: Optional[List[Tuple]] = None,
     basis: Optional[Union[str, np.ndarray]] = None,
-    symbol: Optional[str] = None
+    symbols: Optional[Union[str, List[str]]] = None
 ) -> Tuple[mpl.figure.Figure, np.ndarray, FrequencyScale, FrequencyScale]:
     """Plot the result of the amplitude scan.
 
@@ -224,12 +262,12 @@ def plot_amplitude_scan(
         amp_scale: Scale of the drive amplitude.
         compo_scale: Scale of the components.
         max_poly_order: Maximum polynomial order for fitting the amplitude dependencies of the
-            components.
+            components. Set to None to skip fitting.
         use_all_powers: If True, do not restrict polynomial fit to odd / even powers
             depending on the diagonality of the Hamiltonian component.
         select_components: List of Pauli components to plot.
         basis: Represent the components in the given matrix basis.
-        symbol: Symbol to use instead of the numeric indices for the matrices.
+        symbols: Symbols to use instead of the numeric indices for the matrices.
 
     Returns:
         Plot Figure, polynomial coefficients from the fits, list of selected components, and the amplitude
@@ -238,18 +276,21 @@ def plot_amplitude_scan(
     components = np.asarray(components)
 
     num_qudits = len(components.shape) - 1 # first dim: amplitudes
-    comp_dim = int(np.around(np.sqrt(components.shape[1])))
-    num_paulis = comp_dim ** 2
+    comp_dim = tuple(np.around(np.sqrt(components.shape[1:])).astype(int))
 
     if basis is not None:
         components = change_basis(components, to_basis=basis, num_qudits=num_qudits)
-        if symbol is None:
-            symbol = matrix_labels(basis, comp_dim)
+        if symbols is None:
+            symbols = list(matrix_labels(basis, dim) for dim in comp_dim)
 
-    if amp_scale is FrequencyScale.auto:
-        amp_scale = FrequencyScale.find_energy_scale(np.amax(np.abs(amplitudes)))
+    if amp_scale is None:
+        amp_scale_omega = 1.
+    else:
+        if amp_scale is FrequencyScale.auto:
+            amp_scale = FrequencyScale.find_energy_scale(np.amax(np.abs(amplitudes)))
 
-    amp_scale_omega = amp_scale.pulsatance_value
+        amp_scale_omega = amp_scale.pulsatance_value
+
     amplitudes = amplitudes / amp_scale_omega
 
     if compo_scale is FrequencyScale.auto:
@@ -272,21 +313,20 @@ def plot_amplitude_scan(
 
     min_max = min(compo_maxima[index] for index in select_components)
 
-    coefficients = list(np.zeros(max_poly_order + 1) for _ in range(len(select_components)))
+    if max_poly_order is None:
+        coefficients = None
+    else:
+        coefficients = list(np.zeros(max_poly_order + 1) for _ in range(len(select_components)))
 
-    pauli_dim = (comp_dim,) * num_qudits
-
-    if symbol is None:
-        symbol = ''
-        delimiter = r'\,' if comp_dim == 2 else ','
+    if symbols is None:
+        symbols = [''] * len(comp_dim)
+        delimiter = r'\,' if all(dim == 2 for dim in comp_dim) else ','
     else:
         delimiter = r'\,'
 
-    symbol = [symbol] * num_qudits
+    basis_labels = paulis.labels(comp_dim, symbol=symbols, delimiter=delimiter, norm=False)
 
-    basis_labels = paulis.labels(pauli_dim, symbol=symbol, delimiter=delimiter, norm=False)
-
-    diag_indices = diagonals(basis, comp_dim)
+    diag_indices = list(diagonals(basis, dim) for dim in comp_dim)
 
     amplitudes_fine = np.linspace(amplitudes[0], amplitudes[-1], 100)
     num_amps = amplitudes.shape[0]
@@ -301,11 +341,11 @@ def plot_amplitude_scan(
 
     for icompo, index in enumerate(select_components):
         label = basis_labels[index]
-        is_diagonal = all(idx in diag_indices for idx in index)
+        is_diagonal = all(idx in diag for idx, diag in zip(index, diag_indices))
 
         plot_label = f'${label}$'
 
-        if compo_maxima[index] > 50. * min_max:
+        if auto_scale and compo_maxima[index] > 50. * min_max:
             plot_scale = 0.1
             plot_label += r' ($\times 0.1$)'
         else:
@@ -317,7 +357,11 @@ def plot_amplitude_scan(
         ymax = max(ymax, np.amax(compos) * plot_scale)
         ymin = min(ymin, np.amin(compos) * plot_scale)
 
-        pathcol = ax.scatter(amplitudes, compos * plot_scale, marker=filled_markers[icompo % num_markers], label=plot_label)
+        pathcol = ax.scatter(amplitudes, compos * plot_scale,
+                             marker=filled_markers[icompo % num_markers], label=plot_label)
+
+        if max_poly_order is None:
+            continue
 
         # Perform a polynomial fit
         if use_all_powers:
@@ -350,7 +394,11 @@ def plot_amplitude_scan(
     ax.set_ylim(ymin * 1.2, ymax * 1.2)
     ax.grid(True)
     # Since amp and nu are normalized by (2*pi*frequency), displayed values are frequencies
-    ax.set_xlabel(fr'Drive amplitude ($2\pi\,\mathrm{{{amp_scale.frequency_unit}}}$)')
+    xlabel = 'Drive amplitude'
+    if amp_scale is not None:
+        xlabel += fr' ($2\pi\,\mathrm{{{amp_scale.frequency_unit}}}$)'
+
+    ax.set_xlabel(xlabel)
     ax.set_ylabel(fr'$\nu$ ($2\pi\,\mathrm{{{compo_scale.frequency_unit}}}$)')
     ax.legend()
 

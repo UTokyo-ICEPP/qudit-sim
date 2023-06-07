@@ -46,6 +46,8 @@ def find_heff(
     frame: FrameSpec = 'dressed',
     cycles: float = 1000.,
     ramp_cycles: float = 100.,
+    num_points: Optional[int] = None,
+    pulse_shape: Optional[Tuple[float, float, float]] = None,
     pulse_sim_solver: str = 'qutip',
     init: Optional[InitSpec] = None,
     optimizer: str = 'adam',
@@ -82,6 +84,11 @@ def find_heff(
         frame: System frame.
         cycles: Number of drive signal cycles in the plateau of the GaussianSquare pulse.
         ramp_cycles: Number of drive signal cycles to use for ramp-up.
+        num_points: Number of flat-top time points to use for simulation and fit. This value
+            must be set carefully for ``pulse_sim_solver="qutip"`` since a simulation with an
+            insufficient time granularity results will be inaccurate.
+        pulse_shape: If set, a tuple ``(duration, width, sigma)`` that overrides ``cycles`` and
+            ``ramp_cycles`` to set the GaussianSquare pulse shape directly.
         init: Initial values of the effective Hamiltonian components. An array specifies all initial
             values. If a dict is passed, the format is ``{index: value or (value, fixed)}`` where
             ``index`` is the component index (tuple of ints), ``value`` is the value to set the
@@ -108,8 +115,17 @@ def find_heff(
     original_log_level = logger.level
     logger.setLevel(log_level)
 
+    if pulse_shape is None:
+        use_cycles = True
+        duration = cycles + ramp_cycles * 2.
+        sigma = ramp_cycles / 4. # let the ramp correspond to four sigmas
+        pulse_shape = (duration, cycles, sigma)
+    else:
+        use_cycles = False
+
     hgen_drv, tlist, drive_args, time_range = add_drive_for_heff(hgen, qudit, frequency, amplitude,
-                                                                 cycles, ramp_cycles)
+                                                                 pulse_shape, use_cycles=use_cycles,
+                                                                 num_flattop_points=num_points)
 
     sim_result = pulse_sim(hgen_drv, tlist, drive_args=drive_args, frame=frame,
                            solver=pulse_sim_solver, save_result_to=save_result_to,
@@ -168,17 +184,14 @@ def add_drive_for_heff(
     qudit: QuditSpec,
     frequency: Union[FrequencySpec, List[FrequencySpec], np.ndarray],
     amplitude: Union[AmplitudeSpec, List[AmplitudeSpec], np.ndarray],
-    cycles: float = 1000.,
-    ramp_cycles: float = 100.
+    pulse_shape: Tuple[float, float, float],
+    use_cycles: bool = False,
+    num_flattop_points: Optional[int] = None
 ):
     if isinstance(frequency, np.ndarray):
         frequency = list(frequency)
     if isinstance(amplitude, np.ndarray):
         amplitude = list(amplitude)
-    if isinstance(cycles, np.ndarray):
-        cycles = list(cycles)
-    if isinstance(ramp_cycles, np.ndarray):
-        ramp_cycles = list(ramp_cycles)
 
     num_tasks = None
     amp_scan = False
@@ -210,34 +223,39 @@ def add_drive_for_heff(
 
     if not isinstance(qudit, tuple):
         qudit = (qudit,)
-        amplitude = list((a,) for a in amplitude)
-        frequency = list((f,) for f in frequency)
+        amplitude = list(zip(amplitude))
+        frequency = list(zip(frequency))
 
-    if len(qudit) > 0:
-        max_cycle = 2. * np.pi / np.amin(frequency)
-        ramp = max_cycle * ramp_cycles
-        width = max_cycle * cycles
-        duration = 2. * ramp + width
+    if (any(len(amp) != len(qudit) for amp in amplitude) or
+        any(len(freq) != len(qudit) for freq in frequency)):
+        raise ValueError('Inconsistent qudit, amplitude, or frequency specification')
 
+    if use_cycles:
+        if len(qudit) > 0:
+            max_cycle = 2. * np.pi / np.amin(frequency)
+        else:
+            max_cycle = 2. * np.pi / hgen_drv.max_frequency(frame='lab')
+
+        pulse_shape = np.array(pulse_shape) * max_cycle
+
+    duration, width, sigma = pulse_shape
+
+    for iq, qid in enumerate(qudit):
+        if amp_scan:
+            amp = Parameter(f'amp_{qid}')
+        else:
+            amp = amplitude[0][iq]
+
+        if freq_scan:
+            freq = Parameter(f'freq_{qid}')
+        else:
+            freq = frequency[0][iq]
+
+        gs_pulse = GaussianSquare(duration, amp, sigma, width)
+        hgen_drv.add_drive(qid, frequency=freq, amplitude=gs_pulse)
+
+    if num_flattop_points is None:
         tlist_args = {'points_per_cycle': 8, 'duration': duration, 'frame': 'lab'}
-
-        time_range = (ramp, duration - ramp)
-
-        sigma = ramp / 4. # let the ramp correspond to four sigmas
-
-        for iq, qid in enumerate(qudit):
-            if amp_scan:
-                amp = Parameter(f'amp_{qid}')
-            else:
-                amp = amplitude[0][iq]
-
-            if freq_scan:
-                freq = Parameter(f'freq_{qid}')
-            else:
-                freq = frequency[0][iq]
-
-            gs_pulse = GaussianSquare(duration, amp, sigma, width)
-            hgen_drv.add_drive(qid, frequency=freq, amplitude=gs_pulse)
 
         if freq_scan:
             tlist = list()
@@ -248,9 +266,10 @@ def add_drive_for_heff(
             tlist = hgen_drv.make_tlist(**tlist_args)
 
     else:
-        tlist_args = {'points_per_cycle': 8, 'num_cycles': int(cycles), 'frame': 'lab'}
-        tlist = hgen_drv.make_tlist(**tlist_args)
-        time_range = (0., tlist[-1])
+        num_points = int(np.ceil(num_flattop_points * duration / width))
+        tlist = np.linspace(0., duration, num_points)
+        if freq_scan:
+            tlist = [tlist] * len(frequency)
 
     if num_tasks is None:
         drive_args = dict()
@@ -266,6 +285,8 @@ def add_drive_for_heff(
                 task_drive_args.update({f'freq_{qid}': f for qid, f in zip(qudit, freqs)})
 
             drive_args.append(task_drive_args)
+
+    time_range = ((duration - width) / 2., (duration + width) / 2.)
 
     return hgen_drv, tlist, drive_args, time_range
 
@@ -449,7 +470,7 @@ def _find_init(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Find the initial values of the effective Hamiltonian components."""
     unitaries = closest_unitary(time_evolution)
-    generator, eigenvalues = matrix_angle(unitaries, with_diagonals=True)
+    generator = matrix_angle(unitaries)
     generator_compos = paulis.components(-generator, dim=dim).real
     offset_init = generator_compos[flat_start]
 
@@ -458,29 +479,11 @@ def _find_init(
     if isinstance(init, np.ndarray):
         heff_init = init
     else:
-        ## 1. Set the initial Heff values from a rough slope estimate
-        # Find the first t where an eigenvalue does a 2pi jump
-
-        last_valid_tidx = flat_end
-        for eigenvalue_envelope in [np.amin(eigenvalues, axis=1), -np.amax(eigenvalues, axis=1)]:
-            margin = 0.1
-            hits_minus_pi = np.asarray(eigenvalue_envelope < -np.pi + margin).nonzero()[0]
-            if hits_minus_pi.shape[0] != 0:
-                last_valid_tidx = min(last_valid_tidx, hits_minus_pi[0] - 1)
-
-        if last_valid_tidx > 0:
-            # If C_i = a t_i + b = a (t_L / L * i) + b,
-            # S = sum_{i=0}^{L} C_i = a t_L / L * 1/2 * L * (L + 1) + b (L + 1)
-            # => a = (S / (L + 1) - b) * 2/t_L
-
-            heff_init = np.sum(generator_compos[flat_start:last_valid_tidx + 1], axis=0)
-            heff_init /= last_valid_tidx - flat_start + 1
-            heff_init -= generator_compos[flat_start]
-            heff_init *= 2. / (tlist[last_valid_tidx] - tlist[flat_start])
-
-        else:
-            logger.warning('Failed to obtain an initial estimate of the slopes')
-            heff_init = np.zeros(generator_compos.shape[1:])
+        ## 1. Set the initial Heff values from a slope estimate
+        du = unitaries[flat_start + 1:flat_end] @ unitaries[flat_start:flat_end - 1].conjugate().transpose(0, 2, 1)
+        dgen_compos = paulis.components(-matrix_angle(du), dim=dim).real
+        dgen_slopes = np.moveaxis(dgen_compos, 0, -1) / np.diff(tlist[flat_start:flat_end])
+        heff_init = np.mean(dgen_slopes, axis=-1)
 
         ## 2. Find off-diagonals with finite values under no drive -> static terms; zero slope
 
@@ -577,7 +580,6 @@ def _maximize_fidelity(
 
         target = jnp.matmul(time_evolution, unitary)
         fidelity = trace_norm_squared(target, npmod=jnp)
-
         return -jnp.mean(fidelity)
 
     ## Minimize
@@ -633,7 +635,7 @@ def _minimize_minuit(
 
     logger.info('Done.')
 
-    return minimizer.values[0], minimizer.values[1]
+    return minimizer.values[:num_heff], minimizer.values[num_heff:]
 
 
 def _minimize(

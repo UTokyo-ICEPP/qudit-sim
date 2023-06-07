@@ -17,6 +17,7 @@ def unitary_subtraction(
     basis_list: Optional[ArrayType] = None,
     npmod: ModuleType = np
 ) -> ArrayType:
+    # Cannot use basis_list is None (runtime value checking)
     if isinstance(basis_list, type(None)):
         heff = paulis.compose(heff_compos, npmod=npmod)
         offset = paulis.compose(offset_compos, npmod=npmod)
