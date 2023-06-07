@@ -687,35 +687,12 @@ class HamiltonianBuilder:
 
         return hdrive
 
-    def make_tlist(
+    def max_frequency(
         self,
-        points_per_cycle: int = 8,
-        num_cycles: Optional[int] = None,
-        duration: Optional[float] = None,
-        num_points: Optional[int] = None,
         frame: FrameSpec = 'dressed',
         freq_args: Dict[str, Any] = {}
-    ) -> np.ndarray:
-        r"""Build a list of time points using the maximum frequency in the Hamiltonian.
-
-        If the Hamiltonian is static, uses the maximum level spacing.
-
-        Use one of ``num_cycles``, ``duration``, or ``num_points`` to specify the total number of time points.
-
-        Args:
-            points_per_cycle: Number of points per cycle at the highest frequency.
-            num_cycles: Number of overall cycles.
-            duration: Maximum value of the tlist.
-            num_points: Total number of time points including 0.
-            frame: If specified, the frame in which to find the maximum frequency.
-            freq_args: Arguments to pass to parametric drive frequencies (if there are any).
-
-        Returns:
-            Array of time points.
-        """
-        if len([p for p in [num_cycles, duration, num_points] if p is not None]) != 1:
-            raise RuntimeError('One and only one of num_cycles, duration, or num_points must be set')
-
+    ) -> float:
+        """Return the maximum frequency that appears in this Hamiltonian"""
         max_frequency = 0.
 
         if not isinstance(frame, SystemFrame):
@@ -750,6 +727,39 @@ class HamiltonianBuilder:
                 max_level_gaps.append(np.amax(np.diff(eigvals, axis=axis)))
 
             max_frequency = max(max_level_gaps)
+
+        return max_frequency
+
+    def make_tlist(
+        self,
+        points_per_cycle: int = 8,
+        num_cycles: Optional[int] = None,
+        duration: Optional[float] = None,
+        num_points: Optional[int] = None,
+        frame: FrameSpec = 'dressed',
+        freq_args: Dict[str, Any] = {}
+    ) -> np.ndarray:
+        r"""Build a list of time points using the maximum frequency in the Hamiltonian.
+
+        If the Hamiltonian is static, uses the maximum level spacing.
+
+        Use one of ``num_cycles``, ``duration``, or ``num_points`` to specify the total number of time points.
+
+        Args:
+            points_per_cycle: Number of points per cycle at the highest frequency.
+            num_cycles: Number of overall cycles.
+            duration: Maximum value of the tlist.
+            num_points: Total number of time points including 0.
+            frame: If specified, the frame in which to find the maximum frequency.
+            freq_args: Arguments to pass to parametric drive frequencies (if there are any).
+
+        Returns:
+            Array of time points.
+        """
+        if len([p for p in [num_cycles, duration, num_points] if p is not None]) != 1:
+            raise RuntimeError('One and only one of num_cycles, duration, or num_points must be set')
+
+        max_frequency = self.max_frequency(frame, freq_args)
 
         cycle = 2. * np.pi / max_frequency
 
