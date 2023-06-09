@@ -55,6 +55,9 @@ class Hamiltonian(list):
         """
         evaluated = list()
         hstatic = qtp.Qobj()
+        if args is None:
+            args = {}
+
         for term in self:
             if isinstance(term, list):
                 if isinstance(term[1], ConstantFunction):

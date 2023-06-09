@@ -209,51 +209,56 @@ def add_drive_for_heff(
     duration, width, sigma = pulse_shape
 
     hgen_drv = hgen.copy(clear_drive=True)
+    drive_args = {}
 
-    drive_args = None
     for ient, (qid, freq, amp) in enumerate(zip(qudit, frequency, amplitude)):
+        param_name = f'freq_{ient}'
+        freq_param = Parameter(param_name)
         try:
             num_freqs = len(freq)
         except TypeError:
-            pass
+            if isinstance(drive_args, dict):
+                drive_args[param_name] = freq
+            else:
+                for darg in drive_args:
+                    darg[param_name] = freq
         else:
-            if drive_args is None:
-                drive_args = list(dict() for _ in range(num_freqs))
+            if isinstance(drive_args, dict):
+                drive_args = list(dict(drive_args) for _ in range(num_freqs))
             if num_freqs != len(drive_args):
                 raise ValueError('Inconsistent number of frequency values')
             for f, darg in zip(freq, drive_args):
-                darg[f'freq_{ient}'] = f
+                darg[param_name] = f
 
-            freq = Parameter(f'freq_{ient}')
-
+        param_name = f'amp_{ient}'
+        amp_param = Parameter(param_name)
         try:
             num_amps = len(amp)
         except TypeError:
-            pass
+            if isinstance(drive_args, dict):
+                drive_args[param_name] = amp
+            else:
+                for darg in drive_args:
+                    darg[param_name] = amp
         else:
-            if drive_args is None:
-                drive_args = list(dict() for _ in range(num_amps))
+            if isinstance(drive_args, dict):
+                drive_args = list(dict(drive_args) for _ in range(num_amps))
             if num_amps != len(drive_args):
                 raise ValueError('Inconsistent number of amplitude values')
             for a, darg in zip(amp, drive_args):
-                darg[f'amp_{ient}'] = a
+                darg[param_name] = a
 
-            amp = Parameter(f'amp_{ient}')
-
-        gs_pulse = GaussianSquare(duration, amp, sigma, width)
-        hgen_drv.add_drive(qid, frequency=freq, amplitude=gs_pulse)
+        gs_pulse = GaussianSquare(duration, amp_param, sigma, width)
+        hgen_drv.add_drive(qid, frequency=freq_param, amplitude=gs_pulse)
 
     if num_flattop_points is None:
         tlist_args = {'points_per_cycle': 8, 'duration': duration, 'frame': 'lab'}
 
-        if drive_args is not None:
-            tlist = []
-            for darg in drive_args:
-                freq_args = {key: value for key, value in darg.items() if key.startswith('freq')}
-                tlist.append(hgen_drv.make_tlist(freq_args=freq_args, **tlist_args))
+        if isinstance(drive_args, dict):
+            tlist = hgen_drv.make_tlist(freq_args=drive_args, **tlist_args)
         else:
-            tlist = hgen_drv.make_tlist(**tlist_args)
-
+            tlist = list(hgen_drv.make_tlist(freq_args=darg, **tlist_args)
+                         for darg in drive_args)
     else:
         num_points = int(np.ceil(num_flattop_points * duration / width))
         tlist = np.linspace(0., duration, num_points)
