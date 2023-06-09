@@ -448,7 +448,7 @@ def _run_sesolve(hamiltonian, parameters, logger):
                  num_intervals, interval_len)
 
     # Initial unitary is the identity
-    initial = np.eye(evolution.shape[-1], dtype=complex)
+    initial = np.eye(hdiag.shape[-1], dtype=complex)
     evolution_arrays = []
 
     for interval in range(num_intervals):
