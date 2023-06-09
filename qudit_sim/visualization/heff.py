@@ -20,7 +20,7 @@ from rqutils.math import matrix_angle
 import rqutils.paulis as paulis
 
 from .decompositions import print_components, plot_evolution
-from ..apps.heff_tools import unitary_subtraction, heff_fidelity
+from ..apps.heff import unitary_subtraction, heff_fidelity
 from ..basis import change_basis, diagonals, matrix_labels
 from ..scale import FrequencyScale
 from ..sim_result import load_sim_result

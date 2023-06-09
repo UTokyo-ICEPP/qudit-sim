@@ -9,7 +9,7 @@ See :doc:`/hamiltonian` for theoretical background.
 """
 from dataclasses import dataclass
 from types import ModuleType
-from typing import Dict, Optional, Sequence, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -325,6 +325,9 @@ class SystemFrame(dict):
             value &= np.allclose(qudit_frame.frequency, 0.) and np.allclose(qudit_frame.phase, 0.)
 
         return value
+
+    def subsystem_frame(self, qudit_ids: List[str]):
+        return SystemFrame({qid: self[qid]} for qid in qudit_ids)
 
 
 def add_outer_multi(arr):

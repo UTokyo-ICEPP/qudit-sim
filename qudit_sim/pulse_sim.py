@@ -35,7 +35,7 @@ def pulse_sim(
     hgen: HamiltonianBuilder,
     tlist: Union[TList, List[TList]] = (10, 100),
     psi0: Optional[Union[QObject, List[QObject]]] = None,
-    drive_args: Union[Dict[str, Any], List[Dict[str, Any]]] = {},
+    drive_args: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
     e_ops: Optional[Union[Sequence[QObject], List[Sequence[QObject]]]] = None,
     frame: Union[FrameSpec, List[FrameSpec]] = 'dressed',
     final_only: Union[bool, List[bool]] = False,
@@ -447,13 +447,9 @@ def _run_sesolve(hamiltonian, parameters, logger):
     logger.debug('Integrating time evolution in %d intervals of %d steps.',
                  num_intervals, interval_len)
 
-    if parameters.final_only:
-        evolution = np.empty((1,) + hdiag.shape, dtype=complex)
-    else:
-        evolution = np.empty(parameters.tlist.shape + hdiag.shape, dtype=complex)
-
     # Initial unitary is the identity
-    evolution[0] = np.eye(evolution.shape[-1], dtype=complex)
+    initial = np.eye(evolution.shape[-1], dtype=complex)
+    evolution_arrays = []
 
     for interval in range(num_intervals):
         interval_sim_start = time.time()
@@ -468,18 +464,16 @@ def _run_sesolve(hamiltonian, parameters, logger):
             else:
                 local_hamiltonian.append(h_term)
 
-        psi0 = qtp.Qobj(inpt=evolution[start], dims=hdiag.dims)
+        psi0 = qtp.Qobj(inpt=initial, dims=hdiag.dims)
 
         result = qtp.sesolve(local_hamiltonian, psi0, parameters.tlist[start:end],
                              options=solver_options)
 
         # Array of lab-frame evolution ops
         if parameters.final_only:
-            evolution[0] = result.states[-1].full()[None, ...]
-            out_slice = slice(0, 1)
+            evolution = result.states[-1].full()[None, ...]
         else:
-            evolution[start:end] = np.stack(list(state.full() for state in result.states))
-            out_slice = slice(start, end)
+            evolution = np.stack(list(state.full() for state in result.states))
 
         interval_sim_end = time.time()
         logger.debug('Integration of interval %d completed in %.2f seconds.',
@@ -487,11 +481,15 @@ def _run_sesolve(hamiltonian, parameters, logger):
 
         # Apply reunitarization
         if parameters.reunitarize:
-            evolution[out_slice] = closest_unitary(evolution[out_slice])
+            evolution = closest_unitary(evolution)
             logger.debug('Reunitarization of interval %d completed in %.2f seconds.',
                          interval, time.time() - interval_sim_end)
 
+        evolution_arrays.append(evolution)
+        initial = evolution[-1]
+
     # Restore the actual global phase
+    evolution = np.concatenate(evolution_arrays)
     evolution *= np.exp(-1.j * global_phase * parameters.tlist[-evolution.shape[0]:, None, None])
 
     return evolution
@@ -500,7 +498,7 @@ def _run_sesolve(hamiltonian, parameters, logger):
 def simulate_drive_odeint(
     hamiltonian: Callable,
     parameters: PulseSimParameters,
-    drive_args: Dict[str, Any] = {},
+    drive_args: Optional[Dict[str, Any]] = None,
     logger_name: str = __name__
 ):
     """Use JAX odeint to integrate the time evolution operator."""
@@ -515,6 +513,9 @@ def simulate_drive_odeint(
     logger.debug('Shapes of tlists: original %s, stacked %s', parameters.tlist.shape, tlists.shape)
 
     compile_start = time.time()
+
+    if drive_args is None:
+        drive_args = {}
 
     state_dim = np.prod(parameters.frame.dim)
     integrator = _compile_vodeint(hamiltonian, parameters.solver_options, tlists.shape, state_dim,
