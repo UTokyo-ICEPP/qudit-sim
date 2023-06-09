@@ -485,7 +485,11 @@ def _run_sesolve(hamiltonian, parameters, logger):
             logger.debug('Reunitarization of interval %d completed in %.2f seconds.',
                          interval, time.time() - interval_sim_end)
 
-        evolution_arrays.append(evolution)
+        if parameters.final_only:
+            evolution_arrays = [evolution]
+        else:
+            evolution_arrays.append(evolution)
+
         initial = evolution[-1]
 
     # Restore the actual global phase
