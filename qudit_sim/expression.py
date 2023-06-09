@@ -378,7 +378,7 @@ class _ParameterBinaryOp(ParameterFunction):
         if isinstance(self.rexpr, Expression):
             value += f'{self.rexpr.pprint(return_str=True, _indent=(_indent + 1))}\n'
         else:
-            value += f'{self.rexpr}\n'
+            value += f'{"  " * (_indent + 1)}{self.rexpr}\n'
         value += f'{indentation})'
         if return_str:
             return value
