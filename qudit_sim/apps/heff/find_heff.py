@@ -286,17 +286,18 @@ def find_heff_blkdiag(
                  np.searchsorted(tlist, time_range[1], 'right') - 1)
 
     if isinstance(drive_args, list):
+        num_tasks = len(drive_args)
+
         components = []
         num_blocks = np.prod(dim_else)
-        for iresult in range(len(drive_args)):
+        for iresult in range(num_tasks):
             start, end = np.arange(iresult, iresult + 2) * num_blocks
             components.append(extract_fullop_components(block_components[start:end]))
 
         if save_result_to:
             num_digits = int(np.log10(num_tasks)) + 1
             fmt = f'%0{num_digits}d'
-            save_result_paths = list(os.path.join(save_result_to, fmt % i)
-                                     for i in range(num_tasks))
+
             for iresult in range(len(drive_args)):
                 start, end = np.arange(iresult, iresult + 2) * num_blocks
                 offset_components = extract_fullop_components(block_offsets[start:end])
