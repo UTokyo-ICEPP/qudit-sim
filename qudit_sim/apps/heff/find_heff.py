@@ -12,6 +12,7 @@ from jaxlib.xla_extension import Device
 import numpy as np
 import optax
 import qutip as qtp
+import scipy
 
 from rqutils.math import matrix_exp, matrix_angle
 import rqutils.paulis as paulis
@@ -28,6 +29,7 @@ from ...pulse_sim import pulse_sim, PulseSimParameters, exponentiate_hstat, tran
 from ...sim_result import PulseSimResult, save_sim_result, load_sim_result
 from ...unitary import truncate_matrix, closest_unitary
 
+QuditSpec = Union[str, Tuple[str, ...]]
 FrequencySpec = Union[float, List[float], np.ndarray]
 AmplitudeSpec = Union[float, complex, List[Union[float, complex]], np.ndarray]
 InitSpec = Union[np.ndarray, Dict[Tuple[int, ...], Union[float, Tuple[float, bool]]]]
@@ -38,7 +40,7 @@ default_optimizer_args = optax.exponential_decay(0.001, 10, 0.99)
 
 def find_heff(
     hgen: HamiltonianBuilder,
-    qudit: Union[str, Tuple[str, ...]],
+    qudit: QuditSpec,
     frequency: Union[FrequencySpec, Tuple[FrequencySpec, ...]],
     amplitude: Union[AmplitudeSpec, Tuple[AmplitudeSpec, ...]],
     comp_dim: Optional[Union[int, Tuple[int, ...]]] = None,
@@ -122,6 +124,10 @@ def find_heff(
     else:
         use_cycles = False
 
+    if pulse_sim_solver == 'qutip' and num_points is not None:
+        logger.warn('Number of points is manually set when pulse_sim_solver is qutip. Make sure'
+                    ' that sufficient number of points is used.')
+
     hgen_drv, tlist, drive_args, time_range = add_drive_for_heff(hgen, qudit, frequency, amplitude,
                                                                  pulse_shape, use_cycles=use_cycles,
                                                                  num_flattop_points=num_points)
@@ -173,6 +179,137 @@ def find_heff(
                               convergence=convergence, convergence_window=convergence_window,
                               min_fidelity=min_fidelity, zero_suppression=zero_suppression,
                               save_result_to=save_result_to, log_level=log_level)
+
+    logger.setLevel(original_log_level)
+
+    return components
+
+
+def find_heff_blkdiag(
+    hgen: HamiltonianBuilder,
+    qudit: QuditSpec,
+    frequency: FrequencySpec,
+    amplitude: AmplitudeSpec,
+    block_qudit: Optional[str] = None,
+    comp_dim: Optional[Union[int, Tuple[int, ...]]] = None,
+    frame: FrameSpec = 'dressed',
+    cycles: float = 1000.,
+    ramp_cycles: float = 100.,
+    num_points: Optional[int] = None,
+    pulse_shape: Optional[Tuple[float, float, float]] = None,
+    pulse_sim_solver: str = 'qutip',
+    optimizer: str = 'adam',
+    optimizer_args: Any = default_optimizer_args,
+    max_updates: int = 10000,
+    convergence: float = 1.e-4,
+    convergence_window: int = 5,
+    save_result_to: Optional[str] = None,
+    log_level: int = logging.WARNING
+):
+    """Find the effective Hamiltonian assuming a block-diagonal form."""
+    original_log_level = logger.level
+    logger.setLevel(log_level)
+
+    if pulse_shape is None:
+        use_cycles = True
+        duration = cycles + ramp_cycles * 2.
+        sigma = ramp_cycles / 4. # let the ramp correspond to four sigmas
+        pulse_shape = (duration, cycles, sigma)
+    else:
+        use_cycles = False
+
+    if pulse_sim_solver == 'qutip' and num_points is not None:
+        logger.warn('Number of points is manually set when pulse_sim_solver is qutip. Make sure'
+                    ' that sufficient number of points is used.')
+
+    hgen_drv, tlist, drive_args, time_range = add_drive_for_heff(hgen, qudit, frequency, amplitude,
+                                                                 pulse_shape, use_cycles=use_cycles,
+                                                                 num_flattop_points=num_points)
+
+    sim_result = pulse_sim(hgen_drv, tlist, drive_args=drive_args, frame=frame,
+                           solver=pulse_sim_solver, save_result_to=save_result_to,
+                           log_level=log_level)
+
+    dim = hgen.system_dim()
+    if comp_dim is None:
+        comp_dim = dim
+    elif isinstance(comp_dim, int):
+        comp_dim = (comp_dim,) * hgen.num_qudits
+
+    if block_qudit is None:
+        block_qudit = hgen.qudit_ids()[-1]
+
+    block_qudit_idx = hgen.qudit_index(block_qudit)
+    dim_else = comp_dim[:block_qudit_idx] + comp_dim[block_qudit_idx + 1:]
+    block_indices = np.unravel_index(np.arange(np.prod(dim_else)), dim_else)
+
+    def extract_evolution_blocks(states):
+        evolution = np.reshape(states, (-1,) + dim + dim)
+        evolution = np.moveaxis(evolution, [0, 1 + block_qudit_idx, 1 + len(dim) + block_qudit_idx],
+                                [-3, -2, -1])
+        return list(evolution[block_indices + block_indices])
+
+    if isinstance(drive_args, list):
+        evolution_blocks = []
+        for result in sim_result:
+            evolution_blocks.extend(extract_evolution_blocks(result.states))
+    else:
+        evolution_blocks = extract_evolution_blocks(sim_result.states)
+
+    if not isinstance(frame, SystemFrame):
+        frame = SystemFrame(frame, hgen_drv)
+
+    qudit_comp_dim = comp_dim[block_qudit_idx]
+    qudit_frame = SystemFrame({block_qudit: frame[block_qudit]})
+
+    common_args = (tlist, qudit_frame)
+    common_kwargs = {'comp_dim': qudit_comp_dim, 'time_range': time_range,
+                     'optimizer': optimizer, 'optimizer_args': optimizer_args,
+                     'max_updates': max_updates, 'convergence': convergence,
+                     'convergence_window': convergence_window, 'return_offset': True,
+                     'log_level': log_level}
+
+    fit_results = parallel_map(heff_fit, args=evolution_blocks, common_args=common_args,
+                               common_kwargs=common_kwargs,
+                               log_level=log_level, thread_based=True)
+
+    block_components, block_offsets = zip(*fit_results)
+
+    def extract_fullop_components(block_components):
+        block_hermitians = paulis.compose(np.array(block_components), dim=qudit_comp_dim)
+        hermitian = scipy.linalg.block_diag(*block_hermitians)
+        dim_tr = dim_else + (qudit_comp_dim,)
+        components = paulis.components(hermitian, dim_tr).real
+        return np.moveaxis(components, -1, block_qudit_idx)
+
+    fit_range = (np.searchsorted(tlist, time_range[0], 'right') - 1,
+                 np.searchsorted(tlist, time_range[1], 'right') - 1)
+
+    if isinstance(drive_args, list):
+        components = []
+        num_blocks = np.prod(dim_else)
+        for iresult in range(len(drive_args)):
+            start, end = np.arange(iresult, iresult + 2) * num_blocks
+            components.append(extract_fullop_components(block_components[start:end]))
+
+        if save_result_to:
+            num_digits = int(np.log10(num_tasks)) + 1
+            fmt = f'%0{num_digits}d'
+            save_result_paths = list(os.path.join(save_result_to, fmt % i)
+                                     for i in range(num_tasks))
+            for iresult in range(len(drive_args)):
+                start, end = np.arange(iresult, iresult + 2) * num_blocks
+                offset_components = extract_fullop_components(block_offsets[start:end])
+                save_fit_result(os.path.join(save_result_to, fmt % iresult), comp_dim, fit_range,
+                                components[iresult], offset_components)
+    else:
+        # I don't necessarily have to reconstruct the block Hamiltonians (can extract the
+        # diagonals of the control qudits for each of I, X, Y, ...) but it's easier to do so
+        components = extract_fullop_components(block_components)
+
+        if save_result_to:
+            offset_components = extract_fullop_components(block_offsets)
+            save_fit_result(save_result_to, comp_dim, fit_range, components, offset_components)
 
     logger.setLevel(original_log_level)
 
@@ -283,6 +420,7 @@ def heff_fit(
     convergence_window: int = 5,
     min_fidelity: float = 0.9,
     zero_suppression: bool = True,
+    return_offset: bool = False,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
     logger_name: str = __name__
@@ -403,23 +541,38 @@ def heff_fit(
     heff_compos /= time_norm
 
     if save_result_to:
-        with h5py.File(f'{save_result_to}.h5', 'a') as out:
-            out.create_dataset('comp_dim', data=comp_dim)
-            out.create_dataset('fit_range', data=[fit_start, fit_end])
-
-            out.create_dataset('fixed', data=fixed)
-
-            out.create_dataset('components', data=heff_compos)
-            out.create_dataset('offset_components', data=offset_compos)
-
-            if intermediate_results is not None:
-                intermediate_results['heff_compos'] /= time_norm
-                for key, value in intermediate_results.items():
-                    out.create_dataset(key, data=value)
+        save_fit_result(save_result_to, comp_dim, (fit_start, fit_end), heff_compos, offset_compos,
+                        fixed, intermediate_results)
 
     logger.setLevel(original_log_level)
 
-    return heff_compos
+    if return_offset:
+        return heff_compos, offset_compos
+    else:
+        return heff_compos
+
+
+def save_fit_result(
+    save_result_to: str,
+    comp_dim: Tuple[int, ...],
+    fit_range: Tuple[float, float],
+    components: np.ndarray,
+    offset_components: np.ndarray,
+    fixed: Optional[np.ndarray] = None,
+    intermediate_results: Optional[Dict[str, np.ndarray]] = None
+):
+    with h5py.File(f'{save_result_to}.h5', 'a') as out:
+        out.create_dataset('comp_dim', data=comp_dim)
+        out.create_dataset('fit_range', data=fit_range)
+        out.create_dataset('components', data=components)
+        out.create_dataset('offset_components', data=offset_components)
+        if fixed is not None:
+            out.create_dataset('fixed', data=fixed)
+
+        if intermediate_results is not None:
+            intermediate_results['heff_compos'] /= time_norm
+            for key, value in intermediate_results.items():
+                out.create_dataset(key, data=value)
 
 
 def _find_init(
@@ -452,24 +605,24 @@ def _find_init(
         heff_init = np.mean(dgen_slopes, axis=-1)
 
         ## 2. Find off-diagonals with finite values under no drive -> static terms; zero slope
+        if hstat_lab is not None:
+            parameters = PulseSimParameters(sim_frame, tlist)
 
-        parameters = PulseSimParameters(sim_frame, tlist)
+            evolution_lab = exponentiate_hstat(hstat_lab, parameters, logger.name)
+            evolution, _ = transform_evolution(evolution_lab, parameters)
+            time_evolution_nodrv = truncate_matrix(evolution, sim_frame.dim, dim)
+            unitaries_nodrv = closest_unitary(time_evolution_nodrv)
+            generator_nodrv = matrix_angle(unitaries_nodrv)
+            nodrv_compos = paulis.components(-generator_nodrv, dim=dim).real
+            is_finite = np.logical_not(np.all(np.isclose(nodrv_compos, 0., atol=1.e-4), axis=0))
 
-        evolution_lab = exponentiate_hstat(hstat_lab, parameters, logger.name)
-        evolution, _ = transform_evolution(evolution_lab, parameters)
-        time_evolution_nodrv = truncate_matrix(evolution, sim_frame.dim, dim)
-        unitaries_nodrv = closest_unitary(time_evolution_nodrv)
-        generator_nodrv = matrix_angle(unitaries_nodrv)
-        nodrv_compos = paulis.components(-generator_nodrv, dim=dim).real
-        is_finite = np.logical_not(np.all(np.isclose(nodrv_compos, 0., atol=1.e-4), axis=0))
+            symmetry = paulis.symmetry(dim)
+            finite_offdiag = is_finite & np.asarray(symmetry, dtype=bool)
 
-        symmetry = paulis.symmetry(dim)
-        finite_offdiag = is_finite & np.asarray(symmetry, dtype=bool)
+            logger.debug('Off-diagonals with finite values under no drive: %s',
+                         list(zip(*np.nonzero(finite_offdiag))))
 
-        logger.debug('Off-diagonals with finite values under no drive: %s',
-                     list(zip(*np.nonzero(finite_offdiag))))
-
-        heff_init[finite_offdiag] = 0.
+            heff_init[finite_offdiag] = 0.
 
         ## 3. Find finite values converging to zero at the end of the pulse -> zero slope & offset
 
