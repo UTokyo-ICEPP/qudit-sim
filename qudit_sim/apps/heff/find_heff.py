@@ -9,6 +9,7 @@ import h5py
 import jax
 import jax.numpy as jnp
 from jaxlib.xla_extension import Device
+import jaxopt
 import numpy as np
 import optax
 import qutip as qtp
@@ -540,6 +541,8 @@ def heff_fit(
 
     # Recover the normalization
     heff_compos /= time_norm
+    if intermediate_results is not None:
+        intermediate_results['heff_compos'] /= time_norm
 
     if save_result_to:
         save_fit_result(save_result_to, comp_dim, (fit_start, fit_end), heff_compos, offset_compos,
@@ -571,7 +574,6 @@ def save_fit_result(
             out.create_dataset('fixed', data=fixed)
 
         if intermediate_results is not None:
-            intermediate_results['heff_compos'] /= time_norm
             for key, value in intermediate_results.items():
                 out.create_dataset(key, data=value)
 
@@ -708,7 +710,13 @@ def _maximize_fidelity(
         heff_compos, offset_compos = _minimize_minuit(loss_fn, heff_init_floating, offset_init_flat,
                                                       logger)
         intermediate_results = None
-    else:
+    elif optimizer in ['bfgs']:
+        heff_compos, offset_compos = _minimize_jaxopt(optimizer, loss_fn, heff_init_floating,
+                                                      offset_init_flat,
+                                                      max_updates, convergence,
+                                                      logger)
+        intermediate_results = None
+    elif optimizer in ['adam']:
         ## Set up the optimizer, loss & grad functions, and the parameter update function
         if not isinstance(optimizer_args, tuple):
             optimizer_args = (optimizer_args,)
@@ -756,6 +764,34 @@ def _minimize_minuit(
     logger.info('Done.')
 
     return minimizer.values[:num_heff], minimizer.values[num_heff:]
+
+
+def _minimize_jaxopt(
+    solver_name: str,
+    loss_fn: Callable,
+    heff_init: np.ndarray,
+    offset_init: np.ndarray,
+    max_updates: int,
+    convergence: float,
+    logger: logging.Logger
+):
+    num_heff = heff_init.shape[0]
+    fun = jax.jit(lambda p: loss_fn(p[:num_heff], p[num_heff:]))
+
+    if solver_name == 'bfgs':
+        solver = jaxopt.BFGS(fun=fun, maxiter=max_updates, tol=convergence)
+    else:
+        raise NotImplementedError(f'Unknown solver {solver_name}')
+
+    initial = jnp.concatenate((heff_init, offset_init))
+
+    logger.info('Running %s..', solver_name)
+
+    res = solver.run(initial)
+
+    logger.info('Done.')
+
+    return res.params[:num_heff], res.params[num_heff:]
 
 
 def _minimize(
