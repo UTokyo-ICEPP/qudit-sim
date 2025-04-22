@@ -1,11 +1,11 @@
 """Global configuration parameters."""
-import threading
 import warnings
-import numpy as np
-from jax.config import config as jax_config
-jax_config.update('jax_enable_x64', True)
 import jax
 import jax.numpy as jnp
+
+
+jax.config.update('jax_enable_x64', True)
+
 
 class Config:
     """Global configuration parameters.
@@ -22,6 +22,7 @@ class Config:
                           'or JAX was already configured in 32 bits. It is advised not to '
                           'use "jax" for pulse simulation.')
 
+
 config = Config()
 if config.jax_devices:
-    jax_config.update('jax_default_device', jax.devices()[config.jax_devices[0]])
+    jax.config.update('jax_default_device', jax.devices()[config.jax_devices[0]])

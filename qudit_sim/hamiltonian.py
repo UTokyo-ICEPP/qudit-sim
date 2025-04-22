@@ -8,21 +8,23 @@ Hamiltonian builder (:mod:`qudit_sim.hamiltonian`)
 See :doc:`/hamiltonian` for theoretical background.
 """
 
+from collections.abc import Callable
 import copy
 import warnings
 from dataclasses import dataclass
 from numbers import Number
 from types import ModuleType
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Optional, Union
 import numpy as np
 import qutip as qtp
 
 from .drive import CosFunction, SetFrequency, SinFunction
-from .expression import ConstantFunction, ParameterExpression, TimeFunction
+from .expression import ConstantFunction, TimeFunction
 from .frame import FrameSpec, SystemFrame
 from .pulse_sequence import HamiltonianCoefficient, PulseSequence
 
-QobjCoeffPair = List[Union[qtp.Qobj, HamiltonianCoefficient]]
+QobjCoeffPair = list[Union[qtp.Qobj, HamiltonianCoefficient]]
+
 
 @dataclass(frozen=True)
 class QuditParams:
@@ -33,15 +35,25 @@ class QuditParams:
     drive_amplitude: float
     drive_weight: np.ndarray
 
+    def __post_init__(self):
+        """Validate the values."""
+        if not (isinstance(self.num_levels, int) and isinstance(self.qubit_frequency, float)
+                and isinstance(self.anharmonicity, float)
+                and isinstance(self.drive_amplitude, float)):
+            raise ValueError('Invalid qudit parameters')
+
+        if len(self.drive_weight) != self.num_levels - 1:
+            raise ValueError('Invalid drive weights')
+
 
 class Hamiltonian(list):
     """Hamiltonian list with function evaluation subroutine."""
     def evaluate_coeffs(
         self,
         tlist: np.ndarray,
-        args: Optional[Dict[str, Any]] = None,
+        args: Optional[dict[str, Any]] = None,
         npmod: ModuleType = np
-    ) -> List[Union[qtp.Qobj, QobjCoeffPair]]:
+    ) -> list[Union[qtp.Qobj, QobjCoeffPair]]:
         """
         Evaluate functional Hamiltonian coefficients at given time points.
 
@@ -85,56 +97,34 @@ class HamiltonianBuilder:
         default_num_levels: Default number of qudit energy levels.
         qudits: If passing ``params`` to initialize the Hamiltonian, list of qudit numbers to
             include.
-        params: Hamiltonian parameters given by IBMQ ``backend.configuration().hamiltonian['vars']``,
-            optionally augmented with ``'crosstalk'``, which should be a ``dict`` of form
+        params: Hamiltonian parameters given by IBMQ
+            ``backend.configuration().hamiltonian['vars']``, optionally augmented with
+            ``'crosstalk'``, which should be a ``dict`` of form
             ``{(j, k): z}`` specifying the crosstalk factor ``z`` (complex corresponding to
             :math:`\alpha_{jk} e^{i\rho_{jk}}`) of drive on qudit :math:`j` seen by qudit :math:`k`.
             :math:`j` and :math:`k` are qudit ids given in ``qudits``.
     """
     def __init__(
         self,
-        default_num_levels: int = 2,
-        qudits: Optional[Union[int, Sequence[int]]] = None,
-        params: Optional[Dict[str, Any]] = None
+        default_num_levels: int = 2
     ) -> None:
         self._default_num_levels = default_num_levels
 
         # Makes use of dict order guarantee from python 3.7
-        self._qudit_params = dict()
-        self._coupling = dict()
-        self._crosstalk = dict()
-        self._drive = dict()
+        self._qudit_params = {}
+        self._coupling = {}
+        self._crosstalk = {}
+        self._drive = {}
 
         self.use_rwa = False
-
-        if qudits is None:
-            return
-
-        if isinstance(qudits, int):
-            qudits = (qudits,)
-
-        for q in qudits:
-            self.add_qudit(params[f'wq{q}'], params[f'delta{q}'], params[f'omegad{q}'], qudit_id=q)
-
-        for q1, q2 in zip(qudits[:-1], qudits[1:]):
-            try:
-                coupling = params[f'jq{min(q1, q2)}q{max(q1, q2)}']
-            except KeyError:
-                continue
-
-            self.add_coupling(q1, q2, coupling)
-
-        if 'crosstalk' in params:
-            for (qsrc, qtrg), factor in params['crosstalk'].items():
-                self.add_crosstalk(qsrc, qtrg, factor)
 
     @property
     def num_qudits(self) -> int:
         """Number of qudits."""
         return len(self._qudit_params)
 
-    def qudit_ids(self) -> List[str]:
-        """List of qudit IDs."""
+    def qudit_ids(self) -> list[str]:
+        """list of qudit IDs."""
         return list(self._qudit_params.keys())
 
     def qudit_id(self, idx: int) -> str:
@@ -149,7 +139,7 @@ class HamiltonianBuilder:
         """Qudit parameters."""
         return self._qudit_params[qudit_id]
 
-    def system_dim(self) -> Tuple[int, ...]:
+    def system_dim(self) -> tuple[int, ...]:
         return tuple(params.num_levels for params in self._qudit_params.values())
 
     def coupling(self, q1: str, q2: str) -> float:
@@ -163,7 +153,7 @@ class HamiltonianBuilder:
     def drive(
         self,
         qudit_id: Optional[str] = None
-    ) -> Union[Dict[str, List[PulseSequence]], List[PulseSequence]]:
+    ) -> Union[dict[str, list[PulseSequence]], list[PulseSequence]]:
         """Drive terms for the qudit."""
         if qudit_id is None:
             return copy.deepcopy(self._drive)
@@ -172,13 +162,14 @@ class HamiltonianBuilder:
 
     def add_qudit(
         self,
-        qubit_frequency: float,
-        anharmonicity: float,
-        drive_amplitude: float,
+        qubit_frequency: Optional[float] = None,
+        anharmonicity: Optional[float] = None,
+        drive_amplitude: Optional[float] = None,
         num_levels: int = 0,
         qudit_id: Optional[str] = None,
         position: Optional[int] = None,
-        drive_weight: Optional[np.ndarray] = None
+        drive_weight: Optional[np.ndarray] = None,
+        params: Optional[QuditParams] = None
     ) -> None:
         r"""Add a qudit to the system.
 
@@ -192,16 +183,6 @@ class HamiltonianBuilder:
             drive_weight: The weights given to each level transition. Default is
                 :math:`\sqrt{l + 1}`
         """
-        if num_levels <= 0:
-            num_levels = self._default_num_levels
-
-        if drive_weight is None:
-            drive_weight = np.sqrt(np.arange(1, num_levels, dtype=float))
-
-        params = QuditParams(num_levels=num_levels, qubit_frequency=qubit_frequency,
-                             anharmonicity=anharmonicity, drive_amplitude=drive_amplitude,
-                             drive_weight=drive_weight)
-
         if qudit_id is None:
             if position is None:
                 qudit_id = f'q{len(self._qudit_params)}'
@@ -210,6 +191,17 @@ class HamiltonianBuilder:
 
         if qudit_id in self._qudit_params:
             raise KeyError(f'Qudit id {qudit_id} already exists.')
+
+        if params is None:
+            if num_levels <= 0:
+                num_levels = self._default_num_levels
+
+            if drive_weight is None:
+                drive_weight = np.sqrt(np.arange(1, num_levels, dtype=float))
+
+            params = QuditParams(num_levels=num_levels, qubit_frequency=qubit_frequency,
+                                 anharmonicity=anharmonicity, drive_amplitude=drive_amplitude,
+                                 drive_weight=drive_weight)
 
         if position is None:
             self._qudit_params[qudit_id] = params
@@ -229,8 +221,9 @@ class HamiltonianBuilder:
     def identity_op(self) -> qtp.Qobj:
         return qtp.tensor(list(qtp.qeye(dim) for dim in self.system_dim()))
 
-    def eigenvalues(self) -> np.ndarray:
-        r"""Compute the energy eigenvalues of the static Hamiltonian (free and coupling).
+    def eigenvalues(self, frame: FrameSpec = 'lab', include_rwa_drive: bool = False) -> np.ndarray:
+        r"""Compute the energy eigenvalues of the static Hamiltonian (free and coupling) in the
+        given frame.
 
         Eigenvalues are ordered so that element ``[i, j, ...]`` corresponds to the energy of the
         state with the largest component of :math:`|i\rangle_0 |j\rangle_1 \dots`, where
@@ -239,14 +232,15 @@ class HamiltonianBuilder:
         Returns:
             An array of energy eigenvalues.
         """
-        hstatic = self.build_hdiag(frame='lab') + self.build_hint(frame='lab')[0]
+        hstatic = self.build_hstatic(frame=frame, include_rwa_drive=include_rwa_drive)
 
         eigvals, unitary = np.linalg.eigh(hstatic.full())
         # hamiltonian == unitary @ np.diag(eigvals) @ unitary.T.conjugate()
 
         # Column index of the biggest contributor to each row
         k = np.argmax(np.abs(unitary), axis=1)
-        # Reordered eigenvalues (makes the corresponding change-of-basis unitary closest to identity)
+        # Reordered eigenvalues (makes the corresponding change-of-basis unitary closest to
+        # identity)
         eigvals = eigvals[k]
         # Reshape the array to the qudit-product structure
         eigvals = eigvals.reshape(self.system_dim())
@@ -256,7 +250,7 @@ class HamiltonianBuilder:
     def free_frequencies(
         self,
         qudit_id: Optional[str] = None
-    ) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+    ) -> Union[np.ndarray, dict[str, np.ndarray]]:
         """Return the free-qudit frequencies.
 
         Args:
@@ -275,7 +269,7 @@ class HamiltonianBuilder:
     def dressed_frequencies(
         self,
         qudit_id: Optional[str] = None
-    ) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+    ) -> Union[np.ndarray, dict[str, np.ndarray]]:
         """Return the dressed-qudit frequencies.
 
         Args:
@@ -294,9 +288,7 @@ class HamiltonianBuilder:
 
         for iq, qid in enumerate(self._qudit_params):
             # [0, ..., 0, :, 0, ..., 0]
-            indices = (0,) * iq + (slice(None),) + (0,) * (self.num_qudits - iq - 1)
-            energies = eigvals[indices]
-
+            energies = np.moveaxis(eigvals, iq, -1)[(0,) * (self.num_qudits - 1)]
             frequencies[qid] = np.diff(energies)
 
         if qudit_id is None:
@@ -307,8 +299,8 @@ class HamiltonianBuilder:
     def noiz_frequencies(
         self,
         qudit_id: Optional[str] = None,
-        comp_dim: Union[int, Tuple[int]] = 0
-    ) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+        comp_dim: Union[int, tuple[int]] = 0
+    ) -> Union[np.ndarray, dict[str, np.ndarray]]:
         r"""Return the no-IZ frequencies.
 
         No-IZ frame cancels the phase drift of a qudit on average, i.e., when the other qudits are
@@ -388,14 +380,14 @@ class HamiltonianBuilder:
         qudit_id: str,
         frequency: Optional[float] = None,
         amplitude: Union[float, complex, str, np.ndarray, Callable, None] = 1.+0.j,
-        sequence: Optional[List[Any]] = None
+        sequence: Optional[list[Any]] = None
     ) -> None:
         r"""Add a drive term.
 
         Args:
             qudit_id: Qudit to apply the drive to.
-            frequency: Carrier frequency of the drive. Required when using ``amplitude`` or when ``sequence`` does not
-                start from ``SetFrequency``.
+            frequency: Carrier frequency of the drive. Required when using ``amplitude`` or when
+                ``sequence`` does not start from ``SetFrequency``.
             amplitude: Function :math:`r(t)`. Ignored if ``sequence`` is set.
             sequence: Pulse sequence of the drive.
         """
@@ -445,8 +437,8 @@ class HamiltonianBuilder:
         hamiltonian = Hamiltonian()
 
         if np.any(hstatic.data.data):
-            # The static term does not have to be the first element (nor does it have to be a single term, actually)
-            # but qutip recommends following this convention
+            # The static term does not have to be the first element (nor does it have to be a single
+            # term, actually) but qutip recommends following this convention
             hamiltonian.append(hstatic)
 
         hamiltonian.extend(hint)
@@ -457,8 +449,13 @@ class HamiltonianBuilder:
     def build_hstatic(
         self,
         frame: FrameSpec = 'dressed',
+        include_rwa_drive: bool = False
     ) -> qtp.Qobj:
         """Build only the static Hamiltonian term in the given frame.
+
+        While Hint is typically time-dependent in non-lab frames, there are certain combinations of
+        frame frequencies that results in static Hint (e.g. drive frame siZZle, where two qudits are
+        driven at a common frequency). Similarly, with RWA there can be static terms in Hdrive.
 
         Args:
             frame: System frame to build the Hamiltonian in.
@@ -471,9 +468,12 @@ class HamiltonianBuilder:
 
         hstatic = self.build_hdiag(frame=frame)
         hint = self.build_hint(frame=frame)
-
         if hint and isinstance(hint[0], qtp.Qobj):
             hstatic += hint[0]
+        if include_rwa_drive:
+            hdrive = self.build_hdrive(frame=frame, rwa=True)
+            if hdrive and isinstance(hdrive[0], qtp.Qobj):
+                hstatic += hdrive[0]
 
         return hstatic
 
@@ -504,7 +504,7 @@ class HamiltonianBuilder:
                 continue
 
             diagonal = np.concatenate((np.zeros(1), energy_offset))
-            qudit_op = qtp.Qobj(inpt=np.diag(diagonal))
+            qudit_op = qtp.Qobj(np.diag(diagonal))
 
             ops = identities.copy()
             ops[self.qudit_index(qudit_id)] = qudit_op
@@ -522,19 +522,20 @@ class HamiltonianBuilder:
 
         Args:
             frame: System frame to build the Hamiltonian in.
-            as_timefn: Return the coefficients as TimeFunctions (True) or string expressions (False).
+            as_timefn: Return the coefficients as TimeFunctions (True) or string expressions
+            (False).
 
         Returns:
-            A list of Hamiltonian terms. The first entry may be a single Qobj instance if there is a static term.
-            Otherwise the entries are 2-lists `[Qobj, c(t)]`.
+            A list of Hamiltonian terms. The first entry may be a single Qobj instance if there is a
+            static term. Otherwise the entries are 2-lists `[Qobj, c(t)]`.
         """
         if not isinstance(frame, SystemFrame):
             frame = SystemFrame(frame, self)
 
         hint = Hamiltonian()
-        hstatic = qtp.tensor(list(qtp.qzero(dim) for dim in self.system_dim()))
+        hstatic = qtp.tensor([qtp.qzero(dim) for dim in self.system_dim()])
 
-        identities = list(qtp.qeye(dim) for dim in self.system_dim())
+        identities = [qtp.qeye(dim) for dim in self.system_dim()]
 
         for (q1, q2), coupling in self._coupling.items():
             p1 = self._qudit_params[q1]
@@ -577,7 +578,7 @@ class HamiltonianBuilder:
                         hint.append([h_x, f'cos({frequency}*t)'])
                         hint.append([h_y, f'sin({frequency}*t)'])
 
-        if np.any(hstatic.data.data):
+        if not np.allclose(hstatic.data.to_array(), 0.):
             hint.insert(0, hstatic)
 
         return hint
@@ -585,18 +586,19 @@ class HamiltonianBuilder:
     def build_hdrive(
         self,
         frame: FrameSpec = 'dressed',
+        rwa: bool = False,
         as_timefn: bool = False
     ) -> Hamiltonian:
         """Build the drive Hamiltonian.
 
         Args:
             frame: System frame to build the Hamiltonian in.
-            as_timefn: If True, force the coefficients to be TimeFunctions. Raises a TypeError for a drive with
-                an incompatible type is
+            as_timefn: If True, force the coefficients to be TimeFunctions. Raises a TypeError for a
+                drive with an incompatible type is
 
         Returns:
-            A list of Hamiltonian terms. The first entry may be a single Qobj instance if there is a static term.
-            Otherwise the entries are 2-lists `[Qobj, c(t)]`.
+            A list of Hamiltonian terms. The first entry may be a single Qobj instance if there is a
+            static term. Otherwise the entries are 2-lists `[Qobj, c(t)]`.
         """
         if not isinstance(frame, SystemFrame):
             frame = SystemFrame(frame, self)
@@ -610,7 +612,8 @@ class HamiltonianBuilder:
             qudit_creation_ops = []
             frame_frequencies = []
             for level in range(params.num_levels - 1):
-                cre = qtp.basis(params.num_levels, level + 1) * qtp.basis(params.num_levels, level).dag()
+                cre = (qtp.basis(params.num_levels, level + 1)
+                       * qtp.basis(params.num_levels, level).dag())
                 cre *= params.drive_weight[level]
 
                 ops = identities.copy()
@@ -650,8 +653,8 @@ class HamiltonianBuilder:
 
                     for drive in drives:
                         # Generate the potentially time-dependent Hamiltonian coefficients
-                        fn_x, fn_y = drive.generate_fn(frame_frequency, drive_base, self.use_rwa,
-                                                       as_timefn=as_timefn)
+                        fn_x, fn_y = drive.generate_fn(frame_frequency, drive_base,
+                                                       (rwa or self.use_rwa), as_timefn=as_timefn)
                         if isinstance(fn_x, Number):
                             hstatic += fn_x * h_x
                             if fn_y:
@@ -693,7 +696,8 @@ class HamiltonianBuilder:
     def max_frequency(
         self,
         frame: FrameSpec = 'dressed',
-        freq_args: Dict[str, Any] = {}
+        freq_args: Optional[dict[str, Any]] = None,
+        rwa: bool = False
     ) -> float:
         """Return the maximum frequency that appears in this Hamiltonian"""
         max_frequency = 0.
@@ -701,8 +705,8 @@ class HamiltonianBuilder:
         if not isinstance(frame, SystemFrame):
             frame = SystemFrame(frame, self)
 
-        max_freq_diffs = list()
-        for q1, q2 in self._coupling.keys():
+        max_freq_diffs = []
+        for q1, q2 in self._coupling:
             freq_diffs = np.subtract.outer(frame[q1].frequency, frame[q2].frequency)
             max_freq_diffs.append(np.amax(np.abs(freq_diffs)))
 
@@ -710,8 +714,8 @@ class HamiltonianBuilder:
             if len(drives) == 0:
                 continue
 
-            drive_freqs = np.array(list(drive.max_frequency(freq_args) for drive in drives))
-            if self.use_rwa:
+            drive_freqs = np.array([drive.max_frequency(freq_args) for drive in drives])
+            if rwa or self.use_rwa:
                 rel_sign = -1
             else:
                 rel_sign = 1
@@ -724,7 +728,7 @@ class HamiltonianBuilder:
         if max_frequency == 0.:
             eigvals = self.eigenvalues()
 
-            max_level_gaps = list()
+            max_level_gaps = []
 
             for axis in range(self.num_qudits):
                 max_level_gaps.append(np.amax(np.diff(eigvals, axis=axis)))
@@ -740,13 +744,14 @@ class HamiltonianBuilder:
         duration: Optional[float] = None,
         num_points: Optional[int] = None,
         frame: FrameSpec = 'dressed',
-        freq_args: Dict[str, Any] = {}
+        freq_args: Optional[dict[str, Any]] = None
     ) -> np.ndarray:
         r"""Build a list of time points using the maximum frequency in the Hamiltonian.
 
         If the Hamiltonian is static, uses the maximum level spacing.
 
-        Use one of ``num_cycles``, ``duration``, or ``num_points`` to specify the total number of time points.
+        Use one of ``num_cycles``, ``duration``, or ``num_points`` to specify the total number of
+        time points.
 
         Args:
             points_per_cycle: Number of points per cycle at the highest frequency.
@@ -760,7 +765,8 @@ class HamiltonianBuilder:
             Array of time points.
         """
         if len([p for p in [num_cycles, duration, num_points] if p is not None]) != 1:
-            raise RuntimeError('One and only one of num_cycles, duration, or num_points must be set')
+            raise RuntimeError('One and only one of num_cycles, duration, or num_points must be'
+                               ' set')
 
         max_frequency = self.max_frequency(frame, freq_args)
 

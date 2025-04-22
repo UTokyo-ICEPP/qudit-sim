@@ -7,20 +7,17 @@ Pulse sequence (:mod:`qudit_sim.pulse_sequence`)
 
 Implementation of pulse sequence.
 """
-import copy
 import re
 import warnings
-from dataclasses import dataclass
+from collections.abc import Callable
 from numbers import Number
-from types import ModuleType
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-import jax.numpy as jnp
+from typing import Any, Optional, Tuple, Union
 import numpy as np
 
 from .drive import (CosFunction, Delay, ExpFunction, SetFrequency, SetPhase, ShiftFrequency,
                     ShiftPhase, SinFunction)
 from .expression import (ArrayType, ConstantFunction, Expression, ParameterExpression, Parameter,
-                         PiecewiseFunction, ReturnType, TimeFunction, TimeType, array_like)
+                         PiecewiseFunction, TimeFunction)
 from .pulse import Pulse
 
 HamiltonianCoefficient = Union[str, ArrayType, TimeFunction]
@@ -58,15 +55,16 @@ class PulseSequence(list):
     def __str__(self) -> str:
         return f'[{", ".join(str(inst) for inst in self)}]'
 
-    def max_frequency(self, args: Dict[str, Any] = {}) -> float:
+    def max_frequency(self, args: Optional[dict[str, Any]] = None) -> float:
+        args = args or {}
         maxf = 0.
         for inst in self:
             if isinstance(inst, SetFrequency):
                 if isinstance(inst.value, Parameter):
                     try:
                         freq = args[inst.value.name]
-                    except KeyError:
-                        raise ValueError(f'Value of {inst.value.name} not found in args')
+                    except KeyError as ex:
+                        raise ValueError(f'Value of {inst.value.name} not found in args') from ex
                 else:
                     freq = inst.value
 
@@ -74,7 +72,11 @@ class PulseSequence(list):
 
         return maxf
 
-    def envelope(self, t: Union[float, np.ndarray], args: Dict[str, Any] = {}) -> np.ndarray:
+    def envelope(
+        self,
+        t: Union[float, np.ndarray],
+        args: Optional[dict[str, Any]] = None
+    ) -> np.ndarray:
         """Return the envelope of the sequence as a function of time.
 
         This function is mostly for visualization purposes. Phase and frequency information is lost
@@ -87,11 +89,12 @@ class PulseSequence(list):
         Returns:
             Pulse sequence envelope (complex) as a function of time.
         """
+        args = args or {}
         instlist = self._make_instlist()
 
         tlist = []
         flist = []
-        for time, frequency, phase_offset, inst in instlist:
+        for time, _, phase_offset, inst in instlist:
             tlist.append(time)
             flist.append(_make_envelope(inst, 1., phase_offset, True))
 
@@ -141,9 +144,8 @@ class PulseSequence(list):
             # ylist is a list of Nones
             return _concatenate_functions(xlist, tlist), None
 
-
     def _make_instlist(self):
-        instlist = list()
+        instlist = []
 
         frequency = None
         phase_offset = 0.
@@ -179,7 +181,7 @@ class PulseSequence(list):
                     time += inst.duration
                 else:
                     if time != 0. and isinstance(inst, str) and \
-                        re.search('[^a-zA-Z_]t[^a-zA-Z0-9_]', inst):
+                            re.search('[^a-zA-Z_]t[^a-zA-Z0-9_]', inst):
                         warnings.warn('Possibly time-dependent string amplitude in a sequence'
                                       ' detected; this is not supported.', UserWarning)
 
@@ -202,8 +204,8 @@ def _make_envelope(inst, drive_base, phase_offset, as_timefn):
     if isinstance(inst, str):
         # If this is actually a static expression, convert to complex
         try:
-            inst = complex(eval(inst))
-        except:
+            inst = complex(eval(inst))  # pylint: disable=eval-used
+        except Exception:  # pylint: disable=broad-exception-caught
             pass
 
     if isinstance(inst, (float, complex, Parameter)):
@@ -229,7 +231,7 @@ def _make_envelope(inst, drive_base, phase_offset, as_timefn):
     elif isinstance(inst, np.ndarray):
         envelope = phase_factor * drive_base * inst
         if as_timefn:
-            raise TypeError(f'Array amplitude cannot be converted to a TimeFunction')
+            raise TypeError('Array amplitude cannot be converted to a TimeFunction')
 
     elif callable(inst):
         if not isinstance(inst, TimeFunction):
@@ -276,7 +278,7 @@ def _modulate_rwa(envelope, frequency, frame_frequency):
 
             return ' + '.join(fn_x), ' + '.join(fn_y)
 
-    else: # str
+    else:  # str
         if is_resonant:
             return f'({envelope}).real', f'({envelope}).imag'
         else:
@@ -294,7 +296,8 @@ def _modulate(envelope, frequency, frame_frequency):
         if frame_frequency == 0.:
             return labframe_fn, None
         else:
-            return labframe_fn * CosFunction(frame_frequency), labframe_fn * SinFunction(frame_frequency)
+            return (labframe_fn * CosFunction(frame_frequency),
+                    labframe_fn * SinFunction(frame_frequency))
 
     else:
         if isinstance(envelope, (float, complex)):
@@ -310,8 +313,9 @@ def _modulate(envelope, frequency, frame_frequency):
             if len(labframe_fn_terms) > 1:
                 labframe_fn = f'({labframe_fn})'
 
-        else: # str
-            labframe_fn = f'(2. * ({envelope}) * (cos({frequency} * t) - 1.j * sin({frequency} * t))).real'
+        else:  # str
+            labframe_fn = f'(2. * ({envelope}) * (cos({frequency} * t)'
+            labframe_fn += f' - 1.j * sin({frequency} * t))).real'
 
         if frame_frequency == 0.:
             return labframe_fn, None
@@ -326,7 +330,7 @@ def _concatenate_functions(flist, tlist):
     elif len(tlist) == 2:
         return flist[0]
     elif (all(isinstance(func, ConstantFunction) for func in flist[:-1])
-        and np.allclose(list(func.value for func in flist[:-1]), flist[0].value)):
+          and np.allclose(list(func.value for func in flist[:-1]), flist[0].value)):
         return ConstantFunction(flist[0].value)
     elif all(isinstance(func, TimeFunction) for func in flist[:-1]):
         return PiecewiseFunction(tlist, flist)

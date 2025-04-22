@@ -1,7 +1,7 @@
 """Simulation result class and I/O."""
 
 from dataclasses import dataclass
-from typing import List, Tuple, Union
+from typing import Union
 import h5py
 import numpy as np
 
@@ -15,7 +15,7 @@ class PulseSimResult:
     See the docstring of pulse_sim for why this class is necessary.
     """
     times: np.ndarray
-    expect: Union[List[np.ndarray], None]
+    expect: Union[list[np.ndarray], None]
     states: Union[np.ndarray, None]
     frame: SystemFrame
 
@@ -49,7 +49,7 @@ def load_sim_result(filename: str) -> PulseSimResult:
             states = None
 
         frame = {}
-        for qudit_id in source['qudit_ids'].asstr():
+        for qudit_id in source['qudit_ids'].asstr():  # pylint: disable=no-member
             frame_data = source['frame'][qudit_id]
             frame[qudit_id] = QuditFrame(frame_data[0], frame_data[1])
 

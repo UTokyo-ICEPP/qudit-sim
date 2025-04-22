@@ -8,7 +8,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import h5py
 import jax
 import jax.numpy as jnp
-from jaxlib.xla_extension import Device
 import jaxopt
 import numpy as np
 import optax
@@ -18,16 +17,13 @@ import scipy
 from rqutils.math import matrix_exp, matrix_angle
 import rqutils.paulis as paulis
 
-from ..gates.components import gate_components
-from .heff_tools import unitary_subtraction, trace_norm_squared, heff_fidelity
-from ...config import config
+from .heff_tools import trace_norm_squared, heff_fidelity
 from ...expression import Parameter
 from ...frame import FrameSpec, SystemFrame
 from ...hamiltonian import HamiltonianBuilder
 from ...parallel import parallel_map
 from ...pulse import GaussianSquare
 from ...pulse_sim import pulse_sim, PulseSimParameters, exponentiate_hstat, transform_evolution
-from ...sim_result import PulseSimResult, save_sim_result, load_sim_result
 from ...unitary import truncate_matrix, closest_unitary
 
 QuditSpec = Union[str, Tuple[str, ...]]
@@ -38,6 +34,7 @@ InitSpec = Union[np.ndarray, Dict[Tuple[int, ...], Union[float, Tuple[float, boo
 logger = logging.getLogger(__name__)
 
 default_optimizer_args = optax.exponential_decay(0.001, 10, 0.99)
+
 
 def find_heff(
     hgen: HamiltonianBuilder,
@@ -120,7 +117,7 @@ def find_heff(
     if pulse_shape is None:
         use_cycles = True
         duration = cycles + ramp_cycles * 2.
-        sigma = ramp_cycles / 4. # let the ramp correspond to four sigmas
+        sigma = ramp_cycles / 4.  # let the ramp correspond to four sigmas
         pulse_shape = (duration, cycles, sigma)
     else:
         use_cycles = False
@@ -162,8 +159,8 @@ def find_heff(
         kwarg_values = list(zip(logger_names, save_result_paths))
 
         common_kwargs = {'comp_dim': comp_dim, 'time_range': time_range, 'init': init,
-                         'hstat_lab': hstat_lab, 'optimizer': optimizer, 'optimizer_args': optimizer_args,
-                         'max_updates': max_updates,
+                         'hstat_lab': hstat_lab, 'optimizer': optimizer,
+                         'optimizer_args': optimizer_args, 'max_updates': max_updates,
                          'convergence': convergence, 'convergence_window': convergence_window,
                          'min_fidelity': min_fidelity, 'zero_suppression': zero_suppression,
                          'log_level': log_level}
@@ -214,7 +211,7 @@ def find_heff_blkdiag(
     if pulse_shape is None:
         use_cycles = True
         duration = cycles + ramp_cycles * 2.
-        sigma = ramp_cycles / 4. # let the ramp correspond to four sigmas
+        sigma = ramp_cycles / 4.  # let the ramp correspond to four sigmas
         pulse_shape = (duration, cycles, sigma)
     else:
         use_cycles = False
@@ -251,11 +248,11 @@ def find_heff_blkdiag(
         return list(evolution[block_indices + block_indices])
 
     if isinstance(drive_args, list):
-        evolution_blocks = []
-        for result in sim_result:
-            evolution_blocks.extend(extract_evolution_blocks(result.states))
+        args = [(blocks, result.times) for result in sim_result
+                for blocks in extract_evolution_blocks(result.states)]
     else:
-        evolution_blocks = extract_evolution_blocks(sim_result.states)
+        args = [(blocks, sim_result.times)
+                for blocks in extract_evolution_blocks(sim_result.states)]
 
     if not isinstance(frame, SystemFrame):
         frame = SystemFrame(frame, hgen_drv)
@@ -263,18 +260,19 @@ def find_heff_blkdiag(
     qudit_comp_dim = comp_dim[block_qudit_idx]
     qudit_frame = SystemFrame({block_qudit: frame[block_qudit]})
 
-    common_args = (tlist, qudit_frame)
+    common_args = (qudit_frame,)
     common_kwargs = {'comp_dim': qudit_comp_dim, 'time_range': time_range,
                      'optimizer': optimizer, 'optimizer_args': optimizer_args,
                      'max_updates': max_updates, 'convergence': convergence,
-                     'convergence_window': convergence_window, 'return_offset': True,
+                     'convergence_window': convergence_window, 'return_aux': True,
                      'log_level': log_level}
 
-    fit_results = parallel_map(heff_fit, args=evolution_blocks, common_args=common_args,
+    fit_results = parallel_map(heff_fit, args=args, common_args=common_args,
                                common_kwargs=common_kwargs,
                                log_level=log_level, thread_based=True)
 
-    block_components, block_offsets = zip(*fit_results)
+    block_components = list(res[0] for res in fit_results)
+    block_offsets = list(res[1] for res in fit_results)
 
     def extract_fullop_components(block_components):
         block_hermitians = paulis.compose(np.array(block_components), dim=qudit_comp_dim)
@@ -286,24 +284,29 @@ def find_heff_blkdiag(
     fit_range = (np.searchsorted(tlist, time_range[0], 'right') - 1,
                  np.searchsorted(tlist, time_range[1], 'right') - 1)
 
+    fixed = np.asarray(paulis.symmetry(dim_else) != 0, dtype=bool)
+    fixed = np.expand_dims(fixed, block_qudit_idx)
+    fixed = np.repeat(fixed, qudit_comp_dim ** 2, axis=block_qudit_idx)
+
     if isinstance(drive_args, list):
         num_tasks = len(drive_args)
 
         components = []
         num_blocks = np.prod(dim_else)
-        for iresult in range(num_tasks):
-            start, end = np.arange(iresult, iresult + 2) * num_blocks
+        for itask in range(num_tasks):
+            start, end = np.arange(itask, itask + 2) * num_blocks
             components.append(extract_fullop_components(block_components[start:end]))
 
         if save_result_to:
             num_digits = int(np.log10(num_tasks)) + 1
             fmt = f'%0{num_digits}d'
 
-            for iresult in range(len(drive_args)):
-                start, end = np.arange(iresult, iresult + 2) * num_blocks
+            for itask in range(num_tasks):
+                start, end = np.arange(itask, itask + 2) * num_blocks
                 offset_components = extract_fullop_components(block_offsets[start:end])
-                save_fit_result(os.path.join(save_result_to, fmt % iresult), comp_dim, fit_range,
-                                components[iresult], offset_components)
+                save_fit_result(os.path.join(save_result_to, fmt % itask), comp_dim,
+                                fit_range, components[itask], offset_components, fixed)
+
     else:
         # I don't necessarily have to reconstruct the block Hamiltonians (can extract the
         # diagonals of the control qudits for each of I, X, Y, ...) but it's easier to do so
@@ -311,7 +314,8 @@ def find_heff_blkdiag(
 
         if save_result_to:
             offset_components = extract_fullop_components(block_offsets)
-            save_fit_result(save_result_to, comp_dim, fit_range, components, offset_components)
+            save_fit_result(save_result_to, comp_dim, fit_range, components, offset_components,
+                            fixed)
 
     logger.setLevel(original_log_level)
 
@@ -341,7 +345,7 @@ def add_drive_for_heff(
             max_frequency = max(np.amax(freq) for freq in frequency)
             max_cycle = 2. * np.pi / max_frequency
         else:
-            max_cycle = 2. * np.pi / hgen_drv.max_frequency(frame='lab')
+            max_cycle = 2. * np.pi / hgen.max_frequency(frame='lab')
 
         pulse_shape = np.array(pulse_shape) * max_cycle
 
@@ -399,7 +403,7 @@ def add_drive_for_heff(
             tlist = list(hgen_drv.make_tlist(freq_args=darg, **tlist_args)
                          for darg in drive_args)
     else:
-        num_points = int(np.ceil(num_flattop_points * duration / width))
+        num_points = int(np.ceil(num_flattop_points * duration / width)) + 1
         tlist = np.linspace(0., duration, num_points)
 
     time_range = ((duration - width) / 2., (duration + width) / 2.)
@@ -422,7 +426,7 @@ def heff_fit(
     convergence_window: int = 5,
     min_fidelity: float = 0.9,
     zero_suppression: bool = True,
-    return_offset: bool = False,
+    return_aux: bool = False,
     save_result_to: Optional[str] = None,
     log_level: int = logging.WARNING,
     logger_name: str = __name__
@@ -468,14 +472,14 @@ def heff_fit(
     if time_range is None:
         time_range = (0., times)
 
-    ## Time bins for the GaussianSquare plateau
+    # Time bins for the GaussianSquare plateau
     flat_start = np.searchsorted(times, time_range[0], 'right') - 1
     flat_end = np.searchsorted(times, time_range[1], 'right') - 1
 
-    ## Truncate the unitaries if comp_dim is less than the system dimension
+    # Truncate the unitaries if comp_dim is less than the system dimension
     time_evolution = truncate_matrix(unitaries, frame.dim, comp_dim)
 
-    ## Find the initial values for the fit
+    # Find the initial values for the fit
     logger.info('Determining the initial values for Heff and offset..')
 
     heff_init, fixed, offset_init = _find_init(time_evolution, times, comp_dim,
@@ -488,7 +492,7 @@ def heff_fit(
     logger.debug('Fixed components: %s', fixed)
     logger.debug('Offset initial values: %s', offset_init)
 
-    ## Time normalization: make tlist equivalent to arange(len(tlist)) / len(tlist)
+    # Time normalization: make tlist equivalent to arange(len(tlist)) / len(tlist)
     # Normalize the tlist and Heff components for a better numerical stability in fit
     time_norm = times[-1] + times[1]
     tlist_full = times.copy()
@@ -516,8 +520,9 @@ def heff_fit(
         logger.debug('Heff component values: %s', heff_compos / time_norm)
         logger.debug('Offset component values: %s', offset_compos)
 
-        ## Test the optimized values - is the minimum fidelity above the threshold?
-        fidelity = heff_fidelity(time_evolution[flat_start:flat_end + 1], heff_compos, offset_compos,
+        # Test the optimized values - is the minimum fidelity above the threshold?
+        fidelity = heff_fidelity(time_evolution[flat_start:flat_end + 1], heff_compos,
+                                 offset_compos,
                                  tlist_full[flat_start:flat_end + 1] - tlist_full[flat_start])
         minf = np.amin(fidelity)
 
@@ -544,14 +549,16 @@ def heff_fit(
     if intermediate_results is not None:
         intermediate_results['heff_compos'] /= time_norm
 
+    fit_range = (fit_start, fit_end)
+
     if save_result_to:
-        save_fit_result(save_result_to, comp_dim, (fit_start, fit_end), heff_compos, offset_compos,
+        save_fit_result(save_result_to, comp_dim, fit_range, heff_compos, offset_compos,
                         fixed, intermediate_results)
 
     logger.setLevel(original_log_level)
 
-    if return_offset:
-        return heff_compos, offset_compos
+    if return_aux:
+        return heff_compos, offset_compos, fit_range, fixed, intermediate_results
     else:
         return heff_compos
 
@@ -562,7 +569,7 @@ def save_fit_result(
     fit_range: Tuple[float, float],
     components: np.ndarray,
     offset_components: np.ndarray,
-    fixed: Optional[np.ndarray] = None,
+    fixed: np.ndarray,
     intermediate_results: Optional[Dict[str, np.ndarray]] = None
 ):
     with h5py.File(f'{save_result_to}.h5', 'a') as out:
@@ -601,13 +608,14 @@ def _find_init(
     if isinstance(init, np.ndarray):
         heff_init = init
     else:
-        ## 1. Set the initial Heff values from a slope estimate
-        du = unitaries[flat_start + 1:flat_end] @ unitaries[flat_start:flat_end - 1].conjugate().transpose(0, 2, 1)
+        # 1. Set the initial Heff values from a slope estimate
+        du = (unitaries[flat_start + 1:flat_end]
+              @ unitaries[flat_start:flat_end - 1].conjugate().transpose(0, 2, 1))
         dgen_compos = paulis.components(-matrix_angle(du), dim=dim).real
         dgen_slopes = np.moveaxis(dgen_compos, 0, -1) / np.diff(tlist[flat_start:flat_end])
         heff_init = np.mean(dgen_slopes, axis=-1)
 
-        ## 2. Find off-diagonals with finite values under no drive -> static terms; zero slope
+        # 2. Find off-diagonals with finite values under no drive -> static terms; zero slope
         if hstat_lab is not None:
             parameters = PulseSimParameters(sim_frame, tlist)
 
@@ -627,7 +635,7 @@ def _find_init(
 
             heff_init[finite_offdiag] = 0.
 
-        ## 3. Find finite values converging to zero at the end of the pulse -> zero slope & offset
+        # 3. Find finite values converging to zero at the end of the pulse -> zero slope & offset
 
         is_significant = np.any(np.abs(generator_compos) > 0.1, axis=0)
         quiet_at_end = (np.abs(generator_compos[-1]) <= 0.01 * np.amax(generator_compos, axis=0))
@@ -640,7 +648,7 @@ def _find_init(
         if zero_suppression:
             fixed[converges] = True
 
-        ## 4. Values set by hand
+        # 4. Values set by hand
 
         if isinstance(init, dict):
             for key, value in init.items():
@@ -660,6 +668,7 @@ def _find_init(
 _vexpm = jax.vmap(jax.scipy.linalg.expm, in_axes=0, out_axes=0)
 _matexp = partial(matrix_exp, hermitian=-1, npmod=jnp)
 
+
 def _maximize_fidelity(
     time_evolution: np.ndarray,
     tlist: np.ndarray,
@@ -675,10 +684,10 @@ def _maximize_fidelity(
     return_intermediate: bool,
     logger: logging.Logger
 ) -> Tuple[np.ndarray, np.ndarray]:
-    ## Set up the Pauli product basis of the space of Hermitian operators
+    # Set up the Pauli product basis of the space of Hermitian operators
     basis = paulis.paulis(dim)
 
-    ## Static and dynamic Heff components and basis list
+    # Static and dynamic Heff components and basis list
     floating = np.logical_not(fixed)
 
     heff_static = np.tensordot(heff_init[fixed], basis[fixed], (0, 0))
@@ -687,7 +696,7 @@ def _maximize_fidelity(
     offset_init_flat = offset_init.reshape(-1)[1:]
     offset_basis = basis.reshape(-1, *basis.shape[-2:])[1:]
 
-    ## Loss function
+    # Loss function
     def loss_fn(heff_compos, offset_compos):
         # The following basically computes the same thing as heff_tools.heff_fidelity.
         # We need to reimplement the fidelity calculation here because the gradient
@@ -704,8 +713,8 @@ def _maximize_fidelity(
         fidelity = trace_norm_squared(target, npmod=jnp)
         return -jnp.mean(fidelity)
 
-    ## Minimize
-    logger.debug('Minimizing using JAX device %s', jax.config.jax_default_device)
+    # Minimize
+    logger.debug('Minimizing using JAX device %s', jax.default_device)
     if optimizer == 'minuit':
         heff_compos, offset_compos = _minimize_minuit(loss_fn, heff_init_floating, offset_init_flat,
                                                       logger)
@@ -717,7 +726,7 @@ def _maximize_fidelity(
                                                       logger)
         intermediate_results = None
     elif optimizer in ['adam']:
-        ## Set up the optimizer, loss & grad functions, and the parameter update function
+        # Set up the optimizer, loss & grad functions, and the parameter update function
         if not isinstance(optimizer_args, tuple):
             optimizer_args = (optimizer_args,)
 
@@ -729,6 +738,8 @@ def _maximize_fidelity(
                                                                      max_updates, convergence,
                                                                      convergence_window,
                                                                      return_intermediate, logger)
+    else:
+        raise NotImplementedError(f'Unknown optimizer {optimizer}')
 
     if not np.all(np.isfinite(heff_compos)) or not np.all(np.isfinite(offset_compos)):
         raise ValueError('Optimized components not finite')
@@ -814,12 +825,12 @@ def _minimize(
         new_params = optax.apply_updates(opt_params, updates)
         return new_params, opt_state, loss, gradient
 
-    ## Start the fidelity maximization loop
+    # Start the fidelity maximization loop
     logger.info('Starting maximization loop..')
 
     opt_params = {'heff': jnp.array(heff_init), 'offset': jnp.array(offset_init)}
     opt_state = grad_trans.init(opt_params)
-    ## Compile the step function
+    # Compile the step function
     step = step.lower(opt_params, opt_state).compile()
 
     losses = np.ones(convergence_window)
