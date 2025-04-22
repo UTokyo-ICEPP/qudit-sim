@@ -31,7 +31,7 @@ FrequencySpec = Union[float, List[float], np.ndarray]
 AmplitudeSpec = Union[float, complex, List[Union[float, complex]], np.ndarray]
 InitSpec = Union[np.ndarray, Dict[Tuple[int, ...], Union[float, Tuple[float, bool]]]]
 
-logger = logging.getLogger(__name__)
+LOG = logging.getLogger(__name__)
 
 default_optimizer_args = optax.exponential_decay(0.001, 10, 0.99)
 
@@ -111,8 +111,8 @@ def find_heff(
         An array of Pauli components or a list thereof (if a list is passed to ``frequency`` and/or
         ``amplitude``).
     """
-    original_log_level = logger.level
-    logger.setLevel(log_level)
+    original_log_level = LOG.level
+    LOG.setLevel(log_level)
 
     if pulse_shape is None:
         use_cycles = True
@@ -123,7 +123,7 @@ def find_heff(
         use_cycles = False
 
     if pulse_sim_solver == 'qutip' and num_points is not None:
-        logger.warn('Number of points is manually set when pulse_sim_solver is qutip. Make sure'
+        LOG.warning('Number of points is manually set when pulse_sim_solver is qutip. Make sure'
                     ' that sufficient number of points is used.')
 
     hgen_drv, tlist, drive_args, time_range = add_drive_for_heff(hgen, qudit, frequency, amplitude,
@@ -178,7 +178,7 @@ def find_heff(
                               min_fidelity=min_fidelity, zero_suppression=zero_suppression,
                               save_result_to=save_result_to, log_level=log_level)
 
-    logger.setLevel(original_log_level)
+    LOG.setLevel(original_log_level)
 
     return components
 
@@ -205,8 +205,8 @@ def find_heff_blkdiag(
     log_level: int = logging.WARNING
 ):
     """Find the effective Hamiltonian assuming a block-diagonal form."""
-    original_log_level = logger.level
-    logger.setLevel(log_level)
+    original_log_level = LOG.level
+    LOG.setLevel(log_level)
 
     if pulse_shape is None:
         use_cycles = True
@@ -217,7 +217,7 @@ def find_heff_blkdiag(
         use_cycles = False
 
     if pulse_sim_solver == 'qutip' and num_points is not None:
-        logger.warn('Number of points is manually set when pulse_sim_solver is qutip. Make sure'
+        LOG.warning('Number of points is manually set when pulse_sim_solver is qutip. Make sure'
                     ' that sufficient number of points is used.')
 
     hgen_drv, tlist, drive_args, time_range = add_drive_for_heff(hgen, qudit, frequency, amplitude,
@@ -317,7 +317,7 @@ def find_heff_blkdiag(
             save_fit_result(save_result_to, comp_dim, fit_range, components, offset_components,
                             fixed)
 
-    logger.setLevel(original_log_level)
+    LOG.setLevel(original_log_level)
 
     return components
 
@@ -537,7 +537,7 @@ def heff_fit(
             fit_end = int(fit_end / 1.5)
 
             if fit_end <= 64:
-                logger.warning('Reached the minimum possible fit_end value %d.', fit_end)
+                logger.warninging('Reached the minimum possible fit_end value %d.', fit_end)
                 break
 
             logger.info('Reducing fit_end to %d.', fit_end)
@@ -757,7 +757,7 @@ def _minimize_minuit(
     offset_init: np.ndarray,
     logger: logging.Logger
 ):
-    from iminuit import Minuit
+    from iminuit import Minuit  # pylint: disable=import-outside-toplevel
 
     initial = jnp.concatenate((heff_init, offset_init))
     num_heff = heff_init.shape[0]
